@@ -16,7 +16,7 @@
       path_secret: bot-a-path
       secret_token: bot-a-secret
       public_url: https://example.com/telegram/webhook/bot-a/bot-a-path
-    adapter: codex
+    adapter: gemini
     codex:
       model: gpt-5
       sandbox: workspace-write

@@ -28,7 +28,7 @@ class BotCatalogAddRequest(BaseModel):
     bot_id: str | None = None
     token: str | None = None
     name: str | None = None
-    adapter: Literal["codex", "gemini", "claude", "echo"] = "codex"
+    adapter: Literal["codex", "gemini", "claude", "echo"] = "gemini"
 
 
 class BotCatalogDeleteRequest(BaseModel):

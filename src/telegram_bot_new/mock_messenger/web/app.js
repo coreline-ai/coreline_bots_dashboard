@@ -1791,7 +1791,7 @@ async function addProfileAutomatically() {
   const chatId = current ? numberOrDefault(current.chat_id, 1001) : numberOrDefault(chatIdInput.value, 1001);
   const userId = current ? numberOrDefault(current.user_id, 9001) : numberOrDefault(userIdInput.value, 9001);
   const currentCatalogRow = current ? catalogByBotId.get(String(current.bot_id || "")) : null;
-  const adapter = String(currentCatalogRow?.default_adapter || "codex");
+  const adapter = String(currentCatalogRow?.default_adapter || "gemini");
 
   const response = await requestJson("/_mock/bot_catalog/add", {
     method: "POST",

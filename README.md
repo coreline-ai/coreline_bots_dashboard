@@ -197,7 +197,7 @@ bots:
     mode: embedded
     telegram_token: "123456:abc"
     owner_user_id: 111111111
-    adapter: codex
+    adapter: gemini
     webhook:
       path_secret: bot-a-path
       secret_token: bot-a-secret

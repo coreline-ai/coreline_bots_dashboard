@@ -67,7 +67,7 @@ class BotConfig(BaseModel):
     telegram_token: str
     owner_user_id: int | None = None
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
-    adapter: AdapterName = "codex"
+    adapter: AdapterName = "gemini"
     codex: CodexConfig = Field(default_factory=CodexConfig)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)

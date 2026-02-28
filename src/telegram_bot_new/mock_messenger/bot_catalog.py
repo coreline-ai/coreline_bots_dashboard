@@ -73,7 +73,7 @@ def build_bot_catalog(
 def create_dynamic_embedded_bot(
     *,
     bots_config_path: str | Path,
-    adapter: str = "codex",
+    adapter: str = "gemini",
     bot_id: str | None = None,
     token: str | None = None,
     name: str | None = None,
@@ -102,7 +102,7 @@ def create_dynamic_embedded_bot(
         "name": resolved_name,
         "mode": "embedded",
         "telegram_token": resolved_token,
-        "adapter": adapter if adapter in SUPPORTED_AGENTS else "codex",
+        "adapter": adapter if adapter in SUPPORTED_AGENTS else "gemini",
         "webhook": {
             "path_secret": f"{resolved_bot_id}-path",
             "secret_token": f"{resolved_bot_id}-secret",
