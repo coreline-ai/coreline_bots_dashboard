@@ -486,9 +486,21 @@ button:disabled {
 
 .bot-sidebar {
   overflow: hidden;
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto minmax(72px, 16%);
+  display: flex;
+  flex-direction: column;
   gap: 6px;
+}
+
+.bot-sidebar-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-right: 2px;
 }
 
 .sidebar-row {
@@ -514,6 +526,7 @@ button:disabled {
 
 .bot-list {
   min-height: 0;
+  max-height: none;
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-gutter: stable;
@@ -672,6 +685,42 @@ button:disabled {
   font-size: 12px;
 }
 
+.debate-section {
+  display: grid;
+  gap: 6px;
+}
+
+.debate-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.debate-section-head h3 {
+  margin: 0;
+}
+
+.debate-toggle-btn {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  margin-top: 0;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+
+.debate-panel-body {
+  min-height: 0;
+}
+
+.debate-panel-body.is-collapsed {
+  display: none;
+}
+
 .parallel-result-row {
   display: grid;
   grid-template-columns: 1.2fr 0.72fr 1fr;
@@ -707,6 +756,90 @@ button:disabled {
 .parallel-status-wait {
   color: #0369a1;
   font-weight: 700;
+}
+
+.debate-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-alt);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.debate-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.debate-meta {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+#debate-stop-btn {
+  width: auto;
+  margin-top: 0;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  background: #fee2e2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+}
+
+#debate-stop-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.debate-current-turn {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.debate-turns,
+.debate-errors {
+  max-height: 180px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.debate-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  background: var(--panel);
+}
+
+.debate-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.debate-row-detail {
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.debate-row-status-success {
+  color: #15803d;
+}
+
+.debate-row-status-error,
+.debate-row-status-timeout,
+.debate-row-status-template_error,
+.debate-row-status-stopped,
+.debate-row-status-skipped {
+  color: #b91c1c;
 }
 
 .timeline {
@@ -1178,7 +1311,7 @@ dialog::backdrop {
   }
 
   .bot-sidebar {
-    grid-template-rows: auto auto auto minmax(180px, 1fr) auto minmax(72px, 0.4fr);
+    min-height: 240px;
   }
 
   .quick-actions {

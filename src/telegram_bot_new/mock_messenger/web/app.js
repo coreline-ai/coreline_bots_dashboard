@@ -28,6 +28,14 @@ const parallelResults = document.getElementById("parallel-results");
 const addProfileBtn = document.getElementById("add-profile-btn");
 const parallelSendBtn = document.getElementById("parallel-send-btn");
 const parallelMessageInput = document.getElementById("parallel-message-input");
+const debatePanel = document.getElementById("debate-panel");
+const debatePanelBody = document.getElementById("debate-panel-body");
+const debateMeta = document.getElementById("debate-meta");
+const debateCurrentTurn = document.getElementById("debate-current-turn");
+const debateTurns = document.getElementById("debate-turns");
+const debateErrors = document.getElementById("debate-errors");
+const debateStopBtn = document.getElementById("debate-stop-btn");
+const toggleDebatePanelBtn = document.getElementById("toggle-debate-panel-btn");
 const profileDialog = document.getElementById("profile-dialog");
 const profileForm = document.getElementById("profile-form");
 const profileLabelInput = document.getElementById("profile-label-input");
@@ -54,6 +62,7 @@ const STORAGE_KEY = "mock_messenger_ui_state_v3";
 const THEME_STORAGE_KEY = "mock_messenger_theme";
 const SESSION_SECTION_STORAGE_KEY = "mock_messenger_session_section_hidden";
 const AGENT_SECTION_STORAGE_KEY = "mock_messenger_agent_section_hidden";
+const DEBATE_PANEL_COLLAPSE_STORAGE_KEY = "mock_messenger_debate_panel_hidden";
 const FIXED_THEME = "light";
 const SCROLL_BOTTOM_THRESHOLD = 24;
 const AUTO_REFRESH_INTERVAL_MS = 1000;
@@ -103,8 +112,13 @@ let catalogByBotId = new Map();
 let profileDiagnostics = new Map();
 let uiState = {
   selected_profile_id: null,
-  profiles: []
+  profiles: [],
+  active_debate_id: null
 };
+let parallelSendBusy = false;
+let debateBusy = false;
+let debatePollingTimer = null;
+let debateLastStatus = "";
 
 function makeProfileId() {
   if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
@@ -174,7 +188,8 @@ function loadState() {
 
     return {
       selected_profile_id: parsed.selected_profile_id ? String(parsed.selected_profile_id) : null,
-      profiles
+      profiles,
+      active_debate_id: parsed.active_debate_id ? String(parsed.active_debate_id) : null
     };
   } catch {
     return null;
@@ -281,6 +296,42 @@ function initSectionToggles() {
       applyAgentSectionVisibility(nextHidden);
     });
   }
+}
+
+function renderDebatePanelToggleButton(hidden) {
+  if (!toggleDebatePanelBtn) {
+    return;
+  }
+  const icon = hidden ? "expand_more" : "expand_less";
+  const label = hidden ? "Debate Panel 펼치기" : "Debate Panel 접기";
+  toggleDebatePanelBtn.innerHTML = [
+    `<span class="material-symbols-outlined" aria-hidden="true">${icon}</span>`,
+    `<span class="sr-only">${label}</span>`
+  ].join("");
+  toggleDebatePanelBtn.title = label;
+  toggleDebatePanelBtn.setAttribute("aria-label", label);
+  toggleDebatePanelBtn.setAttribute("aria-expanded", hidden ? "false" : "true");
+}
+
+function applyDebatePanelVisibility(hidden) {
+  if (!debatePanelBody) {
+    return;
+  }
+  debatePanelBody.classList.toggle("is-collapsed", hidden);
+  renderDebatePanelToggleButton(hidden);
+}
+
+function initDebatePanelToggle() {
+  if (!toggleDebatePanelBtn || !debatePanelBody) {
+    return;
+  }
+  const hidden = isSectionHidden(DEBATE_PANEL_COLLAPSE_STORAGE_KEY);
+  applyDebatePanelVisibility(hidden);
+  toggleDebatePanelBtn.addEventListener("click", () => {
+    const nextHidden = !debatePanelBody.classList.contains("is-collapsed");
+    localStorage.setItem(DEBATE_PANEL_COLLAPSE_STORAGE_KEY, nextHidden ? "1" : "0");
+    applyDebatePanelVisibility(nextHidden);
+  });
 }
 
 function upsertCurrentProfileFromInputs() {
@@ -404,11 +455,117 @@ function renderParallelResults(rows) {
 }
 
 function setParallelSendBusy(busy) {
+  parallelSendBusy = Boolean(busy);
+  updateParallelSendButtonState();
+}
+
+function setDebateBusy(busy) {
+  debateBusy = Boolean(busy);
+  updateParallelSendButtonState();
+}
+
+function updateParallelSendButtonState() {
   if (!parallelSendBtn) {
     return;
   }
-  parallelSendBtn.disabled = busy;
-  parallelSendBtn.textContent = busy ? "병렬 전송 실행 중..." : "선택 병렬 전송";
+  const disabled = parallelSendBusy || debateBusy;
+  parallelSendBtn.disabled = disabled;
+  if (parallelSendBusy) {
+    parallelSendBtn.textContent = "병렬 전송 실행 중...";
+    return;
+  }
+  if (debateBusy) {
+    parallelSendBtn.textContent = "토론 진행 중...";
+    return;
+  }
+  parallelSendBtn.textContent = "선택 병렬 전송";
+}
+
+function summarizeDebateText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "(empty)";
+  }
+  if (text.length <= 160) {
+    return text;
+  }
+  return `${text.slice(0, 160)}...`;
+}
+
+function renderDebateList(target, rows, emptyText, detailKey) {
+  if (!target) {
+    return;
+  }
+  target.innerHTML = "";
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "debate-row";
+    empty.textContent = emptyText;
+    target.appendChild(empty);
+    return;
+  }
+
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = "debate-row";
+
+    const head = document.createElement("div");
+    head.className = "debate-row-head";
+    const roundNo = Number(row.round_no || 0);
+    const label = String(row.speaker_label || row.speaker_bot_id || "bot");
+    const status = String(row.status || "unknown");
+    head.textContent = `R${roundNo} · ${label} · ${status}`;
+    head.classList.add(`debate-row-status-${status}`);
+
+    const detail = document.createElement("div");
+    detail.className = "debate-row-detail";
+    detail.textContent = summarizeDebateText(row?.[detailKey] || row?.error_text || row?.response_text || status);
+
+    item.appendChild(head);
+    item.appendChild(detail);
+    target.appendChild(item);
+  }
+}
+
+function renderDebatePanel(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : null;
+  if (!data) {
+    if (debateMeta) {
+      debateMeta.textContent = "토론이 없습니다.";
+    }
+    if (debateCurrentTurn) {
+      debateCurrentTurn.textContent = "대기 중";
+    }
+    renderDebateList(debateTurns, [], "턴 로그가 없습니다.", "response_text");
+    renderDebateList(debateErrors, [], "오류가 없습니다.", "error_text");
+    if (debateStopBtn) {
+      debateStopBtn.disabled = true;
+    }
+    setDebateBusy(false);
+    return;
+  }
+
+  const debateId = String(data.debate_id || "");
+  const topic = String(data.topic || "");
+  const status = String(data.status || "unknown");
+  const currentTurn = data.current_turn && typeof data.current_turn === "object" ? data.current_turn : null;
+  const isActive = status === "queued" || status === "running";
+
+  if (debateMeta) {
+    debateMeta.textContent = `ID=${debateId} · ${status.toUpperCase()} · ${topic}`;
+  }
+  if (debateCurrentTurn) {
+    debateCurrentTurn.textContent = currentTurn
+      ? `현재 턴: R${Number(currentTurn.round || 0)} / ${String(currentTurn.speaker_label || currentTurn.speaker_bot_id || "bot")}`
+      : "현재 턴 없음";
+  }
+  renderDebateList(debateTurns, Array.isArray(data.turns) ? data.turns : [], "턴 로그가 없습니다.", "response_text");
+  renderDebateList(debateErrors, Array.isArray(data.errors) ? data.errors : [], "오류가 없습니다.", "error_text");
+
+  if (debateStopBtn) {
+    debateStopBtn.disabled = !isActive || !debateId;
+  }
+  setDebateBusy(isActive);
 }
 
 function syncWebhookFormFromProfile(profile) {
@@ -706,6 +863,8 @@ async function hydrateInputs() {
   hydrateProfileDialog();
   renderBotList();
   renderParallelResults([]);
+  renderDebatePanel(null);
+  updateParallelSendButtonState();
   saveState();
 }
 
@@ -1506,6 +1665,212 @@ async function waitForParallelOutcome(profile, baselineMessageId, timeoutSec = 6
   return { done: true, status: "FAIL", detail: "timeout" };
 }
 
+function parseDebateCommand(rawText) {
+  const text = String(rawText || "").trim();
+  if (!/^\/debate(?:\s|$)/i.test(text)) {
+    return null;
+  }
+
+  let rest = text.replace(/^\/debate\b/i, "").trim();
+  if (!rest) {
+    return { error: "토론 주제를 입력하세요. 예: /debate AI가 개발자를 대체할까?" };
+  }
+
+  let rounds = 3;
+  let maxTurnSec = 90;
+  let freshSession = true;
+
+  const takeIntOption = (name, min, max) => {
+    const optionRe = new RegExp(`(?:^|\\s)--${name}\\s+(\\d+)(?=\\s|$)`, "i");
+    const match = rest.match(optionRe);
+    if (!match) {
+      return null;
+    }
+    const value = Number(match[1]);
+    rest = rest.replace(match[0], " ").trim();
+    if (!Number.isFinite(value) || value < min || value > max) {
+      return { error: `--${name} 값은 ${min}~${max} 범위여야 합니다.` };
+    }
+    return value;
+  };
+
+  const roundsValue = takeIntOption("rounds", 1, 10);
+  if (roundsValue && typeof roundsValue === "object" && roundsValue.error) {
+    return roundsValue;
+  }
+  if (typeof roundsValue === "number") {
+    rounds = Math.trunc(roundsValue);
+  }
+
+  const maxTurnValue = takeIntOption("max-turn-sec", 10, 300);
+  if (maxTurnValue && typeof maxTurnValue === "object" && maxTurnValue.error) {
+    return maxTurnValue;
+  }
+  if (typeof maxTurnValue === "number") {
+    maxTurnSec = Math.trunc(maxTurnValue);
+  }
+
+  if (/(?:^|\s)--keep-session(?:\s|$)/i.test(rest)) {
+    freshSession = false;
+    rest = rest.replace(/(?:^|\s)--keep-session(?=\s|$)/gi, " ").trim();
+  }
+
+  const unknownOption = rest.match(/--[A-Za-z0-9_-]+/);
+  if (unknownOption) {
+    return { error: `알 수 없는 옵션: ${unknownOption[0]}` };
+  }
+
+  const topic = rest.replace(/\s+/g, " ").trim();
+  if (!topic) {
+    return { error: "토론 주제를 입력하세요." };
+  }
+  return {
+    topic,
+    rounds,
+    max_turn_sec: maxTurnSec,
+    fresh_session: freshSession
+  };
+}
+
+function isDebateTerminalStatus(status) {
+  return status === "completed" || status === "stopped" || status === "failed";
+}
+
+function stopDebatePolling() {
+  if (debatePollingTimer) {
+    clearInterval(debatePollingTimer);
+    debatePollingTimer = null;
+  }
+}
+
+async function pollDebateStatus(debateId) {
+  const id = String(debateId || "").trim();
+  if (!id) {
+    stopDebatePolling();
+    renderDebatePanel(null);
+    uiState.active_debate_id = null;
+    saveState();
+    return;
+  }
+
+  try {
+    const response = await requestJson(`/_mock/debate/${encodeURIComponent(id)}`);
+    const snapshot = response?.result || null;
+    if (!snapshot) {
+      return;
+    }
+    const status = String(snapshot.status || "unknown");
+    renderDebatePanel(snapshot);
+    if (status !== debateLastStatus) {
+      debateLastStatus = status;
+      if (isDebateTerminalStatus(status)) {
+        appendBubble("meta", `토론 ${status}: ${String(snapshot.topic || "")}`);
+      }
+    }
+
+    if (isDebateTerminalStatus(status)) {
+      stopDebatePolling();
+      uiState.active_debate_id = null;
+    } else {
+      uiState.active_debate_id = String(snapshot.debate_id || id);
+    }
+    saveState();
+  } catch (error) {
+    if (String(error?.message || "").includes("404")) {
+      stopDebatePolling();
+      renderDebatePanel(null);
+      uiState.active_debate_id = null;
+      saveState();
+      return;
+    }
+    appendBubble("meta", `debate poll error: ${error.message}`);
+  }
+}
+
+function startDebatePolling(debateId) {
+  stopDebatePolling();
+  const id = String(debateId || "").trim();
+  if (!id) {
+    return;
+  }
+  void pollDebateStatus(id);
+  debatePollingTimer = setInterval(() => {
+    void pollDebateStatus(id);
+  }, 1000);
+}
+
+async function recoverActiveDebate() {
+  try {
+    const active = await requestJson("/_mock/debate/active");
+    const snapshot = active?.result || null;
+    if (!snapshot || !snapshot.debate_id) {
+      uiState.active_debate_id = null;
+      saveState();
+      renderDebatePanel(null);
+      return;
+    }
+    uiState.active_debate_id = String(snapshot.debate_id);
+    saveState();
+    renderDebatePanel(snapshot);
+    if (isDebateTerminalStatus(String(snapshot.status || ""))) {
+      return;
+    }
+    startDebatePolling(snapshot.debate_id);
+  } catch {
+    renderDebatePanel(null);
+  }
+}
+
+async function runDebateFlow(targets, parsedCommand) {
+  if (!parsedCommand || parsedCommand.error) {
+    const detail = parsedCommand?.error || "토론 명령 파싱 실패";
+    renderParallelResults([{ label: "토론", status: "FAIL", detail }]);
+    appendBubble("meta", detail);
+    return;
+  }
+  if (debateBusy) {
+    renderParallelResults([{ label: "토론", status: "FAIL", detail: "이미 진행 중인 토론이 있습니다." }]);
+    appendBubble("meta", "이미 진행 중인 토론이 있습니다.");
+    return;
+  }
+
+  const payload = {
+    topic: parsedCommand.topic,
+    rounds: parsedCommand.rounds,
+    max_turn_sec: parsedCommand.max_turn_sec,
+    fresh_session: parsedCommand.fresh_session,
+    profiles: targets.map((profile) => ({
+      profile_id: String(profile.profile_id),
+      label: String(profile.label || profile.bot_id || "Bot"),
+      bot_id: String(profile.bot_id || ""),
+      token: String(profile.token || ""),
+      chat_id: Number(profile.chat_id),
+      user_id: Number(profile.user_id)
+    }))
+  };
+
+  try {
+    const response = await requestJson("/_mock/debate/start", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    const snapshot = response?.result || null;
+    renderParallelResults([{ label: "토론", status: "PASS", detail: "started" }]);
+    renderDebatePanel(snapshot);
+    const debateId = String(snapshot?.debate_id || "");
+    uiState.active_debate_id = debateId || null;
+    debateLastStatus = String(snapshot?.status || "");
+    saveState();
+    if (debateId) {
+      startDebatePolling(debateId);
+    }
+    appendBubble("meta", `토론 시작: ${payload.topic}`);
+  } catch (error) {
+    renderParallelResults([{ label: "토론", status: "FAIL", detail: String(error.message || error) }]);
+    appendBubble("meta", `토론 시작 실패: ${error.message}`);
+  }
+}
+
 async function runParallelSend() {
   const targets = uiState.profiles.filter((profile) => profile.selected_for_parallel !== false);
   if (targets.length < 2) {
@@ -1535,6 +1900,12 @@ async function runParallelSend() {
   }
   if (parallelMessageInput && !parallelMessageInput.value.trim()) {
     parallelMessageInput.value = text;
+  }
+
+  const debateCommand = parseDebateCommand(text);
+  if (debateCommand !== null) {
+    await runDebateFlow(targets, debateCommand);
+    return;
   }
 
   const results = targets.map((profile) => ({
@@ -2044,6 +2415,22 @@ if (parallelMessageInput) {
   });
 }
 
+if (debateStopBtn) {
+  debateStopBtn.addEventListener("click", async () => {
+    const debateId = String(uiState.active_debate_id || "").trim();
+    if (!debateId) {
+      return;
+    }
+    try {
+      await requestJson(`/_mock/debate/${encodeURIComponent(debateId)}/stop`, { method: "POST" });
+      appendBubble("meta", "토론 중단 요청을 전송했습니다.");
+      await pollDebateStatus(debateId);
+    } catch (error) {
+      appendBubble("meta", `토론 중단 실패: ${error.message}`);
+    }
+  });
+}
+
 if (profileCancelBtn) {
   profileCancelBtn.addEventListener("click", closeProfileDialog);
 }
@@ -2082,9 +2469,11 @@ setInterval(() => {
 }, AUTO_REFRESH_INTERVAL_MS);
 initTheme();
 initSectionToggles();
+initDebatePanelToggle();
 hydrateInputs().then(async () => {
   wireQuickActions();
   updateEssentialToggleButton();
+  await recoverActiveDebate();
   await refreshProfileDiagnostics();
   await refresh();
 });

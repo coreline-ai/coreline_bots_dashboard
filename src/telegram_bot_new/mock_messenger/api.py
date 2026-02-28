@@ -19,9 +19,15 @@ from telegram_bot_new.mock_messenger.bot_catalog import (
     fetch_embedded_runtime,
     infer_session_view_from_messages,
 )
+from telegram_bot_new.mock_messenger.debate import (
+    ActiveDebateExistsError,
+    DebateNotFoundError,
+    DebateOrchestrator,
+)
 from telegram_bot_new.mock_messenger.schemas import (
     BotCatalogAddRequest,
     BotCatalogDeleteRequest,
+    DebateStartRequest,
     MockClearMessagesRequest,
     MockSendRequest,
     RateLimitRuleRequest,
@@ -41,6 +47,41 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="Mock Telegram Messenger", version="0.1.0")
     catalog_mutation_lock = asyncio.Lock()
+
+    async def _enqueue_and_dispatch_user_message(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        queued = store.enqueue_user_message(
+            token=token,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+        )
+
+        webhook_error: str | None = None
+        delivered_via_webhook = False
+        if queued["delivery_mode"] == "webhook" and isinstance(queued["webhook_url"], str):
+            delivered_via_webhook, webhook_error = await _post_webhook_update(
+                url=queued["webhook_url"],
+                secret_token=queued["webhook_secret"],
+                payload=queued["payload"],
+            )
+            if delivered_via_webhook:
+                store.mark_update_delivered(token=token, update_id=queued["update_id"])
+        return {
+            "update_id": queued["update_id"],
+            "delivery_mode": queued["delivery_mode"],
+            "delivered_via_webhook": delivered_via_webhook,
+            "webhook_error": webhook_error,
+        }
+
+    debate_orchestrator = DebateOrchestrator(
+        store=store,
+        send_user_message=_enqueue_and_dispatch_user_message,
+    )
+    app.state.debate_orchestrator = debate_orchestrator
+
+    @app.on_event("shutdown")
+    async def _shutdown_event() -> None:
+        await debate_orchestrator.shutdown()
 
     @app.get("/")
     async def root() -> RedirectResponse:
@@ -68,33 +109,74 @@ def create_app(
 
     @app.post("/_mock/send")
     async def mock_send(request: MockSendRequest) -> dict[str, Any]:
-        queued = store.enqueue_user_message(
-            token=request.token,
-            chat_id=request.chat_id,
-            user_id=request.user_id,
-            text=request.text,
+        result = await _enqueue_and_dispatch_user_message(
+            request.token,
+            int(request.chat_id),
+            int(request.user_id),
+            request.text,
         )
-
-        webhook_error: str | None = None
-        delivered_via_webhook = False
-        if queued["delivery_mode"] == "webhook" and isinstance(queued["webhook_url"], str):
-            delivered_via_webhook, webhook_error = await _post_webhook_update(
-                url=queued["webhook_url"],
-                secret_token=queued["webhook_secret"],
-                payload=queued["payload"],
-            )
-            if delivered_via_webhook:
-                store.mark_update_delivered(token=request.token, update_id=queued["update_id"])
 
         return {
             "ok": True,
-            "result": {
-                "update_id": queued["update_id"],
-                "delivery_mode": queued["delivery_mode"],
-                "delivered_via_webhook": delivered_via_webhook,
-                "webhook_error": webhook_error,
-            },
+            "result": result,
         }
+
+    @app.post("/_mock/debate/start")
+    async def start_debate(request: DebateStartRequest) -> dict[str, Any]:
+        if len(request.profiles) < 2:
+            raise HTTPException(status_code=400, detail="profiles must include at least two participants")
+
+        catalog_rows = build_bot_catalog(
+            bots_config_path=bots_config_path,
+            embedded_host=embedded_host,
+            embedded_base_port=embedded_base_port,
+        )
+        by_bot_id = {str(row.get("bot_id") or ""): row for row in catalog_rows}
+
+        participants: list[dict[str, Any]] = []
+        for profile in request.profiles:
+            row = by_bot_id.get(profile.bot_id)
+            if row is None:
+                raise HTTPException(status_code=400, detail=f"unknown bot_id: {profile.bot_id}")
+            expected_token = str(row.get("token") or "")
+            if expected_token != profile.token:
+                raise HTTPException(status_code=400, detail=f"token mismatch for bot_id: {profile.bot_id}")
+            participants.append(
+                {
+                    "profile_id": profile.profile_id,
+                    "label": profile.label,
+                    "bot_id": profile.bot_id,
+                    "token": profile.token,
+                    "chat_id": int(profile.chat_id),
+                    "user_id": int(profile.user_id),
+                    "adapter": str(row.get("default_adapter") or ""),
+                }
+            )
+
+        try:
+            result = await debate_orchestrator.start_debate(request=request, participants=participants)
+        except ActiveDebateExistsError as error:
+            raise HTTPException(status_code=409, detail=f"active debate already exists: {error}") from error
+        return {"ok": True, "result": result}
+
+    @app.get("/_mock/debate/active")
+    async def get_active_debate() -> dict[str, Any]:
+        return {"ok": True, "result": debate_orchestrator.get_active_debate_snapshot()}
+
+    @app.get("/_mock/debate/{debate_id}")
+    async def get_debate(debate_id: str) -> dict[str, Any]:
+        snapshot = debate_orchestrator.get_debate_snapshot(debate_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail=f"unknown debate_id: {debate_id}")
+        return {"ok": True, "result": snapshot}
+
+    @app.post("/_mock/debate/{debate_id}/stop")
+    async def stop_debate(debate_id: str) -> dict[str, Any]:
+        try:
+            result = await debate_orchestrator.stop_debate(debate_id)
+        except DebateNotFoundError as error:
+            raise HTTPException(status_code=404, detail=f"unknown debate_id: {error}") from error
+        return {"ok": True, "result": result}
 
     @app.get("/_mock/messages")
     async def get_messages(token: str, chat_id: int | None = None, limit: int = 200) -> dict[str, Any]:

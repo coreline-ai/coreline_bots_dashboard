@@ -142,3 +142,179 @@ test('parallel send succeeds across at least three selected bots', async ({ page
   await expect(page.locator('#parallel-results .parallel-status-fail')).toHaveCount(0);
   await expect(page.locator('#parallel-results .parallel-status-pass')).toHaveCount(3);
 });
+
+test('/debate command shows debate panel and completes', async ({ page }) => {
+  await page.route('**/_mock/debate/active', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, result: null }) });
+  });
+
+  let pollCount = 0;
+  await page.route('**/_mock/debate/start', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          debate_id: 'debate-e2e',
+          topic: '테스트 토론',
+          status: 'running',
+          rounds_total: 1,
+          max_turn_sec: 10,
+          fresh_session: true,
+          stop_requested: false,
+          created_at: Date.now(),
+          started_at: Date.now(),
+          finished_at: null,
+          error_summary: null,
+          current_turn: { round: 1, position: 1, speaker_bot_id: 'bot-a', speaker_label: 'Bot A', started_at: Date.now() },
+          turns: [],
+          errors: [],
+          participants: []
+        }
+      })
+    });
+  });
+
+  await page.route('**/_mock/debate/debate-e2e', async (route) => {
+    pollCount += 1;
+    const completed = pollCount >= 2;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          debate_id: 'debate-e2e',
+          topic: '테스트 토론',
+          status: completed ? 'completed' : 'running',
+          rounds_total: 1,
+          max_turn_sec: 10,
+          fresh_session: true,
+          stop_requested: false,
+          created_at: Date.now(),
+          started_at: Date.now(),
+          finished_at: completed ? Date.now() : null,
+          error_summary: null,
+          current_turn: completed
+            ? null
+            : { round: 1, position: 1, speaker_bot_id: 'bot-a', speaker_label: 'Bot A', started_at: Date.now() },
+          turns: completed
+            ? [
+                {
+                  id: 1,
+                  round_no: 1,
+                  speaker_position: 1,
+                  speaker_bot_id: 'bot-a',
+                  speaker_label: 'Bot A',
+                  prompt_text: 'prompt',
+                  response_text: '주장: A\n반박: B\n질문: C',
+                  status: 'success',
+                  error_text: null,
+                  started_at: Date.now(),
+                  finished_at: Date.now(),
+                  duration_ms: 120
+                }
+              ]
+            : [],
+          errors: [],
+          participants: []
+        }
+      })
+    });
+  });
+
+  await page.goto('/_mock/ui');
+  await page.click('#add-profile-btn');
+  await expect(page.locator('.bot-item')).toHaveCount(2);
+
+  await page.fill('#parallel-message-input', '/debate 테스트 토론 --rounds 1');
+  await page.click('#parallel-send-btn');
+
+  await expect(page.locator('#debate-meta')).toContainText('debate-e2e');
+  await expect(page.locator('#debate-meta')).toContainText('COMPLETED');
+  await expect(page.locator('#debate-turns .debate-row')).toHaveCount(1);
+});
+
+test('debate stop button requests stop and updates status', async ({ page }) => {
+  await page.route('**/_mock/debate/active', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, result: null }) });
+  });
+
+  let stopped = false;
+  await page.route('**/_mock/debate/start', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          debate_id: 'debate-stop',
+          topic: '중단 테스트',
+          status: 'running',
+          rounds_total: 1,
+          max_turn_sec: 10,
+          fresh_session: true,
+          stop_requested: false,
+          created_at: Date.now(),
+          started_at: Date.now(),
+          finished_at: null,
+          error_summary: null,
+          current_turn: { round: 1, position: 1, speaker_bot_id: 'bot-a', speaker_label: 'Bot A', started_at: Date.now() },
+          turns: [],
+          errors: [],
+          participants: []
+        }
+      })
+    });
+  });
+
+  await page.route('**/_mock/debate/debate-stop/stop', async (route) => {
+    stopped = true;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, result: { debate_id: 'debate-stop', status: 'stopped' } })
+    });
+  });
+
+  await page.route('**/_mock/debate/debate-stop', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          debate_id: 'debate-stop',
+          topic: '중단 테스트',
+          status: stopped ? 'stopped' : 'running',
+          rounds_total: 1,
+          max_turn_sec: 10,
+          fresh_session: true,
+          stop_requested: stopped,
+          created_at: Date.now(),
+          started_at: Date.now(),
+          finished_at: stopped ? Date.now() : null,
+          error_summary: null,
+          current_turn: stopped
+            ? null
+            : { round: 1, position: 1, speaker_bot_id: 'bot-a', speaker_label: 'Bot A', started_at: Date.now() },
+          turns: [],
+          errors: [],
+          participants: []
+        }
+      })
+    });
+  });
+
+  await page.goto('/_mock/ui');
+  await page.click('#add-profile-btn');
+  await expect(page.locator('.bot-item')).toHaveCount(2);
+
+  await page.fill('#parallel-message-input', '/debate 중단 테스트 --rounds 1');
+  await page.click('#parallel-send-btn');
+
+  await expect(page.locator('#debate-stop-btn')).toBeEnabled();
+  await page.click('#debate-stop-btn');
+  await expect(page.locator('#debate-meta')).toContainText('STOPPED');
+});
