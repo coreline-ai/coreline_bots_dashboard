@@ -17,6 +17,7 @@ Telegram <-> CLI adapter bridge MVP.
 
 ## Table of Contents
 
+- [특징](#특징)
 - [1. Project Summary](#1-project-summary)
 - [2. Architecture](#2-architecture)
 - [3. Runtime Modes](#3-runtime-modes)
@@ -32,6 +33,16 @@ Telegram <-> CLI adapter bridge MVP.
 - [13. Test Strategy](#13-test-strategy)
 - [14. Script Catalog](#14-script-catalog)
 - [15. Troubleshooting](#15-troubleshooting)
+
+---
+
+## 특징
+
+- 각 봇은 기본적으로 `/mode` 명령을 통해 `gemini`, `codex`, `claude` 모드를 자유롭게 전환할 수 있습니다.
+- 멀티봇을 지원하여, 한 번의 프롬프트로 여러 봇에서 다양한 형태의 결과물을 병렬로 얻을 수 있습니다.
+- 멀티봇은 동적으로 다수 생성 및 삭제가 가능합니다.
+- 대시보드를 제공하여 시뮬레이션과 다양한 추가 개발 테스트를 수행할 수 있습니다.
+- Telegram 연동 코드는 구현되어 있으나, 현재 Telegram 계정 부재로 실계정 연동 테스트는 아직 진행하지 않았습니다.
 
 ---
 
