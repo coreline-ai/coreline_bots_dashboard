@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mock Telegram Messenger</title>
+  <link rel="stylesheet" href="/_mock/ui/styles.css?v=14">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Mock Telegram Messenger</h1>
+    <div class="topbar-actions">
+      <button id="toggle-essential-btn" type="button">필수 메시지 보기: ON</button>
+      <button id="refresh-state-btn" type="button">Refresh State</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel controls">
+      <h2>Session</h2>
+      <label>Bot Token
+        <input id="token-input" type="text" value="mock_token_1" placeholder="123456:mock-token">
+      </label>
+      <label>Chat ID
+        <input id="chat-id-input" type="number" value="1001">
+      </label>
+      <label>User ID
+        <input id="user-id-input" type="number" value="9001">
+      </label>
+
+      <h3>Webhook</h3>
+      <label>Webhook URL
+        <input id="webhook-url-input" type="text" placeholder="http://127.0.0.1:8600/telegram/webhook/bot-1/bot-1-path">
+      </label>
+      <label>Webhook Secret
+        <input id="webhook-secret-input" type="text" placeholder="bot-1-secret">
+      </label>
+      <div class="row">
+        <button id="set-webhook-btn" type="button">setWebhook</button>
+        <button id="delete-webhook-btn" type="button">deleteWebhook</button>
+      </div>
+
+      <h3>Rate Limit</h3>
+      <label>Method
+        <select id="rate-method-input">
+          <option>getUpdates</option>
+          <option>sendMessage</option>
+          <option>sendPhoto</option>
+          <option>editMessageText</option>
+          <option>answerCallbackQuery</option>
+          <option>sendDocument</option>
+          <option>setWebhook</option>
+          <option>deleteWebhook</option>
+        </select>
+      </label>
+      <label>Count
+        <input id="rate-count-input" type="number" value="1" min="1" max="100">
+      </label>
+      <label>Retry After
+        <input id="rate-retry-input" type="number" value="1" min="1" max="120">
+      </label>
+      <button id="rate-limit-btn" type="button">Apply 429 Rule</button>
+    </section>
+
+    <section class="panel timeline">
+      <h2>Timeline</h2>
+      <div id="timeline-list" class="timeline-list"></div>
+      <div class="composer">
+        <label class="composer-label">Message
+          <textarea id="message-input" rows="2" placeholder="Type a message"></textarea>
+        </label>
+        <div id="command-suggest" class="command-suggest hidden" aria-label="사용 가능한 명령어"></div>
+        <div class="composer-row">
+          <button id="send-btn" type="button">Send User Message</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel state">
+      <h2>Agent (Current Chat)</h2>
+      <pre id="agent-json"></pre>
+
+      <h2>State (Compact)</h2>
+      <pre id="state-json"></pre>
+
+      <h3>Threads (Top 10)</h3>
+      <pre id="threads-json"></pre>
+    </section>
+  </main>
+
+  <script src="/_mock/ui/app.js?v=14"></script>
+</body>
+</html>

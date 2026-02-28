@@ -1,0 +1,26 @@
+﻿bots:
+  # Minimal (token only): polling mode, owner check disabled
+  - telegram_token: TELEGRAM_BOT_TOKEN
+    # Optional override for local mock messenger:
+    # telegram_api_base_url: http://127.0.0.1:9082
+
+  # Full example with webhook + owner lock
+  - bot_id: bot-a
+    name: Bot A
+    mode: embedded
+    telegram_token: "123456:abc"
+    owner_user_id: 111111111
+    # Optional override for this bot only:
+    # telegram_api_base_url: http://127.0.0.1:9082
+    webhook:
+      path_secret: bot-a-path
+      secret_token: bot-a-secret
+      public_url: https://example.com/telegram/webhook/bot-a/bot-a-path
+    adapter: codex
+    codex:
+      model: gpt-5
+      sandbox: workspace-write
+    gemini:
+      model: gemini-2.5-pro
+    claude:
+      model: claude-sonnet-4-5
