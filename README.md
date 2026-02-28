@@ -33,6 +33,7 @@ Telegram <-> CLI adapter bridge MVP.
 - [13. Test Strategy](#13-test-strategy)
 - [14. Script Catalog](#14-script-catalog)
 - [15. Troubleshooting](#15-troubleshooting)
+- [16. License](#16-license)
 
 ---
 
@@ -523,6 +524,13 @@ pytest
 ### 로컬 mock 재시작 후 polling offset 꼬임
 
 - 로컬 mock base URL(`127.0.0.1`/`localhost`)일 때는 ingest state reset 로직이 동작해 offset 문제를 줄입니다.
+
+---
+
+## 16. License
+
+This project is licensed under the MIT License.
+See [LICENSE](./LICENSE).
 
 ---
 
