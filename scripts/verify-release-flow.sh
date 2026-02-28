@@ -9,6 +9,7 @@ CHAT_ID="${CHAT_ID:-1001}"
 USER_ID="${USER_ID:-9001}"
 MOCK_BASE_URL="${MOCK_BASE_URL:-http://127.0.0.1:9082}"
 BOT_BASE_URL="${BOT_BASE_URL:-http://127.0.0.1:8600}"
+EXPECTED_BOT_ID="${EXPECTED_BOT_ID:-}"
 
 AUTO_TEST_CMD="${AUTO_TEST_CMD:-./.venv/bin/python -m pytest -q tests/test_telegram_poller.py tests/test_telegram_commands.py tests/test_run_worker_provider_selection.py tests/test_gemini_adapter.py tests/test_claude_adapter.py tests/test_settings.py}"
 
@@ -61,6 +62,11 @@ wait_for_text_since() {
   return 1
 }
 
+resolve_bot_id_by_token() {
+  curl -fsS "$MOCK_BASE_URL/_mock/bot_catalog" | jq -r --arg token "$TOKEN" \
+    '.result.bots[] | select(.token == $token) | .bot_id' | head -n1
+}
+
 require_bin curl
 require_bin jq
 
@@ -82,16 +88,24 @@ if ! health_ok "$MOCK_BASE_URL" || ! health_ok "$BOT_BASE_URL"; then
   exit 1
 fi
 
+if [[ -z "$EXPECTED_BOT_ID" ]]; then
+  EXPECTED_BOT_ID="$(resolve_bot_id_by_token || true)"
+fi
+if [[ -z "$EXPECTED_BOT_ID" ]]; then
+  echo "smoke failed: could not resolve bot_id for token=$TOKEN from /_mock/bot_catalog" >&2
+  exit 1
+fi
+
 baseline_id="$(max_message_id)"
 send_message "/start"
 send_message "/status"
 send_message "하이 너는 누구니"
 
-if ! wait_for_text_since "Bot 1 ready" "$baseline_id" 20; then
+if ! wait_for_text_since "ready" "$baseline_id" 20; then
   echo "smoke failed: /start response not found" >&2
   exit 1
 fi
-if ! wait_for_text_since "bot=bot-1" "$baseline_id" 20; then
+if ! wait_for_text_since "bot=$EXPECTED_BOT_ID" "$baseline_id" 20; then
   echo "smoke failed: /status response not found" >&2
   exit 1
 fi

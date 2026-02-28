@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, func, select, text, update
+from sqlalchemy import and_, delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -86,13 +86,21 @@ class Repository:
 
     async def create_schema(self) -> None:
         async with self._engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-            migrations_dir = Path(__file__).resolve().parent / "migrations"
-            if migrations_dir.exists() and migrations_dir.is_dir():
-                for sql_path in sorted(migrations_dir.glob("*.sql")):
-                    sql_text = sql_path.read_text(encoding="utf-8")
-                    for statement in _split_sql_statements(sql_text):
-                        await conn.execute(text(statement))
+            lock_key = 823741917432
+            use_advisory_lock = conn.dialect.name == "postgresql"
+            if use_advisory_lock:
+                await conn.execute(text("SELECT pg_advisory_lock(:lock_key)"), {"lock_key": lock_key})
+            try:
+                await conn.run_sync(Base.metadata.create_all)
+                migrations_dir = Path(__file__).resolve().parent / "migrations"
+                if migrations_dir.exists() and migrations_dir.is_dir():
+                    for sql_path in sorted(migrations_dir.glob("*.sql")):
+                        sql_text = sql_path.read_text(encoding="utf-8")
+                        for statement in _split_sql_statements(sql_text):
+                            await conn.execute(text(statement))
+            finally:
+                if use_advisory_lock:
+                    await conn.execute(text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": lock_key})
 
     async def dispose(self) -> None:
         await self._engine.dispose()
@@ -262,6 +270,16 @@ class Repository:
             if value is None:
                 return None
             return int(value)
+
+    async def reset_telegram_ingest_state(self, *, bot_id: str) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    delete(TelegramUpdateJob).where(TelegramUpdateJob.bot_id == bot_id)
+                )
+                await session.execute(
+                    delete(TelegramUpdate).where(TelegramUpdate.bot_id == bot_id)
+                )
 
     async def get_latest_session(self, *, bot_id: str, chat_id: str) -> Session | None:
         async with self._session_factory() as session:

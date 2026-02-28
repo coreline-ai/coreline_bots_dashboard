@@ -7,3 +7,8 @@
 .playwright-cli/
 __pycache__/
 .DS_Store
+
+# E2E local artifacts
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/tests/e2e/tmp-*.png

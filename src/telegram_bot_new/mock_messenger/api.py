@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,23 @@ import httpx
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from telegram_bot_new.mock_messenger.schemas import MockSendRequest, RateLimitRuleRequest
+from telegram_bot_new.mock_messenger.bot_catalog import (
+    build_bot_catalog,
+    classify_last_error_tag,
+    compact_threads,
+    create_dynamic_embedded_bot,
+    delete_bot_from_catalog,
+    extract_runtime_metrics,
+    fetch_embedded_runtime,
+    infer_session_view_from_messages,
+)
+from telegram_bot_new.mock_messenger.schemas import (
+    BotCatalogAddRequest,
+    BotCatalogDeleteRequest,
+    MockClearMessagesRequest,
+    MockSendRequest,
+    RateLimitRuleRequest,
+)
 from telegram_bot_new.mock_messenger.store import MockMessengerStore
 
 LOGGER = logging.getLogger(__name__)
@@ -18,8 +35,12 @@ def create_app(
     *,
     store: MockMessengerStore,
     allow_get_updates_with_webhook: bool = False,
+    bots_config_path: str | Path = "config/bots.yaml",
+    embedded_host: str = "127.0.0.1",
+    embedded_base_port: int = 8600,
 ) -> FastAPI:
     app = FastAPI(title="Mock Telegram Messenger", version="0.1.0")
+    catalog_mutation_lock = asyncio.Lock()
 
     @app.get("/")
     async def root() -> RedirectResponse:
@@ -36,6 +57,10 @@ def create_app(
     @app.get("/_mock/ui/styles.css")
     async def ui_styles_css() -> FileResponse:
         return FileResponse(_web_file("styles.css"), media_type="text/css")
+
+    @app.get("/_mock/ui/favicon.svg")
+    async def ui_favicon() -> FileResponse:
+        return FileResponse(_web_file("favicon.svg"), media_type="image/svg+xml")
 
     @app.get("/_mock/threads")
     async def get_threads(token: str | None = None) -> dict[str, Any]:
@@ -86,6 +111,11 @@ def create_app(
             },
         }
 
+    @app.post("/_mock/messages/clear")
+    async def clear_messages(request: MockClearMessagesRequest) -> dict[str, Any]:
+        result = store.clear_messages(token=request.token, chat_id=request.chat_id)
+        return {"ok": True, "result": result}
+
     @app.get("/_mock/document/{document_id}")
     async def get_document(document_id: int, token: str) -> FileResponse:
         document = store.get_document_file(token=token, document_id=document_id)
@@ -108,6 +138,94 @@ def create_app(
             "result": {
                 "allow_get_updates_with_webhook": allow_get_updates_with_webhook,
                 "state": store.get_state(token=token),
+            },
+        }
+
+    @app.get("/_mock/bot_catalog")
+    async def get_bot_catalog() -> dict[str, Any]:
+        bots = build_bot_catalog(
+            bots_config_path=bots_config_path,
+            embedded_host=embedded_host,
+            embedded_base_port=embedded_base_port,
+        )
+        return {"ok": True, "result": {"bots": bots}}
+
+    @app.post("/_mock/bot_catalog/add")
+    async def add_bot_catalog_entry(request: BotCatalogAddRequest = Body(default_factory=BotCatalogAddRequest)) -> dict[str, Any]:
+        async with catalog_mutation_lock:
+            created = create_dynamic_embedded_bot(
+                bots_config_path=bots_config_path,
+                adapter=request.adapter,
+                bot_id=request.bot_id,
+                token=request.token,
+                name=request.name,
+            )
+            bots = build_bot_catalog(
+                bots_config_path=bots_config_path,
+                embedded_host=embedded_host,
+                embedded_base_port=embedded_base_port,
+            )
+
+        created_id = str(created.get("bot_id") or "").strip()
+        created_row = next((row for row in bots if str(row.get("bot_id")) == created_id), None)
+        return {
+            "ok": True,
+            "result": {
+                "bot": created_row or created,
+                "total_bots": len(bots),
+            },
+        }
+
+    @app.post("/_mock/bot_catalog/delete")
+    async def delete_bot_catalog_entry(request: BotCatalogDeleteRequest) -> dict[str, Any]:
+        async with catalog_mutation_lock:
+            removed = delete_bot_from_catalog(bots_config_path=bots_config_path, bot_id=request.bot_id)
+            if not removed:
+                raise HTTPException(status_code=404, detail=f"unknown bot_id: {request.bot_id}")
+            bots = build_bot_catalog(
+                bots_config_path=bots_config_path,
+                embedded_host=embedded_host,
+                embedded_base_port=embedded_base_port,
+            )
+        return {
+            "ok": True,
+            "result": {
+                "deleted_bot_id": request.bot_id,
+                "total_bots": len(bots),
+            },
+        }
+
+    @app.get("/_mock/bot_diagnostics")
+    async def get_bot_diagnostics(
+        bot_id: str,
+        token: str,
+        chat_id: int | None = None,
+        limit: int = 120,
+    ) -> dict[str, Any]:
+        resolved_limit = max(1, min(int(limit), 300))
+        catalog = build_bot_catalog(
+            bots_config_path=bots_config_path,
+            embedded_host=embedded_host,
+            embedded_base_port=embedded_base_port,
+        )
+        selected = next((row for row in catalog if row.get("bot_id") == bot_id), None)
+        if selected is None:
+            raise HTTPException(status_code=404, detail=f"unknown bot_id: {bot_id}")
+
+        messages = store.get_messages(token=token, chat_id=chat_id, limit=resolved_limit)
+        threads = store.list_threads(token=token)
+        health, metrics_payload = await fetch_embedded_runtime(selected.get("embedded_url"))
+        metrics = extract_runtime_metrics(metrics_payload)
+        session_view = infer_session_view_from_messages(messages)
+
+        return {
+            "ok": True,
+            "result": {
+                "health": health,
+                "metrics": metrics,
+                "session": session_view,
+                "threads_top10": compact_threads(threads, selected_chat_id=chat_id),
+                "last_error_tag": classify_last_error_tag(messages),
             },
         }
 

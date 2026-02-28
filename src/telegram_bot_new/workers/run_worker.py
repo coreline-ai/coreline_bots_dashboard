@@ -280,10 +280,20 @@ async def run_cli_worker(
 ) -> None:
     owner = f"run-worker:{bot_id}:{os.getpid()}"
     sent_artifacts_by_chat: dict[str, set[str]] = {}
+    heartbeat_interval_ms = 5000
+    next_heartbeat_ms = 0
 
     while not stop_event.is_set():
         now = _now_ms()
         try:
+            if now >= next_heartbeat_ms:
+                await repository.increment_runtime_metric(
+                    bot_id=bot_id,
+                    metric_key="worker_heartbeat.run_worker",
+                    now=now,
+                )
+                next_heartbeat_ms = now + heartbeat_interval_ms
+
             job = await repository.lease_next_run_job(
                 bot_id=bot_id,
                 owner=owner,

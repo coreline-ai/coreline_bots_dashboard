@@ -1,93 +1,195 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mock Telegram Messenger</title>
-  <link rel="stylesheet" href="/_mock/ui/styles.css?v=14">
+  <title>Coreline Bot</title>
+  <link rel="icon" type="image/svg+xml" href="/_mock/ui/favicon.svg?v=2">
+  <link rel="shortcut icon" href="/_mock/ui/favicon.svg?v=2">
+  <meta name="theme-color" content="#2f3136">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+  <link rel="stylesheet" href="/_mock/ui/styles.css?v=42">
 </head>
 <body>
   <header class="topbar">
-    <h1>Mock Telegram Messenger</h1>
+    <div class="topbar-brand">
+      <span class="material-symbols-outlined topbar-brand-icon" aria-hidden="true">smart_toy</span>
+      <h1>Coreline Bot</h1>
+    </div>
+    <div id="selected-status" class="selected-status"></div>
     <div class="topbar-actions">
-      <button id="toggle-essential-btn" type="button">필수 메시지 보기: ON</button>
-      <button id="refresh-state-btn" type="button">Refresh State</button>
+      <button id="toggle-essential-btn" type="button" title="필수 메시지 보기: ON" aria-label="필수 메시지 보기: ON">
+        <span class="material-symbols-outlined icon-sm" aria-hidden="true">filter_alt</span>
+      </button>
+      <button id="refresh-state-btn" type="button" title="상태 새로고침" aria-label="상태 새로고침">
+        <span class="material-symbols-outlined icon-sm" aria-hidden="true">refresh</span>
+      </button>
     </div>
   </header>
 
   <main class="layout">
-    <section class="panel controls">
-      <h2>Session</h2>
-      <label>Bot Token
-        <input id="token-input" type="text" value="mock_token_1" placeholder="123456:mock-token">
-      </label>
-      <label>Chat ID
-        <input id="chat-id-input" type="number" value="1001">
-      </label>
-      <label>User ID
-        <input id="user-id-input" type="number" value="9001">
-      </label>
-
-      <h3>Webhook</h3>
-      <label>Webhook URL
-        <input id="webhook-url-input" type="text" placeholder="http://127.0.0.1:8600/telegram/webhook/bot-1/bot-1-path">
-      </label>
-      <label>Webhook Secret
-        <input id="webhook-secret-input" type="text" placeholder="bot-1-secret">
-      </label>
-      <div class="row">
-        <button id="set-webhook-btn" type="button">setWebhook</button>
-        <button id="delete-webhook-btn" type="button">deleteWebhook</button>
+    <aside class="panel bot-sidebar">
+      <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">hub</span>Multi Bots</h2>
+      <div class="row sidebar-row">
+        <button id="add-profile-btn" type="button">+ 멀티봇 추가</button>
+        <button id="parallel-send-btn" type="button">선택 병렬 전송</button>
       </div>
+      <label>병렬 전송 메시지
+        <textarea id="parallel-message-input" rows="2" placeholder="병렬 전송할 메시지를 입력하세요"></textarea>
+      </label>
+      <div id="bot-list" class="bot-list"></div>
+      <h3>Parallel Results</h3>
+      <div id="parallel-results" class="parallel-results"></div>
+    </aside>
 
-      <h3>Rate Limit</h3>
-      <label>Method
-        <select id="rate-method-input">
-          <option>getUpdates</option>
-          <option>sendMessage</option>
-          <option>sendPhoto</option>
-          <option>editMessageText</option>
-          <option>answerCallbackQuery</option>
-          <option>sendDocument</option>
-          <option>setWebhook</option>
-          <option>deleteWebhook</option>
-        </select>
-      </label>
-      <label>Count
-        <input id="rate-count-input" type="number" value="1" min="1" max="100">
-      </label>
-      <label>Retry After
-        <input id="rate-retry-input" type="number" value="1" min="1" max="120">
-      </label>
-      <button id="rate-limit-btn" type="button">Apply 429 Rule</button>
-    </section>
-
-    <section class="panel timeline">
-      <h2>Timeline</h2>
-      <div id="timeline-list" class="timeline-list"></div>
-      <div class="composer">
-        <label class="composer-label">Message
-          <textarea id="message-input" rows="2" placeholder="Type a message"></textarea>
-        </label>
-        <div id="command-suggest" class="command-suggest hidden" aria-label="사용 가능한 명령어"></div>
-        <div class="composer-row">
-          <button id="send-btn" type="button">Send User Message</button>
+    <section class="workspace">
+      <section class="panel controls">
+        <div class="state-block-header">
+          <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">manage_accounts</span>Session</h2>
+          <button
+            id="toggle-session-section-btn"
+            type="button"
+            class="state-toggle-btn"
+            title="Session 최소화"
+            aria-label="Session 최소화"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">chevron_left</span>
+            <span class="sr-only">Session 최소화</span>
+          </button>
         </div>
-      </div>
-    </section>
+        <div id="session-section-body">
+          <label>Bot Token
+            <input id="token-input" type="text" value="mock_token_1" placeholder="123456:mock-token">
+          </label>
+          <div class="row row-id-compact">
+            <label>Chat ID
+              <input id="chat-id-input" type="number" value="1001">
+            </label>
+            <label>User ID
+              <input id="user-id-input" type="number" value="9001">
+            </label>
+          </div>
 
-    <section class="panel state">
-      <h2>Agent (Current Chat)</h2>
-      <pre id="agent-json"></pre>
+          <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">bolt</span>Quick Actions</h3>
+          <div class="quick-actions">
+            <button type="button" class="quick-action-btn" data-command="/start">/start</button>
+            <button type="button" class="quick-action-btn" data-command="/reset">/reset</button>
+            <button type="button" class="quick-action-btn" data-command="/stop">/stop</button>
+          </div>
 
-      <h2>State (Compact)</h2>
-      <pre id="state-json"></pre>
+          <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">webhook</span>Webhook</h3>
+          <label>Webhook URL
+            <input id="webhook-url-input" type="text" placeholder="http://127.0.0.1:8600/telegram/webhook/bot-1/bot-1-path">
+          </label>
+          <label>Webhook Secret
+            <input id="webhook-secret-input" type="text" placeholder="bot-1-secret">
+          </label>
+          <div class="row">
+            <button id="set-webhook-btn" type="button">setWebhook</button>
+            <button id="delete-webhook-btn" type="button">deleteWebhook</button>
+          </div>
 
-      <h3>Threads (Top 10)</h3>
-      <pre id="threads-json"></pre>
+          <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">speed</span>Rate Limit</h3>
+          <label>Method
+            <select id="rate-method-input">
+              <option>getUpdates</option>
+              <option>sendMessage</option>
+              <option>sendPhoto</option>
+              <option>editMessageText</option>
+              <option>answerCallbackQuery</option>
+              <option>sendDocument</option>
+              <option>setWebhook</option>
+              <option>deleteWebhook</option>
+            </select>
+          </label>
+          <div class="row row-rate-compact">
+            <label>Count
+              <input id="rate-count-input" type="number" value="1" min="1" max="100">
+            </label>
+            <label>Retry After
+              <input id="rate-retry-input" type="number" value="1" min="1" max="120">
+            </label>
+          </div>
+          <button id="rate-limit-btn" type="button">Apply 429 Rule</button>
+        </div>
+      </section>
+
+      <section class="panel timeline">
+        <div class="timeline-header">
+          <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">schedule</span>Timeline</h2>
+          <div class="timeline-header-actions">
+            <div id="timeline-session-status" class="timeline-session-status"></div>
+            <button id="clear-timeline-btn" type="button">채팅창 비우기</button>
+          </div>
+        </div>
+        <div id="timeline-list" class="timeline-list"></div>
+        <div class="composer">
+          <label class="composer-label">Message
+            <textarea id="message-input" rows="2" placeholder="Type a message"></textarea>
+          </label>
+          <div id="command-suggest" class="command-suggest hidden" aria-label="사용 가능한 명령어"></div>
+          <div class="composer-row">
+            <button id="send-btn" type="button">Send User Message</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel state">
+        <div class="state-block state-block-agent">
+          <div class="state-block-header">
+            <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">smart_toy</span>Agent (Current Chat)</h2>
+            <button
+              id="toggle-agent-section-btn"
+              type="button"
+              class="state-toggle-btn"
+              title="Agent 최소화"
+              aria-label="Agent 최소화"
+            >
+              <span class="material-symbols-outlined" aria-hidden="true">chevron_left</span>
+              <span class="sr-only">Agent 최소화</span>
+            </button>
+          </div>
+          <div id="agent-section-body">
+            <pre id="agent-json"></pre>
+          </div>
+        </div>
+
+        <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">monitoring</span>Diagnostics</h2>
+        <pre id="diagnostics-json"></pre>
+
+        <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">data_object</span>State (Compact)</h2>
+        <pre id="state-json"></pre>
+
+        <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">forum</span>Threads (Top 10)</h3>
+        <pre id="threads-json"></pre>
+      </section>
     </section>
   </main>
 
-  <script src="/_mock/ui/app.js?v=14"></script>
+  <dialog id="profile-dialog">
+    <form method="dialog" id="profile-form">
+      <h3>멀티봇 프로필 추가</h3>
+      <label>Label
+        <input id="profile-label-input" type="text" placeholder="예: Bot A 테스트" required>
+      </label>
+      <label>Bot
+        <select id="profile-bot-id-input"></select>
+      </label>
+      <label>Chat ID
+        <input id="profile-chat-id-input" type="number" value="1001" required>
+      </label>
+      <label>User ID
+        <input id="profile-user-id-input" type="number" value="9001" required>
+      </label>
+      <menu class="dialog-actions">
+        <button value="cancel" type="reset" id="profile-cancel-btn">취소</button>
+        <button value="default" type="submit" id="profile-save-btn">저장</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="/_mock/ui/app.js?v=32"></script>
 </body>
 </html>

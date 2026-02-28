@@ -123,6 +123,32 @@ Fixed endpoints:
 - Mock UI: `http://127.0.0.1:9082/_mock/ui?token=mock_token_1&chat_id=1001&user_id=9001`
 - Bot health: `http://127.0.0.1:8600/healthz`
 
+### Multi-bot local stack (mock + supervisor)
+Run true multi-bot test mode where multiple bot instances from `config/bots.multibot.yaml`
+are started in parallel and tested from one mock UI.
+
+```bash
+./scripts/run-local-multibot.sh start
+```
+
+Custom config example:
+```bash
+CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
+```
+
+Useful commands:
+```bash
+./scripts/run-local-multibot.sh status
+./scripts/run-local-multibot.sh logs
+./scripts/run-local-multibot.sh stop
+./scripts/verify-multibot-smoke.sh
+./scripts/verify-mock-ui-e2e.sh
+```
+
+Multi-bot UI:
+- `http://127.0.0.1:9082/_mock/ui`
+- Left sidebar supports profile add/select and parallel send.
+
 ### Start mock server only
 ```powershell
 .\scripts\run-mock-messenger.ps1
@@ -185,6 +211,8 @@ Stop:
 - `GET /_mock/messages`
 - `GET /_mock/document/{document_id}?token=...`
 - `GET /_mock/state`
+- `GET /_mock/bot_catalog`
+- `GET /_mock/bot_diagnostics?bot_id=<id>&token=<token>&chat_id=<chat>&limit=<n>`
 
 UI behavior notes:
 - Timeline auto-scroll only follows when you are already near the bottom.

@@ -27,10 +27,20 @@ async def run_update_worker(
     stop_event: asyncio.Event,
 ) -> None:
     owner = f"update-worker:{bot_id}:{os.getpid()}"
+    heartbeat_interval_ms = 5000
+    next_heartbeat_ms = 0
 
     while not stop_event.is_set():
         now = _now_ms()
         try:
+            if now >= next_heartbeat_ms:
+                await repository.increment_runtime_metric(
+                    bot_id=bot_id,
+                    metric_key="worker_heartbeat.update_worker",
+                    now=now,
+                )
+                next_heartbeat_ms = now + heartbeat_interval_ms
+
             job = await repository.lease_next_telegram_update_job(
                 bot_id=bot_id,
                 owner=owner,

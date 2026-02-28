@@ -1,0 +1,337 @@
+bots:
+- bot_id: bot-a
+  name: Bot A
+  mode: embedded
+  telegram_token: mock_token_1
+  adapter: codex
+  webhook:
+    path_secret: bot-a-path
+    secret_token: bot-a-secret
+- bot_id: bot-b
+  name: Bot B
+  mode: embedded
+  telegram_token: mock_token_2
+  adapter: codex
+  webhook:
+    path_secret: bot-b-path
+    secret_token: bot-b-secret
+- bot_id: bot-1
+  name: Bot 1
+  mode: embedded
+  telegram_token: mock_token_3
+  adapter: codex
+  webhook:
+    path_secret: bot-1-path
+    secret_token: bot-1-secret
+- bot_id: bot-2
+  name: Bot 2
+  mode: embedded
+  telegram_token: mock_token_4
+  adapter: codex
+  webhook:
+    path_secret: bot-2-path
+    secret_token: bot-2-secret
+- bot_id: bot-3
+  name: Bot 3
+  mode: embedded
+  telegram_token: mock_token_5
+  adapter: codex
+  webhook:
+    path_secret: bot-3-path
+    secret_token: bot-3-secret
+- bot_id: bot-4
+  name: Bot 4
+  mode: embedded
+  telegram_token: mock_token_6
+  adapter: codex
+  webhook:
+    path_secret: bot-4-path
+    secret_token: bot-4-secret
+- bot_id: bot-5
+  name: Bot 5
+  mode: embedded
+  telegram_token: mock_token_7
+  adapter: codex
+  webhook:
+    path_secret: bot-5-path
+    secret_token: bot-5-secret
+- bot_id: bot-6
+  name: Bot 6
+  mode: embedded
+  telegram_token: mock_token_8
+  adapter: codex
+  webhook:
+    path_secret: bot-6-path
+    secret_token: bot-6-secret
+- bot_id: bot-7
+  name: Bot 7
+  mode: embedded
+  telegram_token: mock_token_9
+  adapter: codex
+  webhook:
+    path_secret: bot-7-path
+    secret_token: bot-7-secret
+- bot_id: bot-8
+  name: Bot 8
+  mode: embedded
+  telegram_token: mock_token_10
+  adapter: codex
+  webhook:
+    path_secret: bot-8-path
+    secret_token: bot-8-secret
+- bot_id: bot-9
+  name: Bot 9
+  mode: embedded
+  telegram_token: mock_token_11
+  adapter: codex
+  webhook:
+    path_secret: bot-9-path
+    secret_token: bot-9-secret
+- bot_id: bot-10
+  name: Bot 10
+  mode: embedded
+  telegram_token: mock_token_12
+  adapter: codex
+  webhook:
+    path_secret: bot-10-path
+    secret_token: bot-10-secret
+- bot_id: bot-11
+  name: Bot 11
+  mode: embedded
+  telegram_token: mock_token_13
+  adapter: codex
+  webhook:
+    path_secret: bot-11-path
+    secret_token: bot-11-secret
+- bot_id: bot-12
+  name: Bot 12
+  mode: embedded
+  telegram_token: mock_token_14
+  adapter: codex
+  webhook:
+    path_secret: bot-12-path
+    secret_token: bot-12-secret
+- bot_id: bot-13
+  name: Bot 13
+  mode: embedded
+  telegram_token: mock_token_15
+  adapter: codex
+  webhook:
+    path_secret: bot-13-path
+    secret_token: bot-13-secret
+- bot_id: bot-14
+  name: Bot 14
+  mode: embedded
+  telegram_token: mock_token_16
+  adapter: codex
+  webhook:
+    path_secret: bot-14-path
+    secret_token: bot-14-secret
+- bot_id: bot-15
+  name: Bot 15
+  mode: embedded
+  telegram_token: mock_token_17
+  adapter: codex
+  webhook:
+    path_secret: bot-15-path
+    secret_token: bot-15-secret
+- bot_id: bot-16
+  name: Bot 16
+  mode: embedded
+  telegram_token: mock_token_18
+  adapter: codex
+  webhook:
+    path_secret: bot-16-path
+    secret_token: bot-16-secret
+- bot_id: bot-17
+  name: Bot 17
+  mode: embedded
+  telegram_token: mock_token_19
+  adapter: codex
+  webhook:
+    path_secret: bot-17-path
+    secret_token: bot-17-secret
+- bot_id: bot-18
+  name: Bot 18
+  mode: embedded
+  telegram_token: mock_token_20
+  adapter: codex
+  webhook:
+    path_secret: bot-18-path
+    secret_token: bot-18-secret
+- bot_id: bot-19
+  name: Bot 19
+  mode: embedded
+  telegram_token: mock_token_21
+  adapter: codex
+  webhook:
+    path_secret: bot-19-path
+    secret_token: bot-19-secret
+- bot_id: bot-20
+  name: Bot 20
+  mode: embedded
+  telegram_token: mock_token_22
+  adapter: codex
+  webhook:
+    path_secret: bot-20-path
+    secret_token: bot-20-secret
+- bot_id: bot-21
+  name: Bot 21
+  mode: embedded
+  telegram_token: mock_token_23
+  adapter: codex
+  webhook:
+    path_secret: bot-21-path
+    secret_token: bot-21-secret
+- bot_id: bot-22
+  name: Bot 22
+  mode: embedded
+  telegram_token: mock_token_24
+  adapter: codex
+  webhook:
+    path_secret: bot-22-path
+    secret_token: bot-22-secret
+- bot_id: bot-23
+  name: Bot 23
+  mode: embedded
+  telegram_token: mock_token_25
+  adapter: codex
+  webhook:
+    path_secret: bot-23-path
+    secret_token: bot-23-secret
+- bot_id: bot-24
+  name: Bot 24
+  mode: embedded
+  telegram_token: mock_token_26
+  adapter: codex
+  webhook:
+    path_secret: bot-24-path
+    secret_token: bot-24-secret
+- bot_id: bot-25
+  name: Bot 25
+  mode: embedded
+  telegram_token: mock_token_27
+  adapter: codex
+  webhook:
+    path_secret: bot-25-path
+    secret_token: bot-25-secret
+- bot_id: bot-26
+  name: Bot 26
+  mode: embedded
+  telegram_token: mock_token_28
+  adapter: codex
+  webhook:
+    path_secret: bot-26-path
+    secret_token: bot-26-secret
+- bot_id: bot-27
+  name: Bot 27
+  mode: embedded
+  telegram_token: mock_token_29
+  adapter: codex
+  webhook:
+    path_secret: bot-27-path
+    secret_token: bot-27-secret
+- bot_id: bot-28
+  name: Bot 28
+  mode: embedded
+  telegram_token: mock_token_30
+  adapter: codex
+  webhook:
+    path_secret: bot-28-path
+    secret_token: bot-28-secret
+- bot_id: bot-29
+  name: Bot 29
+  mode: embedded
+  telegram_token: mock_token_31
+  adapter: codex
+  webhook:
+    path_secret: bot-29-path
+    secret_token: bot-29-secret
+- bot_id: bot-30
+  name: Bot 30
+  mode: embedded
+  telegram_token: mock_token_32
+  adapter: codex
+  webhook:
+    path_secret: bot-30-path
+    secret_token: bot-30-secret
+- bot_id: bot-31
+  name: Bot 31
+  mode: embedded
+  telegram_token: mock_token_33
+  adapter: codex
+  webhook:
+    path_secret: bot-31-path
+    secret_token: bot-31-secret
+- bot_id: bot-32
+  name: Bot 32
+  mode: embedded
+  telegram_token: mock_token_34
+  adapter: codex
+  webhook:
+    path_secret: bot-32-path
+    secret_token: bot-32-secret
+- bot_id: bot-33
+  name: Bot 33
+  mode: embedded
+  telegram_token: mock_token_35
+  adapter: codex
+  webhook:
+    path_secret: bot-33-path
+    secret_token: bot-33-secret
+- bot_id: bot-34
+  name: Bot 34
+  mode: embedded
+  telegram_token: mock_token_36
+  adapter: codex
+  webhook:
+    path_secret: bot-34-path
+    secret_token: bot-34-secret
+- bot_id: bot-35
+  name: Bot 35
+  mode: embedded
+  telegram_token: mock_token_37
+  adapter: codex
+  webhook:
+    path_secret: bot-35-path
+    secret_token: bot-35-secret
+- bot_id: bot-36
+  name: Bot 36
+  mode: embedded
+  telegram_token: mock_token_38
+  adapter: codex
+  webhook:
+    path_secret: bot-36-path
+    secret_token: bot-36-secret
+- bot_id: bot-37
+  name: Bot 37
+  mode: embedded
+  telegram_token: mock_token_39
+  adapter: codex
+  webhook:
+    path_secret: bot-37-path
+    secret_token: bot-37-secret
+- bot_id: bot-38
+  name: Bot 38
+  mode: embedded
+  telegram_token: mock_token_40
+  adapter: codex
+  webhook:
+    path_secret: bot-38-path
+    secret_token: bot-38-secret
+- bot_id: bot-39
+  name: Bot 39
+  mode: embedded
+  telegram_token: mock_token_41
+  adapter: codex
+  webhook:
+    path_secret: bot-39-path
+    secret_token: bot-39-secret
+- bot_id: bot-40
+  name: Bot 40
+  mode: embedded
+  telegram_token: mock_token_42
+  adapter: codex
+  webhook:
+    path_secret: bot-40-path
+    secret_token: bot-40-secret

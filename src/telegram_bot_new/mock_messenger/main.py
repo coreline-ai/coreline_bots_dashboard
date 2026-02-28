@@ -15,6 +15,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=9082)
     parser.add_argument("--db-path", default=".mock_messenger/mock_messenger.db")
     parser.add_argument("--data-dir", default=".mock_messenger")
+    parser.add_argument("--bots-config", default="config/bots.yaml")
+    parser.add_argument("--embedded-host", default="127.0.0.1")
+    parser.add_argument("--embedded-base-port", type=int, default=8600)
     parser.add_argument("--allow-get-updates-with-webhook", action="store_true")
     return parser
 
@@ -32,6 +35,9 @@ def main() -> None:
     app = create_app(
         store=store,
         allow_get_updates_with_webhook=bool(args.allow_get_updates_with_webhook),
+        bots_config_path=args.bots_config,
+        embedded_host=args.embedded_host,
+        embedded_base_port=int(args.embedded_base_port),
     )
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

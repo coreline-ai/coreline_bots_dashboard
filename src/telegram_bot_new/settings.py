@@ -88,7 +88,12 @@ def get_global_settings() -> GlobalSettings:
     return GlobalSettings()
 
 
-def load_bots_config(path: str | Path, settings: GlobalSettings | None = None) -> list[BotConfig]:
+def load_bots_config(
+    path: str | Path,
+    settings: GlobalSettings | None = None,
+    *,
+    allow_env_fallback: bool = True,
+) -> list[BotConfig]:
     resolved_settings = settings or get_global_settings()
     config_path = Path(path).expanduser().resolve()
 
@@ -102,13 +107,16 @@ def load_bots_config(path: str | Path, settings: GlobalSettings | None = None) -
                 raise ValueError(f"invalid bots config at {config_path}: {error}") from error
             loaded_bots = parsed.bots
 
-    if not loaded_bots:
+    if not loaded_bots and allow_env_fallback:
         env_bot = _build_env_bot(resolved_settings)
         if env_bot is None:
             raise FileNotFoundError(
                 f"bots config not found at {config_path} and TELEGRAM_BOT_TOKEN is not set"
             )
         loaded_bots = [env_bot]
+
+    if not loaded_bots:
+        return []
 
     normalized = _normalize_bots(loaded_bots, resolved_settings)
     bot_ids = [b.bot_id for b in normalized]

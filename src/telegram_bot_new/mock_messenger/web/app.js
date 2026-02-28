@@ -9,12 +9,38 @@ const webhookSecretInput = document.getElementById("webhook-secret-input");
 const commandSuggest = document.getElementById("command-suggest");
 const timelineList = document.getElementById("timeline-list");
 const agentJson = document.getElementById("agent-json");
+const diagnosticsJson = document.getElementById("diagnostics-json");
 const stateJson = document.getElementById("state-json");
 const threadsJson = document.getElementById("threads-json");
+const workspace = document.querySelector(".workspace");
+const controlsPanel = document.querySelector(".controls");
+const statePanel = document.querySelector(".state");
+const toggleSessionSectionBtn = document.getElementById("toggle-session-section-btn");
+const sessionSectionBody = document.getElementById("session-section-body");
+const agentSectionBlock = document.querySelector(".state-block-agent");
+const toggleAgentSectionBtn = document.getElementById("toggle-agent-section-btn");
+const agentSectionBody = document.getElementById("agent-section-body");
+
+const selectedStatus = document.getElementById("selected-status");
+const timelineSessionStatus = document.getElementById("timeline-session-status");
+const botList = document.getElementById("bot-list");
+const parallelResults = document.getElementById("parallel-results");
+const addProfileBtn = document.getElementById("add-profile-btn");
+const parallelSendBtn = document.getElementById("parallel-send-btn");
+const parallelMessageInput = document.getElementById("parallel-message-input");
+const profileDialog = document.getElementById("profile-dialog");
+const profileForm = document.getElementById("profile-form");
+const profileLabelInput = document.getElementById("profile-label-input");
+const profileBotIdInput = document.getElementById("profile-bot-id-input");
+const profileChatIdInput = document.getElementById("profile-chat-id-input");
+const profileUserIdInput = document.getElementById("profile-user-id-input");
+const profileCancelBtn = document.getElementById("profile-cancel-btn");
 
 const refreshStateBtn = document.getElementById("refresh-state-btn");
 const toggleEssentialBtn = document.getElementById("toggle-essential-btn");
+const themeToggleBtn = document.getElementById("theme-toggle-btn");
 const sendBtn = document.getElementById("send-btn");
+const clearTimelineBtn = document.getElementById("clear-timeline-btn");
 const setWebhookBtn = document.getElementById("set-webhook-btn");
 const deleteWebhookBtn = document.getElementById("delete-webhook-btn");
 const rateLimitBtn = document.getElementById("rate-limit-btn");
@@ -24,8 +50,14 @@ const rateCountInput = document.getElementById("rate-count-input");
 const rateRetryInput = document.getElementById("rate-retry-input");
 
 const DEFAULT_TOKEN = "mock_token_1";
-const STORAGE_KEY = "mock_messenger_ui_state";
+const STORAGE_KEY = "mock_messenger_ui_state_v3";
+const THEME_STORAGE_KEY = "mock_messenger_theme";
+const SESSION_SECTION_STORAGE_KEY = "mock_messenger_session_section_hidden";
+const AGENT_SECTION_STORAGE_KEY = "mock_messenger_agent_section_hidden";
+const FIXED_THEME = "light";
 const SCROLL_BOTTOM_THRESHOLD = 24;
+const AUTO_REFRESH_INTERVAL_MS = 1000;
+const SIDEBAR_DIAGNOSTICS_REFRESH_MS = 5000;
 const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const EVENT_LINE_RE = /^\[(\d+|~)\]\[(\d{2}:\d{2}:\d{2})\]\[([a-z_]+)\]\s?(.*)$/i;
 const FENCED_CODE_BLOCK_RE = /```([A-Za-z0-9_+-]+)?\n?([\s\S]*?)```/g;
@@ -56,10 +88,53 @@ const COMMAND_CATALOG = [
 let followTimeline = true;
 let timelinePointerDown = false;
 let lastTimelineSignature = "";
+let lastBotListRenderKey = "";
 let essentialMode = true;
 let latestMessages = [];
 let commandSuggestItems = [];
 let commandSuggestActiveIndex = -1;
+let lastSidebarDiagnosticsAt = 0;
+let refreshInFlight = false;
+let refreshQueued = false;
+let refreshPromise = null;
+
+let catalog = [];
+let catalogByBotId = new Map();
+let profileDiagnostics = new Map();
+let uiState = {
+  selected_profile_id: null,
+  profiles: []
+};
+
+function makeProfileId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `profile_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+}
+
+function numberOrDefault(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed === 0) {
+    return fallback;
+  }
+  return Math.trunc(parsed);
+}
+
+function currentProfile() {
+  if (!uiState.selected_profile_id) {
+    return null;
+  }
+  return uiState.profiles.find((profile) => profile.profile_id === uiState.selected_profile_id) || null;
+}
+
+function updateAddProfileButtonState() {
+  if (!addProfileBtn) {
+    return;
+  }
+  addProfileBtn.disabled = false;
+  addProfileBtn.title = "새 멀티봇 인스턴스를 자동 생성합니다.";
+}
 
 function tokenValue() {
   return tokenInput.value.trim();
@@ -71,6 +146,567 @@ function chatIdValue() {
 
 function userIdValue() {
   return Number(userIdInput.value || 0);
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    const profiles = Array.isArray(parsed.profiles)
+      ? parsed.profiles
+          .map((profile) => ({
+            profile_id: String(profile.profile_id || makeProfileId()),
+            label: String(profile.label || "Profile"),
+            bot_id: String(profile.bot_id || ""),
+            token: String(profile.token || ""),
+            chat_id: numberOrDefault(profile.chat_id, 1001),
+            user_id: numberOrDefault(profile.user_id, 9001),
+            selected_for_parallel: profile.selected_for_parallel !== false
+          }))
+          .filter((profile) => profile.token || profile.bot_id)
+      : [];
+
+    return {
+      selected_profile_id: parsed.selected_profile_id ? String(parsed.selected_profile_id) : null,
+      profiles
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveState() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(uiState));
+}
+
+function applyTheme() {
+  document.documentElement.classList.remove("dark");
+  document.body.dataset.theme = FIXED_THEME;
+  localStorage.setItem(THEME_STORAGE_KEY, FIXED_THEME);
+}
+
+function updateThemeButton() {
+  if (!themeToggleBtn) {
+    return;
+  }
+  themeToggleBtn.title = "화이트 테마 고정";
+  themeToggleBtn.disabled = true;
+  themeToggleBtn.setAttribute("aria-disabled", "true");
+  const icon = "light_mode";
+  themeToggleBtn.innerHTML = `<span class="material-symbols-outlined icon-sm" aria-hidden="true">${icon}</span>`;
+}
+
+function initTheme() {
+  applyTheme();
+  updateThemeButton();
+}
+
+function isSectionHidden(storageKey) {
+  return localStorage.getItem(storageKey) === "1";
+}
+
+function renderSessionToggleButton(hidden) {
+  if (!toggleSessionSectionBtn) {
+    return;
+  }
+  const icon = hidden ? "chevron_right" : "chevron_left";
+  const label = hidden ? "Session 펼치기" : "Session 최소화";
+  toggleSessionSectionBtn.innerHTML = [
+    `<span class="material-symbols-outlined" aria-hidden="true">${icon}</span>`,
+    `<span class="sr-only">${label}</span>`
+  ].join("");
+  toggleSessionSectionBtn.title = label;
+  toggleSessionSectionBtn.setAttribute("aria-label", label);
+  toggleSessionSectionBtn.setAttribute("aria-expanded", hidden ? "false" : "true");
+}
+
+function applySessionSectionVisibility(hidden) {
+  if (!sessionSectionBody || !toggleSessionSectionBtn) {
+    return;
+  }
+  sessionSectionBody.classList.toggle("is-collapsed", hidden);
+  controlsPanel?.classList.toggle("is-collapsed", hidden);
+  workspace?.classList.toggle("is-session-collapsed", hidden);
+  renderSessionToggleButton(hidden);
+}
+
+function renderAgentToggleButton(hidden) {
+  if (!toggleAgentSectionBtn) {
+    return;
+  }
+  const icon = hidden ? "chevron_left" : "chevron_right";
+  const label = hidden ? "Agent 펼치기" : "Agent 접기";
+  toggleAgentSectionBtn.innerHTML = [
+    `<span class="material-symbols-outlined" aria-hidden="true">${icon}</span>`,
+    `<span class="sr-only">${label}</span>`
+  ].join("");
+  toggleAgentSectionBtn.title = label;
+  toggleAgentSectionBtn.setAttribute("aria-label", label);
+  toggleAgentSectionBtn.setAttribute("aria-expanded", hidden ? "false" : "true");
+}
+
+function applyAgentSectionVisibility(hidden) {
+  if (!agentSectionBody || !toggleAgentSectionBtn) {
+    return;
+  }
+  agentSectionBody.classList.toggle("is-collapsed", hidden);
+  agentSectionBlock?.classList.toggle("is-collapsed", hidden);
+  statePanel?.classList.toggle("is-collapsed", hidden);
+  workspace?.classList.toggle("is-agent-collapsed", hidden);
+  renderAgentToggleButton(hidden);
+}
+
+function initSectionToggles() {
+  if (toggleSessionSectionBtn && sessionSectionBody) {
+    const hidden = isSectionHidden(SESSION_SECTION_STORAGE_KEY);
+    applySessionSectionVisibility(hidden);
+    toggleSessionSectionBtn.addEventListener("click", () => {
+      const nextHidden = !sessionSectionBody.classList.contains("is-collapsed");
+      localStorage.setItem(SESSION_SECTION_STORAGE_KEY, nextHidden ? "1" : "0");
+      applySessionSectionVisibility(nextHidden);
+    });
+  }
+  if (toggleAgentSectionBtn && agentSectionBody) {
+    const hidden = isSectionHidden(AGENT_SECTION_STORAGE_KEY);
+    applyAgentSectionVisibility(hidden);
+    toggleAgentSectionBtn.addEventListener("click", () => {
+      const nextHidden = !agentSectionBody.classList.contains("is-collapsed");
+      localStorage.setItem(AGENT_SECTION_STORAGE_KEY, nextHidden ? "1" : "0");
+      applyAgentSectionVisibility(nextHidden);
+    });
+  }
+}
+
+function upsertCurrentProfileFromInputs() {
+  const profile = currentProfile();
+  if (!profile) {
+    return;
+  }
+  profile.token = tokenValue();
+  profile.chat_id = chatIdValue();
+  profile.user_id = userIdValue();
+
+  const catalogRow = catalogByBotId.get(profile.bot_id);
+  if (catalogRow && profile.token !== catalogRow.token) {
+    profile.bot_id = "";
+  }
+  saveState();
+}
+
+function maskToken(token) {
+  if (!token || typeof token !== "string") {
+    return "";
+  }
+  if (token.length <= 10) {
+    return token;
+  }
+  return `${token.slice(0, 4)}...${token.slice(-4)}`;
+}
+
+function buildStatusChips(profile, diagnostics) {
+  if (!selectedStatus) {
+    return;
+  }
+  const session = diagnostics?.session || {};
+  const health = diagnostics?.health?.bot || {};
+  const agent = String(session.current_agent || "unknown").toLowerCase();
+  const runStatus = String(session.run_status || "idle").toLowerCase();
+  const rows = [
+    { key: "bot", value: profile?.bot_id || "none", extraClass: "" },
+    { key: "agent", value: agent, extraClass: `status-chip--agent-${agent}` },
+    { key: "thread", value: session.thread_id || "none", extraClass: "" },
+    { key: "run", value: runStatus, extraClass: runStatus === "error" ? "status-chip--run-error" : "" },
+    { key: "health", value: health.ok ? "ok" : "down", extraClass: health.ok ? "status-chip--health-ok" : "status-chip--health-down" }
+  ];
+  selectedStatus.innerHTML = "";
+  for (const row of rows) {
+    const chip = document.createElement("span");
+    chip.className = `status-chip ${row.extraClass}`.trim();
+    const key = document.createElement("span");
+    key.className = "status-chip-key";
+    key.textContent = row.key;
+    const value = document.createElement("span");
+    value.className = "status-chip-value";
+    value.textContent = String(row.value);
+    chip.appendChild(key);
+    chip.appendChild(value);
+    selectedStatus.appendChild(chip);
+  }
+
+  if (timelineSessionStatus) {
+    const sessionChip = document.createElement("span");
+    sessionChip.className = "status-chip status-chip--session-inline";
+
+    const key = document.createElement("span");
+    key.className = "status-chip-key";
+    key.textContent = "session";
+
+    const value = document.createElement("span");
+    value.className = "status-chip-value";
+    value.textContent = String(session.session_id || "none");
+
+    sessionChip.appendChild(key);
+    sessionChip.appendChild(value);
+
+    timelineSessionStatus.innerHTML = "";
+    timelineSessionStatus.appendChild(sessionChip);
+  }
+}
+
+function renderParallelResults(rows) {
+  if (!parallelResults) {
+    return;
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    parallelResults.textContent = "아직 실행 결과가 없습니다.";
+    return;
+  }
+  parallelResults.innerHTML = "";
+  for (const rawRow of rows) {
+    const row = {
+      label: String(rawRow?.label || "unknown"),
+      status: String(rawRow?.status || "WAIT"),
+      detail: String(rawRow?.detail || "running")
+    };
+    const item = document.createElement("div");
+    item.className = "parallel-result-row";
+
+    const label = document.createElement("div");
+    label.className = "parallel-result-label";
+    label.textContent = row.label;
+
+    const status = document.createElement("div");
+    status.textContent = row.status;
+    if (row.status === "PASS") {
+      status.className = "parallel-status-pass";
+    } else if (row.status === "WAIT") {
+      status.className = "parallel-status-wait";
+    } else {
+      status.className = "parallel-status-fail";
+    }
+
+    const detail = document.createElement("div");
+    detail.className = "parallel-result-detail";
+    detail.textContent = row.detail;
+
+    item.appendChild(label);
+    item.appendChild(status);
+    item.appendChild(detail);
+    parallelResults.appendChild(item);
+  }
+  parallelResults.scrollTop = 0;
+}
+
+function setParallelSendBusy(busy) {
+  if (!parallelSendBtn) {
+    return;
+  }
+  parallelSendBtn.disabled = busy;
+  parallelSendBtn.textContent = busy ? "병렬 전송 실행 중..." : "선택 병렬 전송";
+}
+
+function syncWebhookFormFromProfile(profile) {
+  if (!profile) {
+    return;
+  }
+  const row = catalogByBotId.get(profile.bot_id);
+  if (!row) {
+    return;
+  }
+  const pathSecret = row?.webhook?.path_secret;
+  if (row.mode === "embedded" && row.embedded_url && pathSecret) {
+    webhookUrlInput.value = `${row.embedded_url}/telegram/webhook/${row.bot_id}/${pathSecret}`;
+  } else if (row?.webhook?.public_url) {
+    webhookUrlInput.value = String(row.webhook.public_url);
+  }
+  webhookSecretInput.value = row?.webhook?.secret_token || "";
+}
+
+function applyProfileToInputs(profile) {
+  if (!profile) {
+    tokenInput.value = "";
+    chatIdInput.value = "1001";
+    userIdInput.value = "9001";
+    return;
+  }
+  tokenInput.value = profile.token || "";
+  chatIdInput.value = String(numberOrDefault(profile.chat_id, 1001));
+  userIdInput.value = String(numberOrDefault(profile.user_id, 9001));
+  syncWebhookFormFromProfile(profile);
+}
+
+function selectProfile(profileId) {
+  const target = uiState.profiles.find((profile) => profile.profile_id === profileId);
+  if (!target) {
+    return;
+  }
+  uiState.selected_profile_id = target.profile_id;
+  applyProfileToInputs(target);
+  saveState();
+  renderBotList();
+  lastTimelineSignature = "";
+}
+
+function buildBotListRenderKey() {
+  if (!Array.isArray(uiState.profiles) || uiState.profiles.length === 0) {
+    return `empty:${String(uiState.selected_profile_id || "")}`;
+  }
+  return uiState.profiles
+    .map((profile) => {
+      const diag = profileDiagnostics.get(profile.profile_id) || null;
+      const session = diag?.session || {};
+      const healthOk = diag?.health?.bot?.ok === true ? "1" : "0";
+      const provider = String(session.current_agent || "");
+      const runStatus = String(session.run_status || "");
+      const selected = uiState.selected_profile_id === profile.profile_id ? "1" : "0";
+      const checked = profile.selected_for_parallel !== false ? "1" : "0";
+      return [
+        profile.profile_id,
+        profile.label,
+        profile.bot_id,
+        profile.token,
+        profile.chat_id,
+        profile.user_id,
+        checked,
+        selected,
+        provider,
+        runStatus,
+        healthOk,
+      ].join("|");
+    })
+    .join("||");
+}
+
+function renderBotList(force = false) {
+  if (!botList) {
+    return;
+  }
+  const renderKey = buildBotListRenderKey();
+  if (!force && renderKey === lastBotListRenderKey) {
+    return;
+  }
+  lastBotListRenderKey = renderKey;
+  botList.innerHTML = "";
+  if (!uiState.profiles.length) {
+    const empty = document.createElement("div");
+    empty.className = "bot-item-empty";
+    empty.textContent = "멀티봇 프로필이 없습니다. + 멀티봇 추가를 눌러 시작하세요.";
+    botList.appendChild(empty);
+    updateAddProfileButtonState();
+    return;
+  }
+
+  for (const profile of uiState.profiles) {
+    const diag = profileDiagnostics.get(profile.profile_id) || null;
+    const session = diag?.session || {};
+    const healthOk = Boolean(diag?.health?.bot?.ok);
+    const catalogRow = catalogByBotId.get(profile.bot_id);
+    const provider = session.current_agent || catalogRow?.default_adapter || "unknown";
+
+    const item = document.createElement("div");
+    item.className = "bot-item";
+    if (uiState.selected_profile_id === profile.profile_id) {
+      item.classList.add("is-selected");
+    }
+
+    const head = document.createElement("div");
+    head.className = "bot-item-head";
+
+    const left = document.createElement("div");
+    left.className = "bot-item-main";
+
+    const checkbox = document.createElement("input");
+    checkbox.className = "bot-item-check";
+    checkbox.type = "checkbox";
+    checkbox.checked = profile.selected_for_parallel !== false;
+    checkbox.addEventListener("click", (event) => event.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      profile.selected_for_parallel = checkbox.checked;
+      saveState();
+    });
+
+    const statusDot = document.createElement("span");
+    statusDot.className = `bot-item-status ${healthOk ? "ok" : "fail"}`;
+
+    const title = document.createElement("span");
+    title.className = "bot-item-title";
+    title.textContent = profile.label;
+
+    left.appendChild(checkbox);
+    left.appendChild(statusDot);
+    left.appendChild(title);
+
+    const right = document.createElement("div");
+    right.className = "bot-item-actions";
+
+    const providerBadge = document.createElement("span");
+    providerBadge.className = "bot-item-provider";
+    providerBadge.classList.add(`bot-item-provider-${provider}`);
+    providerBadge.textContent = provider;
+    right.appendChild(providerBadge);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "bot-item-delete-btn";
+    deleteBtn.textContent = "삭제";
+    deleteBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void removeBotProfile(profile.profile_id);
+    });
+    right.appendChild(deleteBtn);
+
+    head.appendChild(left);
+    head.appendChild(right);
+
+    const meta = document.createElement("div");
+    meta.className = "bot-item-meta";
+    const tokenLabel = maskToken(profile.token || "");
+    const rows = [
+      `bot_id=${profile.bot_id || "(manual)"}`,
+      `token=${tokenLabel || "none"}`,
+      `chat=${profile.chat_id} user=${profile.user_id}`
+    ];
+    for (const rowText of rows) {
+      const row = document.createElement("div");
+      row.className = "bot-item-meta-row";
+      row.textContent = rowText;
+      meta.appendChild(row);
+    }
+
+    item.appendChild(head);
+    item.appendChild(meta);
+    item.addEventListener("click", () => {
+      selectProfile(profile.profile_id);
+      refresh();
+    });
+    botList.appendChild(item);
+  }
+  updateAddProfileButtonState();
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, {
+    headers: { "Content-Type": "application/json" },
+    ...options
+  });
+  const data = await response.json();
+  if (!response.ok || data.ok === false) {
+    throw new Error(`${response.status}: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+async function loadCatalog() {
+  try {
+    const response = await requestJson("/_mock/bot_catalog");
+    catalog = Array.isArray(response?.result?.bots) ? response.result.bots : [];
+  } catch {
+    catalog = [];
+  }
+  catalogByBotId = new Map(catalog.map((row) => [String(row.bot_id), row]));
+}
+
+function ensureInitialProfileFromParams() {
+  const params = new URLSearchParams(window.location.search);
+  const paramToken = (params.get("token") || "").trim();
+  const paramChatId = numberOrDefault(params.get("chat_id"), 1001);
+  const paramUserId = numberOrDefault(params.get("user_id"), 9001);
+
+  if (uiState.profiles.length > 0) {
+    return;
+  }
+
+  let defaultBot = catalog[0] || null;
+  if (paramToken) {
+    defaultBot = catalog.find((row) => row.token === paramToken) || defaultBot;
+  }
+  if (!defaultBot && !paramToken) {
+    return;
+  }
+
+  uiState.profiles.push({
+    profile_id: makeProfileId(),
+    label: defaultBot ? `${defaultBot.name} 기본` : "기본 프로필",
+    bot_id: defaultBot?.bot_id || "",
+    token: paramToken || defaultBot?.token || DEFAULT_TOKEN,
+    chat_id: paramChatId,
+    user_id: paramUserId,
+    selected_for_parallel: true
+  });
+  uiState.selected_profile_id = uiState.profiles[0].profile_id;
+}
+
+function ensureSelectedProfile() {
+  if (!uiState.profiles.length) {
+    uiState.selected_profile_id = null;
+    return;
+  }
+  const exists = uiState.profiles.some((profile) => profile.profile_id === uiState.selected_profile_id);
+  if (!exists) {
+    uiState.selected_profile_id = uiState.profiles[0].profile_id;
+  }
+}
+
+function dedupeProfilesByBotId() {
+  if (!Array.isArray(uiState.profiles) || uiState.profiles.length <= 1) {
+    return;
+  }
+  const seen = new Set();
+  const nextProfiles = [];
+  for (const profile of uiState.profiles) {
+    const botId = String(profile?.bot_id || "");
+    if (!botId) {
+      nextProfiles.push(profile);
+      continue;
+    }
+    if (seen.has(botId)) {
+      continue;
+    }
+    seen.add(botId);
+    nextProfiles.push(profile);
+  }
+  uiState.profiles = nextProfiles;
+}
+
+function hydrateProfileDialog() {
+  if (!profileBotIdInput) {
+    return;
+  }
+  profileBotIdInput.innerHTML = "";
+  for (const row of catalog) {
+    const option = document.createElement("option");
+    option.value = row.bot_id;
+    option.textContent = `${row.name} (${row.bot_id})`;
+    profileBotIdInput.appendChild(option);
+  }
+  if (catalog.length > 0) {
+    profileBotIdInput.value = catalog[0].bot_id;
+  }
+}
+
+async function hydrateInputs() {
+  const saved = loadState();
+  if (saved) {
+    uiState = saved;
+  }
+
+  await loadCatalog();
+  dedupeProfilesByBotId();
+  ensureInitialProfileFromParams();
+  ensureSelectedProfile();
+
+  const selected = currentProfile();
+  applyProfileToInputs(selected);
+  hydrateProfileDialog();
+  renderBotList();
+  renderParallelResults([]);
+  saveState();
 }
 
 function hideCommandSuggest() {
@@ -193,82 +829,6 @@ function hasSelectionInTimeline() {
   const anchorIn = selection.anchorNode && timelineList.contains(selection.anchorNode);
   const focusIn = selection.focusNode && timelineList.contains(selection.focusNode);
   return Boolean(anchorIn || focusIn);
-}
-
-function numberOrDefault(value, fallback) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed === 0) {
-    return fallback;
-  }
-  return Math.trunc(parsed);
-}
-
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return {};
-    }
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveState() {
-  const state = {
-    token: tokenValue(),
-    chat_id: chatIdValue(),
-    user_id: userIdValue(),
-    webhook_url: webhookUrlInput.value.trim(),
-    webhook_secret: webhookSecretInput.value.trim()
-  };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-}
-
-async function hydrateInputs() {
-  const params = new URLSearchParams(window.location.search);
-  const saved = loadState();
-
-  const paramToken = (params.get("token") || "").trim();
-  const paramChatId = params.get("chat_id");
-  const paramUserId = params.get("user_id");
-
-  tokenInput.value = paramToken || saved.token || tokenInput.value.trim() || DEFAULT_TOKEN;
-  chatIdInput.value = String(numberOrDefault(paramChatId ?? saved.chat_id ?? chatIdInput.value, 1001));
-  userIdInput.value = String(numberOrDefault(paramUserId ?? saved.user_id ?? userIdInput.value, 9001));
-  webhookUrlInput.value = (params.get("webhook_url") || saved.webhook_url || webhookUrlInput.value || "").trim();
-  webhookSecretInput.value = (params.get("webhook_secret") || saved.webhook_secret || webhookSecretInput.value || "").trim();
-
-  if (!paramToken) {
-    try {
-      const stateResp = await requestJson("/_mock/state");
-      const bots = stateResp?.result?.state?.bots;
-      if (Array.isArray(bots) && bots.length > 0) {
-        const current = tokenValue();
-        const hasCurrent = bots.some((bot) => bot.token === current);
-        if (!hasCurrent) {
-          tokenInput.value = bots[0].token;
-        }
-      }
-    } catch {
-      // keep local/default token when mock state fetch fails
-    }
-  }
-  saveState();
-}
-
-async function requestJson(url, options = {}) {
-  const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
-    ...options
-  });
-  const data = await response.json();
-  if (!response.ok || data.ok === false) {
-    throw new Error(`${response.status}: ${JSON.stringify(data)}`);
-  }
-  return data;
 }
 
 function appendBubble(kind, text) {
@@ -493,7 +1053,7 @@ function isSafeBotHtmlSnippet(text) {
       return false;
     }
 
-    const element = /** @type {Element} */ (node);
+    const element = node;
     if (!allowedTags.has(element.tagName)) {
       return false;
     }
@@ -767,16 +1327,6 @@ function renderTimeline(messages) {
   timelineList.scrollTop = Math.min(prevScrollTop, maxTop);
 }
 
-function maskToken(token) {
-  if (!token || typeof token !== "string") {
-    return "";
-  }
-  if (token.length <= 10) {
-    return token;
-  }
-  return `${token.slice(0, 4)}...${token.slice(-4)}`;
-}
-
 function compactState(result) {
   const state = result?.state ?? {};
   const bots = Array.isArray(state.bots) ? state.bots : [];
@@ -878,43 +1428,273 @@ function compactThreads(result, selectedChatId) {
   return normalized.slice(0, 10);
 }
 
-async function refresh() {
-  const token = tokenValue();
+async function sendTextToProfile(profile, text) {
+  await requestJson("/_mock/send", {
+    method: "POST",
+    body: JSON.stringify({
+      token: profile.token,
+      chat_id: Number(profile.chat_id),
+      user_id: Number(profile.user_id),
+      text
+    })
+  });
+}
 
-  try {
-    if (!token) {
-      const [stateResp, threadsResp] = await Promise.all([
-        requestJson("/_mock/state"),
-        requestJson("/_mock/threads")
-      ]);
-      lastTimelineSignature = "";
-      latestMessages = [];
-      renderTimeline([]);
-      if (agentJson) {
-        agentJson.textContent = JSON.stringify(inferCurrentAgent([]), null, 2);
-      }
-      stateJson.textContent = JSON.stringify(compactState(stateResp.result), null, 2);
-      threadsJson.textContent = JSON.stringify(compactThreads(threadsResp.result, chatIdValue()), null, 2);
-      return;
+async function maxMessageIdForProfile(profile) {
+  const response = await requestJson(
+    `/_mock/messages?token=${encodeURIComponent(profile.token)}&chat_id=${Number(profile.chat_id)}&limit=1`
+  );
+  const messages = Array.isArray(response?.result?.messages) ? response.result.messages : [];
+  if (!messages.length) {
+    return 0;
+  }
+  return Number(messages[messages.length - 1].message_id || 0);
+}
+
+function classifyOutcomeFromTexts(texts) {
+  const joined = (texts || []).join("\n").toLowerCase();
+  if (
+    /\bturn_completed\b[\s\S]*?"status"\s*:\s*"error"/i.test(joined) ||
+    joined.includes("[error]") ||
+    joined.includes("[delivery_error]") ||
+    joined.includes("executable not found") ||
+    joined.includes("send error")
+  ) {
+    return { done: true, status: "FAIL", detail: "error" };
+  }
+  if (joined.includes("turn_completed")) {
+    return { done: true, status: "PASS", detail: "turn_completed" };
+  }
+  if (joined.includes("[assistant_message]")) {
+    return { done: true, status: "PASS", detail: "assistant_message" };
+  }
+  return { done: false, status: "WAIT", detail: "running" };
+}
+
+async function waitForParallelOutcome(profile, baselineMessageId, timeoutSec = 60) {
+  for (let elapsed = 0; elapsed < timeoutSec; elapsed += 1) {
+    const [messagesResp, diagnosticsResp] = await Promise.all([
+      requestJson(`/_mock/messages?token=${encodeURIComponent(profile.token)}&chat_id=${Number(profile.chat_id)}&limit=120`),
+      requestJson(
+        `/_mock/bot_diagnostics?bot_id=${encodeURIComponent(profile.bot_id)}&token=${encodeURIComponent(
+          profile.token
+        )}&chat_id=${Number(profile.chat_id)}&limit=120`
+      ),
+    ]);
+
+    const messages = Array.isArray(messagesResp?.result?.messages) ? messagesResp.result.messages : [];
+    const texts = messages
+      .filter((message) => Number(message.message_id || 0) > baselineMessageId && message.direction === "bot")
+      .map((message) => String(message.text || ""));
+
+    const outcome = classifyOutcomeFromTexts(texts);
+    if (outcome.done) {
+      return outcome;
     }
 
-    const [messagesResp, stateResp, threadsResp] = await Promise.all([
-      requestJson(`/_mock/messages?token=${encodeURIComponent(token)}&chat_id=${chatIdValue()}&limit=100`),
-      requestJson(`/_mock/state?token=${encodeURIComponent(token)}`),
-      requestJson(`/_mock/threads?token=${encodeURIComponent(token)}`)
+    const diagnostics = diagnosticsResp?.result || {};
+    const runStatus = String(diagnostics?.session?.run_status || "").toLowerCase();
+    if (texts.length > 0 && runStatus === "completed") {
+      return { done: true, status: "PASS", detail: "run_status=completed" };
+    }
+    if (runStatus === "error") {
+      const tag = String(diagnostics?.last_error_tag || "error");
+      return { done: true, status: "FAIL", detail: tag };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return { done: true, status: "FAIL", detail: "timeout" };
+}
+
+async function runParallelSend() {
+  const targets = uiState.profiles.filter((profile) => profile.selected_for_parallel !== false);
+  if (targets.length < 2) {
+    renderParallelResults([
+      {
+        label: "병렬 전송",
+        status: "FAIL",
+        detail: "대상 봇을 2개 이상 체크하세요."
+      }
+    ]);
+    appendBubble("meta", "병렬 전송 대상은 2개 이상 선택해야 합니다.");
+    return;
+  }
+
+  const textSource = parallelMessageInput && parallelMessageInput.value.trim() ? parallelMessageInput.value : messageInput.value;
+  const text = textSource.trim();
+  if (!text) {
+    renderParallelResults([
+      {
+        label: "병렬 전송",
+        status: "FAIL",
+        detail: "메시지를 입력하세요."
+      }
+    ]);
+    appendBubble("meta", "병렬 전송할 메시지를 입력하세요.");
+    return;
+  }
+  if (parallelMessageInput && !parallelMessageInput.value.trim()) {
+    parallelMessageInput.value = text;
+  }
+
+  const results = targets.map((profile) => ({
+    label: profile.label,
+    status: "WAIT",
+    detail: "queued"
+  }));
+  renderParallelResults(results);
+  setParallelSendBusy(true);
+  appendBubble("meta", `병렬 전송 시작: ${targets.length}개 대상`);
+
+  try {
+    await Promise.all(
+      targets.map(async (profile, index) => {
+        try {
+          const baseline = await maxMessageIdForProfile(profile);
+          await sendTextToProfile(profile, text);
+          const outcome = await waitForParallelOutcome(profile, baseline, 60);
+          results[index] = {
+            label: profile.label,
+            status: outcome.status,
+            detail: outcome.detail
+          };
+        } catch (error) {
+          results[index] = {
+            label: profile.label,
+            status: "FAIL",
+            detail: String(error.message || error)
+          };
+        }
+        renderParallelResults(results);
+      })
+    );
+    appendBubble("meta", "병렬 전송 완료");
+    await refresh();
+  } finally {
+    setParallelSendBusy(false);
+  }
+}
+
+async function refreshProfileDiagnostics() {
+  const jobs = uiState.profiles.map(async (profile) => {
+    if (!profile.bot_id || !profile.token) {
+      return;
+    }
+    try {
+      const response = await requestJson(
+        `/_mock/bot_diagnostics?bot_id=${encodeURIComponent(profile.bot_id)}&token=${encodeURIComponent(
+          profile.token
+        )}&chat_id=${Number(profile.chat_id)}&limit=80`
+      );
+      profileDiagnostics.set(profile.profile_id, response.result);
+    } catch {
+      profileDiagnostics.set(profile.profile_id, {
+        health: { bot: { ok: false, error: "diagnostics unavailable" } },
+        session: { current_agent: "unknown", run_status: "unknown" },
+        metrics: { in_flight_runs: null, worker_heartbeat: { run_worker: null, update_worker: null } },
+        last_error_tag: "unknown",
+        threads_top10: []
+      });
+    }
+  });
+  await Promise.all(jobs);
+  renderBotList();
+}
+
+async function refreshOnce() {
+  const profile = currentProfile();
+  if (!profile || !profile.token) {
+    latestMessages = [];
+    renderTimeline([]);
+    if (agentJson) {
+      agentJson.textContent = JSON.stringify({ current_agent: "unknown", source: "none" }, null, 2);
+    }
+    if (diagnosticsJson) {
+      diagnosticsJson.textContent = JSON.stringify({ status: "no profile selected" }, null, 2);
+    }
+    if (stateJson) {
+      stateJson.textContent = JSON.stringify({}, null, 2);
+    }
+    if (threadsJson) {
+      threadsJson.textContent = JSON.stringify([], null, 2);
+    }
+    return;
+  }
+
+  try {
+    const [messagesResp, stateResp, threadsResp, diagnosticsResp] = await Promise.all([
+      requestJson(`/_mock/messages?token=${encodeURIComponent(profile.token)}&chat_id=${Number(profile.chat_id)}&limit=120`),
+      requestJson(`/_mock/state?token=${encodeURIComponent(profile.token)}`),
+      requestJson(`/_mock/threads?token=${encodeURIComponent(profile.token)}`),
+      requestJson(
+        `/_mock/bot_diagnostics?bot_id=${encodeURIComponent(profile.bot_id)}&token=${encodeURIComponent(
+          profile.token
+        )}&chat_id=${Number(profile.chat_id)}&limit=120`
+      )
     ]);
 
     latestMessages = Array.isArray(messagesResp.result.messages) ? messagesResp.result.messages : [];
     renderTimeline(latestMessages);
 
+    const diagnostics = diagnosticsResp.result || {};
+    profileDiagnostics.set(profile.profile_id, diagnostics);
+    const inferredAgent = inferCurrentAgent(latestMessages);
+
     if (agentJson) {
-      agentJson.textContent = JSON.stringify(inferCurrentAgent(latestMessages), null, 2);
+      agentJson.textContent = JSON.stringify(diagnostics.session || inferredAgent, null, 2);
     }
-    stateJson.textContent = JSON.stringify(compactState(stateResp.result), null, 2);
-    threadsJson.textContent = JSON.stringify(compactThreads(threadsResp.result, chatIdValue()), null, 2);
+    if (diagnosticsJson) {
+      diagnosticsJson.textContent = JSON.stringify(
+        {
+          health: diagnostics.health || null,
+          metrics: diagnostics.metrics || null,
+          last_error_tag: diagnostics.last_error_tag || "unknown"
+        },
+        null,
+        2
+      );
+    }
+    if (stateJson) {
+      stateJson.textContent = JSON.stringify(compactState(stateResp.result), null, 2);
+    }
+    if (threadsJson) {
+      const top = Array.isArray(diagnostics.threads_top10)
+        ? diagnostics.threads_top10
+        : compactThreads(threadsResp.result, Number(profile.chat_id));
+      threadsJson.textContent = JSON.stringify(top, null, 2);
+    }
+
+    buildStatusChips(profile, diagnostics);
+    const now = Date.now();
+    if (now - lastSidebarDiagnosticsAt >= SIDEBAR_DIAGNOSTICS_REFRESH_MS) {
+      await refreshProfileDiagnostics();
+      lastSidebarDiagnosticsAt = now;
+    } else {
+      renderBotList();
+    }
   } catch (error) {
     appendBubble("meta", `refresh error: ${error.message}`);
   }
+}
+
+function refresh() {
+  if (refreshInFlight) {
+    refreshQueued = true;
+    return refreshPromise || Promise.resolve();
+  }
+
+  refreshInFlight = true;
+  refreshPromise = (async () => {
+    do {
+      refreshQueued = false;
+      await refreshOnce();
+    } while (refreshQueued);
+  })().finally(() => {
+    refreshInFlight = false;
+    refreshPromise = null;
+  });
+
+  return refreshPromise;
 }
 
 function updateEssentialToggleButton() {
@@ -922,14 +1702,17 @@ function updateEssentialToggleButton() {
     return;
   }
   const modeLabel = essentialMode ? "ON" : "OFF";
-  toggleEssentialBtn.textContent = `필수 메시지 보기: ${modeLabel}`;
+  toggleEssentialBtn.innerHTML = '<span class="material-symbols-outlined icon-sm" aria-hidden="true">filter_alt</span>';
+  const label = `필수 메시지 보기: ${modeLabel}`;
+  toggleEssentialBtn.title = label;
+  toggleEssentialBtn.setAttribute("aria-label", label);
   toggleEssentialBtn.classList.toggle("is-active", essentialMode);
 }
 
-sendBtn.addEventListener("click", async () => {
-  const token = tokenValue();
+async function handleSendCurrentMessage() {
+  const profile = currentProfile();
   const text = messageInput.value.trim();
-  if (!token) {
+  if (!profile || !profile.token) {
     appendBubble("meta", `token is required (default: ${DEFAULT_TOKEN})`);
     return;
   }
@@ -940,23 +1723,170 @@ sendBtn.addEventListener("click", async () => {
 
   try {
     followTimeline = true;
-    await requestJson("/_mock/send", {
-      method: "POST",
-      body: JSON.stringify({
-        token,
-        chat_id: chatIdValue(),
-        user_id: userIdValue(),
-        text
-      })
-    });
+    await sendTextToProfile(profile, text);
     messageInput.value = "";
     hideCommandSuggest();
-    saveState();
     await refresh();
   } catch (error) {
     appendBubble("meta", `send error: ${error.message}`);
   }
-});
+}
+
+async function clearCurrentTimeline() {
+  const profile = currentProfile();
+  if (!profile || !profile.token) {
+    appendBubble("meta", `token is required (default: ${DEFAULT_TOKEN})`);
+    return;
+  }
+
+  const confirmed = globalThis.confirm("현재 채팅 타임라인을 비울까요?");
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await requestJson("/_mock/messages/clear", {
+      method: "POST",
+      body: JSON.stringify({
+        token: profile.token,
+        chat_id: Number(profile.chat_id)
+      })
+    });
+    latestMessages = [];
+    lastTimelineSignature = "";
+    renderTimeline([]);
+    await refresh();
+  } catch (error) {
+    appendBubble("meta", `timeline clear error: ${error.message}`);
+  }
+}
+
+function wireQuickActions() {
+  for (const button of document.querySelectorAll(".quick-action-btn")) {
+    button.addEventListener("click", async () => {
+      const cmd = String(button.dataset.command || "").trim();
+      if (!cmd) {
+        return;
+      }
+      messageInput.value = cmd;
+      await handleSendCurrentMessage();
+    });
+  }
+}
+
+function openProfileDialog() {
+  if (!profileDialog) {
+    return;
+  }
+  hydrateProfileDialog();
+  const first = catalogByBotId.get(profileBotIdInput.value) || catalog[0];
+  profileLabelInput.value = first ? `${first.name} 테스트` : "새 멀티봇";
+  profileChatIdInput.value = String(1001);
+  profileUserIdInput.value = String(9001);
+  profileDialog.showModal();
+}
+
+async function addProfileAutomatically() {
+  const current = currentProfile();
+  const chatId = current ? numberOrDefault(current.chat_id, 1001) : numberOrDefault(chatIdInput.value, 1001);
+  const userId = current ? numberOrDefault(current.user_id, 9001) : numberOrDefault(userIdInput.value, 9001);
+  const currentCatalogRow = current ? catalogByBotId.get(String(current.bot_id || "")) : null;
+  const adapter = String(currentCatalogRow?.default_adapter || "codex");
+
+  const response = await requestJson("/_mock/bot_catalog/add", {
+    method: "POST",
+    body: JSON.stringify({ adapter })
+  });
+  const created = response?.result?.bot;
+  if (!created?.bot_id || !created?.token) {
+    throw new Error("created bot response is invalid");
+  }
+
+  await loadCatalog();
+
+  const profile = {
+    profile_id: makeProfileId(),
+    label: `${String(created.name || created.bot_id)} 테스트`,
+    bot_id: String(created.bot_id),
+    token: String(created.token || DEFAULT_TOKEN),
+    chat_id: chatId,
+    user_id: userId,
+    selected_for_parallel: true,
+  };
+
+  uiState.profiles.push(profile);
+  uiState.selected_profile_id = profile.profile_id;
+  applyProfileToInputs(profile);
+  saveState();
+  renderBotList();
+  return true;
+}
+
+async function removeBotProfile(profileId) {
+  const target = uiState.profiles.find((profile) => profile.profile_id === profileId);
+  if (!target) {
+    return;
+  }
+
+  const botId = String(target.bot_id || "");
+  if (botId) {
+    const ok = globalThis.confirm(`봇 ${botId}를 삭제하고 연결된 프로필을 제거할까요?`);
+    if (!ok) {
+      return;
+    }
+    await requestJson("/_mock/bot_catalog/delete", {
+      method: "POST",
+      body: JSON.stringify({ bot_id: botId })
+    });
+    uiState.profiles = uiState.profiles.filter((profile) => String(profile.bot_id || "") !== botId);
+  } else {
+    uiState.profiles = uiState.profiles.filter((profile) => profile.profile_id !== profileId);
+  }
+
+  ensureSelectedProfile();
+  await loadCatalog();
+  const selected = currentProfile();
+  applyProfileToInputs(selected);
+  saveState();
+  renderBotList();
+  await refresh();
+}
+
+function closeProfileDialog() {
+  if (profileDialog && profileDialog.open) {
+    profileDialog.close();
+  }
+}
+
+function addProfileFromDialog() {
+  const botId = String(profileBotIdInput.value || "");
+  const row = catalogByBotId.get(botId);
+  const duplicate = uiState.profiles.some((profile) => String(profile.bot_id || "") === botId);
+  if (botId && duplicate) {
+    appendBubble("meta", `중복 bot_id(${botId})는 추가할 수 없습니다.`);
+    return;
+  }
+  const label = String(profileLabelInput.value || "").trim() || (row ? `${row.name} 테스트` : "새 멀티봇");
+  const profile = {
+    profile_id: makeProfileId(),
+    label,
+    bot_id: botId,
+    token: row?.token || DEFAULT_TOKEN,
+    chat_id: numberOrDefault(profileChatIdInput.value, 1001),
+    user_id: numberOrDefault(profileUserIdInput.value, 9001),
+    selected_for_parallel: true
+  };
+  uiState.profiles.push(profile);
+  uiState.selected_profile_id = profile.profile_id;
+  applyProfileToInputs(profile);
+  saveState();
+  renderBotList();
+}
+
+sendBtn.addEventListener("click", handleSendCurrentMessage);
+if (clearTimelineBtn) {
+  clearTimelineBtn.addEventListener("click", clearCurrentTimeline);
+}
 
 messageInput.addEventListener("keydown", (event) => {
   if (isCommandSuggestVisible()) {
@@ -1033,7 +1963,6 @@ setWebhookBtn.addEventListener("click", async () => {
         drop_pending_updates: false
       })
     });
-    saveState();
     await refresh();
   } catch (error) {
     appendBubble("meta", `setWebhook error: ${error.message}`);
@@ -1052,7 +1981,6 @@ deleteWebhookBtn.addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({ drop_pending_updates: false })
     });
-    saveState();
     await refresh();
   } catch (error) {
     appendBubble("meta", `deleteWebhook error: ${error.message}`);
@@ -1089,10 +2017,54 @@ toggleEssentialBtn.addEventListener("click", () => {
   updateEssentialToggleButton();
   renderTimeline(latestMessages);
 });
+if (addProfileBtn) {
+  addProfileBtn.addEventListener("click", async () => {
+    try {
+      await addProfileAutomatically();
+      await refresh();
+    } catch (error) {
+      appendBubble("meta", `멀티봇 추가 실패: ${error.message}`);
+    }
+  });
+}
 
-tokenInput.addEventListener("change", saveState);
-chatIdInput.addEventListener("change", saveState);
-userIdInput.addEventListener("change", saveState);
+if (parallelSendBtn) {
+  parallelSendBtn.addEventListener("click", runParallelSend);
+}
+
+if (parallelMessageInput) {
+  parallelMessageInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    if (parallelSendBtn) {
+      parallelSendBtn.click();
+    }
+  });
+}
+
+if (profileCancelBtn) {
+  profileCancelBtn.addEventListener("click", closeProfileDialog);
+}
+
+if (profileForm) {
+  profileForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    addProfileFromDialog();
+    closeProfileDialog();
+    refresh();
+  });
+}
+
+[tokenInput, chatIdInput, userIdInput].forEach((input) => {
+  input.addEventListener("change", () => {
+    upsertCurrentProfileFromInputs();
+    renderBotList();
+    refresh();
+  });
+});
+
 webhookUrlInput.addEventListener("change", saveState);
 webhookSecretInput.addEventListener("change", saveState);
 timelineList.addEventListener("scroll", () => {
@@ -1105,8 +2077,14 @@ window.addEventListener("pointerup", () => {
   timelinePointerDown = false;
 });
 
-setInterval(refresh, 1000);
-hydrateInputs().then(() => {
+setInterval(() => {
+  void refresh();
+}, AUTO_REFRESH_INTERVAL_MS);
+initTheme();
+initSectionToggles();
+hydrateInputs().then(async () => {
+  wireQuickActions();
   updateEssentialToggleButton();
-  return refresh();
+  await refreshProfileDiagnostics();
+  await refresh();
 });

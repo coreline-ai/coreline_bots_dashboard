@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -392,6 +393,67 @@ class MockMessengerStore:
             }
             for row in rows
         ]
+
+    def clear_messages(self, *, token: str, chat_id: int | None = None) -> dict[str, int]:
+        chat_key = str(chat_id) if chat_id is not None else None
+        query = [
+            "SELECT id, path",
+            "FROM documents",
+            "WHERE token = ?",
+        ]
+        params: list[Any] = [token]
+        if chat_key is not None:
+            query.append("AND chat_id = ?")
+            params.append(chat_key)
+
+        with self._lock:
+            doc_rows = self._conn.execute("\n".join(query), tuple(params)).fetchall()
+            file_paths = [str(row["path"]) for row in doc_rows if row["path"]]
+
+            if chat_key is None:
+                deleted_docs = self._conn.execute(
+                    "DELETE FROM documents WHERE token = ?",
+                    (token,),
+                ).rowcount
+                deleted_messages = self._conn.execute(
+                    "DELETE FROM messages WHERE token = ?",
+                    (token,),
+                ).rowcount
+                deleted_updates = self._conn.execute(
+                    "DELETE FROM updates WHERE token = ?",
+                    (token,),
+                ).rowcount
+            else:
+                deleted_docs = self._conn.execute(
+                    "DELETE FROM documents WHERE token = ? AND chat_id = ?",
+                    (token, chat_key),
+                ).rowcount
+                deleted_messages = self._conn.execute(
+                    "DELETE FROM messages WHERE token = ? AND chat_id = ?",
+                    (token, chat_key),
+                ).rowcount
+                deleted_updates = self._conn.execute(
+                    "DELETE FROM updates WHERE token = ? AND chat_id = ?",
+                    (token, chat_key),
+                ).rowcount
+            self._conn.commit()
+
+        removed_files = 0
+        for path in file_paths:
+            try:
+                os.remove(path)
+                removed_files += 1
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+
+        return {
+            "deleted_messages": int(deleted_messages or 0),
+            "deleted_documents": int(deleted_docs or 0),
+            "deleted_updates": int(deleted_updates or 0),
+            "removed_files": removed_files,
+        }
 
     def get_messages(self, *, token: str, chat_id: int | None, limit: int) -> list[dict[str, Any]]:
         query = [

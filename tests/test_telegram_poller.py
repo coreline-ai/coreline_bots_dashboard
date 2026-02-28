@@ -11,10 +11,14 @@ class FakeRepository:
     def __init__(self, max_update_id: int | None) -> None:
         self.max_update_id = max_update_id
         self.max_id_calls = 0
+        self.reset_calls = 0
 
     async def get_max_telegram_update_id(self, *, bot_id: str) -> int | None:
         self.max_id_calls += 1
         return self.max_update_id
+
+    async def reset_telegram_ingest_state(self, *, bot_id: str) -> None:
+        self.reset_calls += 1
 
     async def insert_telegram_update(self, **kwargs) -> bool:  # pragma: no cover
         return False
@@ -56,6 +60,7 @@ async def test_poller_uses_persisted_offset_by_default() -> None:
     )
 
     assert repository.max_id_calls == 1
+    assert repository.reset_calls == 0
     assert client.delete_webhook_calls == 1
     assert client.offsets
     assert client.offsets[0] == 43
@@ -80,6 +85,7 @@ async def test_poller_ignores_persisted_offset_when_requested() -> None:
     )
 
     assert repository.max_id_calls == 0
+    assert repository.reset_calls == 1
     assert client.delete_webhook_calls == 1
     assert client.offsets
     assert client.offsets[0] is None

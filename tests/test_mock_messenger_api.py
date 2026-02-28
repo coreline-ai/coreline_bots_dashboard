@@ -147,3 +147,253 @@ def test_document_metadata_and_download_endpoint(mock_client: TestClient) -> Non
     html_download = mock_client.get(html_document["url"])
     assert html_download.status_code == 200
     assert "text/html" in (html_download.headers.get("content-type") or "")
+
+
+def test_clear_timeline_messages_endpoint(mock_client: TestClient) -> None:
+    token = "token-clear"
+    chat_id = 303
+
+    first = mock_client.post(
+        "/_mock/send",
+        json={"token": token, "chat_id": chat_id, "user_id": 9001, "text": "hello"},
+    )
+    assert first.status_code == 200
+
+    second = mock_client.post(
+        f"/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": "bot reply"},
+    )
+    assert second.status_code == 200
+    assert second.json()["ok"] is True
+
+    before = mock_client.get(f"/_mock/messages?token={token}&chat_id={chat_id}&limit=50")
+    assert before.status_code == 200
+    assert len(before.json()["result"]["messages"]) == 2
+
+    cleared = mock_client.post(
+        "/_mock/messages/clear",
+        json={"token": token, "chat_id": chat_id},
+    )
+    assert cleared.status_code == 200
+    payload = cleared.json()
+    assert payload["ok"] is True
+    assert payload["result"]["deleted_messages"] == 2
+    assert payload["result"]["deleted_documents"] == 0
+    assert payload["result"]["deleted_updates"] >= 1
+
+    after = mock_client.get(f"/_mock/messages?token={token}&chat_id={chat_id}&limit=50")
+    assert after.status_code == 200
+    assert after.json()["result"]["messages"] == []
+
+
+def _write_bots_yaml(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "bots:",
+                "  - bot_id: bot-a",
+                "    name: Bot A",
+                "    mode: embedded",
+                "    telegram_token: mock_token_a",
+                "    adapter: codex",
+                "    webhook:",
+                "      path_secret: bot-a-path",
+                "      secret_token: bot-a-secret",
+                "  - bot_id: bot-b",
+                "    name: Bot B",
+                "    mode: embedded",
+                "    telegram_token: mock_token_b",
+                "    adapter: gemini",
+                "    webhook:",
+                "      path_secret: bot-b-path",
+                "      secret_token: bot-b-secret",
+                "  - bot_id: bot-c",
+                "    name: Bot C",
+                "    mode: gateway",
+                "    telegram_token: mock_token_c",
+                "    adapter: claude",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_mock_bot_catalog_endpoint(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog.db"),
+        data_dir=str(tmp_path / "catalog-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        response = client.get("/_mock/bot_catalog")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        bots = payload["result"]["bots"]
+        assert len(bots) == 3
+        assert bots[0]["bot_id"] == "bot-a"
+        assert bots[0]["embedded_url"] == "http://127.0.0.1:8600"
+        assert bots[1]["bot_id"] == "bot-b"
+        assert bots[1]["embedded_url"] == "http://127.0.0.1:8601"
+        assert bots[2]["mode"] == "gateway"
+        assert bots[2]["embedded_url"] is None
+    store.close()
+
+
+def test_mock_bot_catalog_endpoint_returns_empty_on_missing_config(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-missing.db"),
+        data_dir=str(tmp_path / "catalog-missing-data"),
+    )
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(tmp_path / "does-not-exist.yaml"),
+    )
+    with TestClient(app) as client:
+        response = client.get("/_mock/bot_catalog")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["result"]["bots"] == []
+    store.close()
+
+
+def test_mock_bot_diagnostics_endpoint_with_bot_down(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "diagnostics.db"),
+        data_dir=str(tmp_path / "diagnostics-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=65430,
+    )
+    with TestClient(app) as client:
+        send = client.post(
+            "/_mock/send",
+            json={"token": "mock_token_a", "chat_id": 1001, "user_id": 9001, "text": "/status"},
+        )
+        assert send.status_code == 200
+
+        response = client.get(
+            "/_mock/bot_diagnostics",
+            params={"bot_id": "bot-a", "token": "mock_token_a", "chat_id": 1001, "limit": 120},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        result = payload["result"]
+        assert result["health"]["bot"]["ok"] is False
+        assert result["metrics"]["in_flight_runs"] is None
+        assert result["metrics"]["worker_heartbeat"]["run_worker"] is None
+        assert result["metrics"]["worker_heartbeat"]["update_worker"] is None
+        assert isinstance(result["threads_top10"], list)
+        assert result["last_error_tag"] in {
+            "binary_missing",
+            "timeout",
+            "active_run",
+            "parse_error",
+            "delivery_error",
+            "unknown",
+        }
+    store.close()
+
+
+def test_mock_bot_catalog_add_endpoint(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-add.db"),
+        data_dir=str(tmp_path / "catalog-add-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        before = client.get("/_mock/bot_catalog").json()["result"]["bots"]
+        before_ids = {row["bot_id"] for row in before}
+
+        created = client.post("/_mock/bot_catalog/add", json={"adapter": "gemini"})
+        assert created.status_code == 200
+        payload = created.json()
+        assert payload["ok"] is True
+        row = payload["result"]["bot"]
+        assert row["mode"] == "embedded"
+        assert row["default_adapter"] == "gemini"
+        assert row["bot_id"] not in before_ids
+        assert isinstance(row["token"], str)
+        assert row["token"]
+
+        after = client.get("/_mock/bot_catalog").json()["result"]["bots"]
+        assert len(after) == len(before) + 1
+        assert any(item["bot_id"] == row["bot_id"] for item in after)
+    store.close()
+
+
+def test_mock_bot_catalog_delete_endpoint(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-delete.db"),
+        data_dir=str(tmp_path / "catalog-delete-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        deleted = client.post("/_mock/bot_catalog/delete", json={"bot_id": "bot-a"})
+        assert deleted.status_code == 200
+        assert deleted.json()["ok"] is True
+
+        after = client.get("/_mock/bot_catalog").json()["result"]["bots"]
+        assert all(row["bot_id"] != "bot-a" for row in after)
+
+        missing = client.post("/_mock/bot_catalog/delete", json={"bot_id": "does-not-exist"})
+        assert missing.status_code == 404
+    store.close()
+
+
+def test_mock_bot_catalog_add_endpoint_creates_missing_config(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-create.db"),
+        data_dir=str(tmp_path / "catalog-create-data"),
+    )
+    missing_config = tmp_path / "new-bots.yaml"
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(missing_config),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        created = client.post("/_mock/bot_catalog/add", json={})
+        assert created.status_code == 200
+        payload = created.json()
+        assert payload["ok"] is True
+        assert payload["result"]["total_bots"] == 1
+    assert missing_config.exists()
+    store.close()

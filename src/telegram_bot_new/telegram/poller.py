@@ -25,6 +25,12 @@ async def run_telegram_poller(
     stop_event: asyncio.Event,
     ignore_persisted_offset: bool = False,
 ) -> None:
+    if ignore_persisted_offset:
+        # Local mock servers can be recreated with update_id reset to low values.
+        # Clearing ingest state prevents old (bot_id, update_id) PK rows from
+        # dropping newly delivered updates after a mock reset/restart.
+        await repository.reset_telegram_ingest_state(bot_id=bot_id)
+
     try:
         await client.delete_webhook(drop_pending_updates=False)
     except TelegramApiError as error:

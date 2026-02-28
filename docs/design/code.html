@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>화이트 &amp; 파스텔 클린 봇 대시보드</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,typography"></script>
+<script>
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        primary: "#333333", // Charcoal/Black for primary actions
+                        "primary-hover": "#000000",
+                        "accent-lavender": "#E6E6FA",
+                        "accent-mint": "#F0FFF4",
+                        "accent-mint-dark": "#38A169", // For text on mint
+                        "accent-blue": "#E0F2FE",
+                        "accent-blue-dark": "#0284C7", // For text on blue
+                        "background-light": "#FAFAFA", // Very subtle off-white for body
+                        "background-dark": "#111827",
+                        "surface-light": "#FFFFFF",
+                        "surface-dark": "#1F2937",
+                        "border-light": "#F3F4F6", // Very light gray
+                        "border-dark": "#374151",
+                        "text-main-light": "#1F2937",
+                        "text-main-dark": "#F9FAFB",
+                        "text-muted-light": "#9CA3AF",
+                        "text-muted-dark": "#9CA3AF",
+                    },
+                    fontFamily: {
+                        display: ["Inter", "sans-serif"],
+                        mono: ["Fira Code", "monospace"],
+                    },
+                    boxShadow: {
+                        'soft': '0 4px 20px -2px rgba(0, 0, 0, 0.05)',
+                        'card': '0 1px 3px 0 rgba(0, 0, 0, 0.02), 0 1px 2px 0 rgba(0, 0, 0, 0.01)',
+                    }
+                },
+            },
+        };
+    </script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&amp;family=Fira+Code:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            font-size: 20px;
+        }
+        .icon-sm {
+            font-size: 16px;
+        }
+        .icon-xs {
+            font-size: 14px;
+        }
+        .scrollbar-hide::-webkit-scrollbar {
+            display: none;
+        }
+        .scrollbar-hide {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 5px;
+            height: 5px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background-color: #E2E8F0;
+            border-radius: 20px;
+        }
+        .dark .custom-scrollbar::-webkit-scrollbar-thumb {
+            background-color: #4B5563;
+        }
+    </style>
+</head>
+<body class="bg-background-light dark:bg-background-dark text-text-main-light dark:text-text-main-dark transition-colors duration-200 h-screen overflow-hidden flex flex-col">
+<header class="bg-surface-light dark:bg-surface-dark border-b border-border-light dark:border-border-dark px-6 py-3 flex items-center justify-between shrink-0 h-16 z-10 sticky top-0">
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-gray-800 dark:text-white" style="font-size: 28px;">smart_toy</span>
+<h1 class="text-xl font-bold tracking-tight text-gray-900 dark:text-white">BotNexus <span class="text-text-muted-light font-normal text-xs ml-2 bg-gray-50 px-2 py-0.5 rounded-full border border-gray-100">v2.4.0</span></h1>
+</div>
+<div class="hidden md:flex gap-2 ml-8">
+<span class="px-3 py-1 rounded-full bg-orange-50 text-orange-600 dark:bg-orange-900/30 dark:text-orange-300 text-xs font-medium border border-orange-100 dark:border-orange-800 flex items-center gap-1">
+<span class="material-symbols-outlined icon-xs">adb</span> bot=bot-b
+                </span>
+<span class="px-3 py-1 rounded-full bg-accent-blue text-blue-600 dark:bg-blue-900/30 dark:text-blue-300 text-xs font-medium border border-blue-100 dark:border-blue-800 flex items-center gap-1">
+<span class="material-symbols-outlined icon-xs">code</span> agent=codex
+                </span>
+<span class="px-3 py-1 rounded-full bg-accent-mint text-green-600 dark:bg-green-900/30 dark:text-green-300 text-xs font-medium border border-green-100 dark:border-green-800 flex items-center gap-1">
+<span class="material-symbols-outlined icon-xs">check_circle</span> health=ok
+                </span>
+</div>
+</div>
+<div class="flex items-center gap-3">
+<div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50 dark:bg-gray-800 border border-border-light dark:border-border-dark">
+<span class="text-xs font-medium text-text-muted-light">필터 모드:</span>
+<span class="text-xs font-bold text-gray-900 dark:text-white flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-green-400"></span> ON</span>
+</div>
+<button class="bg-primary hover:bg-primary-hover text-white px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-md hover:shadow-lg flex items-center gap-2">
+<span class="material-symbols-outlined icon-sm">refresh</span>
+                상태 새로고침
+            </button>
+<div class="w-9 h-9 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center justify-center cursor-pointer transition-colors ml-2">
+<span class="material-symbols-outlined text-gray-400 dark:text-gray-400">dark_mode</span>
+</div>
+</div>
+</header>
+<main class="flex-1 p-6 grid grid-cols-12 gap-6 overflow-hidden min-h-0 bg-background-light dark:bg-background-dark">
+<section class="col-span-12 md:col-span-3 xl:col-span-2 flex flex-col gap-4 overflow-hidden">
+<div class="bg-surface-light dark:bg-surface-dark rounded-2xl shadow-soft border border-border-light dark:border-border-dark p-0 flex flex-col h-full overflow-hidden">
+<div class="p-4 pb-2">
+<h2 class="text-base font-bold mb-4 flex items-center gap-2 text-gray-800 dark:text-white">
+<span class="material-symbols-outlined text-gray-400">hub</span>
+                        멀티 봇 관리
+                    </h2>
+<div class="grid grid-cols-2 gap-2 mb-4">
+<button class="bg-primary hover:bg-primary-hover text-white py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition-all shadow-sm">
+<span class="material-symbols-outlined icon-sm">add</span> 봇 추가
+                        </button>
+<button class="bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 dark:bg-gray-800 dark:border-gray-700 dark:text-white py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition-all">
+<span class="material-symbols-outlined icon-sm">campaign</span> 방송
+                        </button>
+</div>
+<div class="mb-4">
+<label class="text-[10px] font-bold text-text-muted-light uppercase mb-1.5 flex items-center gap-1">
+<span class="material-symbols-outlined icon-xs">mail</span> 전체 메시지 전송
+                        </label>
+<textarea class="w-full bg-gray-50 dark:bg-gray-900 border border-border-light dark:border-border-dark rounded-lg p-3 text-xs focus:ring-1 focus:ring-gray-400 focus:border-gray-400 outline-none resize-none h-20 transition-shadow" placeholder="전체 봇에게 보낼 메시지 입력..."></textarea>
+</div>
+</div>
+<div class="flex-1 overflow-y-auto space-y-3 custom-scrollbar px-4 pb-4">
+<div class="group relative bg-white dark:bg-gray-800 border border-border-light dark:border-border-dark rounded-xl p-3 shadow-card hover:shadow-md transition-all cursor-pointer ring-1 ring-transparent hover:ring-gray-200">
+<div class="flex justify-between items-start mb-2">
+<div class="flex items-center gap-2">
+<input checked="" class="rounded-sm text-gray-800 focus:ring-gray-800 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600" type="checkbox"/>
+<span class="font-semibold text-sm text-gray-800 dark:text-white">Bot A (메인)</span>
+</div>
+<span class="bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-300 text-[10px] font-bold px-2 py-1 rounded-md border border-purple-100 dark:border-purple-800 uppercase tracking-wider flex items-center gap-1">
+<span class="material-symbols-outlined icon-xs text-[10px]">auto_awesome</span> Gemini
+                            </span>
+</div>
+<div class="text-xs text-text-muted-light font-mono space-y-1.5 pl-5">
+<p class="truncate flex items-center gap-1"><span class="material-symbols-outlined icon-xs text-gray-300">fingerprint</span> id: bot-alpha-01</p>
+<p class="truncate text-gray-600 dark:text-gray-400 flex items-center gap-1"><span class="material-symbols-outlined icon-xs text-gray-300">key</span> token: ...mock_en_1</p>
+<p class="flex items-center gap-1"><span class="material-symbols-outlined icon-xs text-gray-300">chat</span> chat: 1001 • user: 9001</p>
+</div>
+<button class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 p-1.5 rounded-lg transition-all">
+<span class="material-symbols-outlined icon-sm">delete</span>
+</button>
+</div>
+<div class="group relative bg-accent-mint/30 dark:bg-green-900/10 border border-green-100 dark:border-green-800 rounded-xl p-3 shadow-sm cursor-pointer">
+<div class="flex justify-between items-start mb-2">
+<div class="flex items-center gap-2">
+<input checked="" class="rounded-sm text-green-600 focus:ring-green-600 bg-white dark:bg-gray-700 border-green-200 dark:border-gray-600" type="checkbox"/>
+<span class="font-semibold text-sm text-gray-800 dark:text-white">Bot B (테스트)</span>
+</div>
+<span class="bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300 text-[10px] font-bold px-2 py-1 rounded-md border border-blue-100 dark:border-blue-800 uppercase tracking-wider flex items-center gap-1">
+<span class="material-symbols-outlined icon-xs text-[10px]">terminal</span> Codex
+                            </span>
+</div>
+<div class="text-xs text-text-muted-light font-mono space-y-1.5 pl-5">
+<p class="truncate flex items-center gap-1"><span class="material-symbols-outlined icon-xs text-gray-300">fingerprint</span> id: bot-beta-test</p>
+<p class="truncate text-gray-600 dark:text-gray-400 flex items-center gap-1"><span class="material-symbols-outlined icon-xs text-gray-300">key</span> token: ...mock_en_2</p>
+<p class="flex items-center gap-1"><span class="material-symbols-outlined icon-xs text-gray-300">chat</span> chat: 1001 • user: 9001</p>
+</div>
+<button class="absolute top-2 right-2 text-red-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 p-1.5 rounded-lg transition-all">
+<span class="material-symbols-outlined icon-sm">delete</span>
+</button>
+</div>
+<div class="group relative bg-white dark:bg-gray-800 border border-border-light dark:border-border-dark rounded-xl p-3 shadow-card hover:shadow-md transition-all cursor-pointer opacity-60 hover:opacity-100">
+<div class="flex justify-between items-start mb-2">
+<div class="flex items-center gap-2">
+<input class="rounded-sm text-gray-400 focus:ring-gray-400 bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600" type="checkbox"/>
+<span class="font-semibold text-sm text-gray-700 dark:text-gray-300">Bot 1 Legacy</span>
+</div>
+<span class="bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 text-[10px] font-bold px-2 py-1 rounded-md border border-gray-200 dark:border-gray-600 uppercase tracking-wider">
+                                Legacy
+                            </span>
+</div>
+<div class="text-xs text-text-muted-light font-mono space-y-1.5 pl-5">
+<p class="truncate flex items-center gap-1"><span class="material-symbols-outlined icon-xs text-gray-300">fingerprint</span> id: bot-legacy-1</p>
+<p class="truncate flex items-center gap-1"><span class="material-symbols-outlined icon-xs text-gray-300">key</span> token: ...mock_en_3</p>
+<p class="flex items-center gap-1"><span class="material-symbols-outlined icon-xs text-gray-300">chat</span> chat: 1001 • user: 9001</p>
+</div>
+</div>
+</div>
+</div>
+<div class="bg-surface-light dark:bg-surface-dark rounded-2xl border border-border-light dark:border-border-dark shadow-soft p-4 flex-none h-48 flex flex-col">
+<h2 class="text-xs font-bold mb-3 flex items-center gap-2 text-gray-500 uppercase tracking-wider">
+<span class="material-symbols-outlined text-gray-400 icon-sm">compare_arrows</span>
+                    병렬 실행 결과
+                </h2>
+<div class="flex-1 bg-gray-50 dark:bg-gray-900/50 border border-dashed border-gray-200 dark:border-gray-700 rounded-lg p-4 text-xs text-text-muted-light flex items-center justify-center flex-col gap-2">
+<span class="material-symbols-outlined text-gray-300 text-3xl">inbox</span>
+<span>병렬 실행 결과가 없습니다.</span>
+</div>
+</div>
+</section>
+<section class="col-span-12 md:col-span-3 xl:col-span-2 flex flex-col gap-4 overflow-y-auto custom-scrollbar">
+<div class="bg-surface-light dark:bg-surface-dark rounded-2xl border border-border-light dark:border-border-dark shadow-soft p-5 flex flex-col h-full">
+<div class="space-y-4 mb-6">
+<div>
+<label class="block text-[10px] uppercase tracking-wider font-bold text-text-muted-light mb-1.5 flex items-center gap-1">
+                             토큰 이름
+                        </label>
+<div class="relative">
+<span class="absolute left-3 top-2.5 material-symbols-outlined icon-sm text-gray-400">vpn_key</span>
+<input class="w-full h-10 pl-9 pr-3 rounded-lg text-sm bg-gray-50 dark:bg-gray-900 border border-border-light dark:border-border-dark focus:ring-1 focus:ring-gray-400 focus:border-gray-400 outline-none transition-all" type="text" value="mock_token_2"/>
+</div>
+</div>
+<div>
+<label class="block text-[10px] uppercase tracking-wider font-bold text-text-muted-light mb-1.5">채팅 ID</label>
+<input class="w-full h-10 px-3 rounded-lg text-sm bg-gray-50 dark:bg-gray-900 border border-border-light dark:border-border-dark focus:ring-1 focus:ring-gray-400 focus:border-gray-400 outline-none transition-all font-mono" type="text" value="1001"/>
+</div>
+<div>
+<label class="block text-[10px] uppercase tracking-wider font-bold text-text-muted-light mb-1.5">사용자 ID</label>
+<input class="w-full h-10 px-3 rounded-lg text-sm bg-gray-50 dark:bg-gray-900 border border-border-light dark:border-border-dark focus:ring-1 focus:ring-gray-400 focus:border-gray-400 outline-none transition-all font-mono" type="text" value="9001"/>
+</div>
+</div>
+<div class="h-px bg-border-light dark:bg-border-dark w-full mb-6"></div>
+<h3 class="text-xs font-bold mb-4 flex items-center gap-2 text-gray-800 dark:text-white uppercase tracking-wider">
+<span class="material-symbols-outlined text-yellow-500 icon-sm">bolt</span> 빠른 작업
+                </h3>
+<div class="grid grid-cols-2 gap-2 mb-6">
+<button class="bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 text-gray-700 py-2 rounded-lg text-xs font-medium shadow-sm transition-all flex justify-center items-center gap-1">
+<span class="material-symbols-outlined icon-xs">play_arrow</span> /start
+                    </button>
+<button class="bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 text-gray-700 py-2 rounded-lg text-xs font-medium shadow-sm transition-all flex justify-center items-center gap-1">
+<span class="material-symbols-outlined icon-xs">info</span> /status
+                    </button>
+<button class="bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 text-gray-700 py-2 rounded-lg text-xs font-medium shadow-sm transition-all flex justify-center items-center gap-1">
+<span class="material-symbols-outlined icon-xs">list</span> /providers
+                    </button>
+<button class="bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 text-gray-700 py-2 rounded-lg text-xs font-medium shadow-sm transition-all flex justify-center items-center gap-1">
+<span class="material-symbols-outlined icon-xs">restart_alt</span> /reset
+                    </button>
+<button class="col-span-2 bg-red-50 border border-red-100 hover:bg-red-100 hover:border-red-200 text-red-600 py-2.5 rounded-lg text-xs font-bold shadow-sm transition-all flex justify-center items-center gap-2">
+<span class="material-symbols-outlined icon-sm">stop_circle</span> /stop (긴급 중지)
+                    </button>
+</div>
+<div class="h-px bg-border-light dark:bg-border-dark w-full mb-6"></div>
+<h3 class="text-xs font-bold mb-4 flex items-center gap-2 text-gray-800 dark:text-white uppercase tracking-wider">
+<span class="material-symbols-outlined text-gray-400 icon-sm">webhook</span> 웹훅 설정
+                </h3>
+<div class="space-y-3 mb-4">
+<div>
+<label class="block text-[10px] uppercase font-bold text-text-muted-light mb-1.5">웹훅 URL</label>
+<div class="relative">
+<span class="absolute left-2.5 top-2 material-symbols-outlined icon-sm text-gray-300">link</span>
+<input class="w-full h-8 pl-8 pr-2 rounded text-xs bg-gray-50 dark:bg-gray-900 border border-border-light dark:border-border-dark text-gray-600 dark:text-gray-300 truncate focus:ring-1 focus:ring-gray-300 focus:border-gray-300 outline-none" type="text" value="http://127.0.0.1:8601/telegram..."/>
+</div>
+</div>
+<div>
+<label class="block text-[10px] uppercase font-bold text-text-muted-light mb-1.5">시크릿 키</label>
+<div class="relative">
+<span class="absolute left-2.5 top-2 material-symbols-outlined icon-sm text-gray-300">lock</span>
+<input class="w-full h-8 pl-8 pr-2 rounded text-xs bg-gray-50 dark:bg-gray-900 border border-border-light dark:border-border-dark text-gray-600 dark:text-gray-300 focus:ring-1 focus:ring-gray-300 focus:border-gray-300 outline-none" type="password" value="bot-b-secret"/>
+</div>
+</div>
+</div>
+<div class="grid grid-cols-2 gap-2 mb-6">
+<button class="bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded-lg text-xs font-medium shadow-md transition-all">설정 저장</button>
+<button class="bg-gray-200 hover:bg-gray-300 text-gray-700 py-2 rounded-lg text-xs font-medium shadow-sm transition-all">연동 해제</button>
+</div>
+<div class="mt-auto">
+<h3 class="text-xs font-bold mb-3 text-gray-800 dark:text-white flex items-center gap-1">
+<span class="material-symbols-outlined icon-sm text-orange-400">speed</span> 속도 제한 테스트
+                    </h3>
+<div class="flex gap-2">
+<select class="flex-1 h-9 px-2 rounded-lg text-xs bg-gray-50 border border-border-light dark:border-border-dark outline-none cursor-pointer">
+<option>getUpdates</option>
+<option>sendMessage</option>
+</select>
+<button class="bg-gray-800 hover:bg-black text-white px-3 py-2 rounded-lg text-xs font-bold shadow-md transition-all whitespace-nowrap">
+                            429 적용
+                        </button>
+</div>
+</div>
+</div>
+</section>
+<section class="col-span-12 md:col-span-6 xl:col-span-5 flex flex-col h-full overflow-hidden">
+<div class="bg-surface-light dark:bg-surface-dark rounded-2xl border border-border-light dark:border-border-dark shadow-soft flex flex-col h-full overflow-hidden">
+<div class="px-6 py-4 border-b border-border-light dark:border-border-dark flex justify-between items-center bg-white/50 backdrop-blur-sm dark:bg-gray-900/20">
+<div>
+<h2 class="text-base font-bold text-gray-800 dark:text-white flex items-center gap-2">
+<span class="material-symbols-outlined text-gray-400">schedule</span> 타임라인
+                        </h2>
+<p class="text-xs text-text-muted-light mt-0.5 flex items-center gap-1">
+                            세션: <span class="font-mono bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">e87e050b...</span>
+</p>
+</div>
+<button class="text-xs bg-white border border-gray-200 hover:bg-gray-50 text-gray-600 px-3 py-1.5 rounded-lg transition-colors font-medium shadow-sm flex items-center gap-1">
+<span class="material-symbols-outlined icon-xs">delete_sweep</span> 기록 삭제
+                    </button>
+</div>
+<div class="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar bg-slate-50/30 dark:bg-[#1a2332]">
+<div class="flex flex-col gap-1 items-start max-w-[90%]">
+<span class="text-[10px] text-text-muted-light font-mono ml-1 flex items-center gap-1">
+<span class="w-1 h-1 rounded-full bg-gray-300"></span> 10:42 AM
+                        </span>
+<div class="bg-white dark:bg-gray-800 px-5 py-3 rounded-2xl rounded-tl-none border border-gray-100 dark:border-gray-700 text-sm shadow-sm hover:shadow-md transition-shadow">
+<span class="font-mono text-gray-800 dark:text-gray-200 font-bold">/reset</span>
+</div>
+</div>
+<div class="flex flex-col gap-1 items-start max-w-[90%]">
+<span class="text-[10px] text-text-muted-light font-mono ml-1 flex items-center gap-1">
+<span class="w-1 h-1 rounded-full bg-gray-300"></span> 10:42 AM
+                        </span>
+<div class="bg-white dark:bg-gray-800 px-5 py-3 rounded-2xl rounded-tl-none border border-gray-100 dark:border-gray-700 text-sm shadow-sm hover:shadow-md transition-shadow">
+<span class="font-mono text-blue-600 dark:text-blue-400 font-bold">/mode codex</span>
+</div>
+</div>
+<div class="flex flex-col gap-1 items-center w-full px-4">
+<span class="text-[10px] text-text-muted-light font-mono uppercase tracking-widest mb-1">System Event</span>
+<div class="bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-900/10 dark:to-orange-900/10 px-5 py-3 rounded-xl border border-amber-100 dark:border-amber-800/30 text-sm text-amber-900 dark:text-amber-100 w-full relative shadow-sm">
+<div class="flex items-center gap-2 mb-1">
+<span class="material-symbols-outlined icon-sm text-amber-500">swap_horiz</span>
+<p class="font-bold text-sm">모드 전환: gemini -&gt; codex</p>
+</div>
+<div class="pl-6 border-l-2 border-amber-200 dark:border-amber-700 ml-1.5">
+<p class="text-xs opacity-70 font-mono mb-1">session=e87e050b-f624-4875-a4fa-ca5d9a3db352</p>
+<p class="text-xs opacity-80">컨텍스트 연속성: 롤링 요약 유지, 제공자 스레드 초기화 완료.</p>
+</div>
+</div>
+</div>
+<div class="flex flex-col gap-1 items-end self-end max-w-[85%] ml-auto">
+<span class="text-[10px] text-text-muted-light font-mono mr-1 text-right flex items-center justify-end gap-1">
+                            User <span class="w-1 h-1 rounded-full bg-blue-300"></span>
+</span>
+<div class="bg-gradient-to-br from-blue-50 to-indigo-50 dark:bg-blue-900/20 px-5 py-3 rounded-2xl rounded-tr-none border border-blue-100 dark:border-blue-800 text-sm text-gray-800 dark:text-white shadow-sm">
+                            전체 병렬 검증: 너는 누구인지 1문장으로 답해줘.
+                        </div>
+</div>
+<div class="flex flex-col gap-1 items-start max-w-[90%]">
+<span class="text-[10px] text-text-muted-light font-mono ml-1 flex items-center gap-1">
+<span class="w-1 h-1 rounded-full bg-gray-300"></span> Bot (Thinking)
+                        </span>
+<div class="bg-gray-50 dark:bg-gray-800 px-4 py-2 rounded-2xl rounded-tl-none border border-border-light dark:border-border-dark text-xs text-text-muted-light dark:text-text-muted-dark flex items-center gap-2 italic">
+<span class="flex gap-1">
+<span class="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce"></span>
+<span class="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce" style="animation-delay: 0.1s"></span>
+<span class="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce" style="animation-delay: 0.2s"></span>
+</span>
+                            생각중... (agent=codex)
+                        </div>
+</div>
+<div class="flex flex-col gap-1 items-start max-w-[90%]">
+<span class="text-[10px] text-text-muted-light font-mono ml-1 flex items-center gap-1">
+<span class="w-1 h-1 rounded-full bg-emerald-300"></span> Bot (Codex)
+                        </span>
+<div class="bg-white dark:bg-emerald-900/10 px-5 py-4 rounded-2xl rounded-tl-none border border-emerald-100 dark:border-emerald-800/50 text-sm text-gray-800 dark:text-white shadow-soft ring-1 ring-emerald-50">
+                            저는 이 프로젝트 워크스페이스에서 코드 작업과 검증을 수행하는 <span class="font-bold text-emerald-600">GPT-5 기반 Codex 에이전트</span>입니다.
+                        </div>
+</div>
+</div>
+<div class="p-4 bg-surface-light dark:bg-surface-dark border-t border-border-light dark:border-border-dark">
+<div class="relative group">
+<textarea class="w-full bg-gray-50 dark:bg-gray-900 border border-border-light dark:border-border-dark rounded-xl pl-4 pr-12 py-3 text-sm focus:ring-2 focus:ring-gray-200 focus:border-gray-400 outline-none resize-none shadow-inner transition-all group-hover:bg-white" placeholder="봇에게 메시지 입력..." rows="3"></textarea>
+<div class="absolute bottom-3 right-3 flex items-center gap-2">
+<button class="text-gray-400 hover:text-gray-600 transition-colors p-1 rounded hover:bg-gray-100">
+<span class="material-symbols-outlined text-xl">attach_file</span>
+</button>
+</div>
+</div>
+<button class="w-full mt-3 bg-primary hover:bg-primary-hover text-white py-3 rounded-xl font-bold shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 text-sm">
+<span class="material-symbols-outlined icon-sm">send</span> 메시지 전송
+                    </button>
+</div>
+</div>
+</section>
+<section class="col-span-12 md:col-span-12 xl:col-span-3 flex flex-col gap-4 overflow-hidden h-full">
+<div class="bg-surface-light dark:bg-surface-dark rounded-2xl border border-border-light dark:border-border-dark shadow-soft flex flex-col max-h-[40%] overflow-hidden">
+<div class="px-5 py-3 border-b border-border-light dark:border-border-dark bg-gray-50/50 dark:bg-gray-900/20 flex justify-between items-center">
+<h2 class="text-xs font-bold flex items-center gap-2 text-gray-700 dark:text-gray-200 uppercase tracking-wider">
+<span class="material-symbols-outlined text-purple-400 icon-sm">data_object</span> 에이전트 (현재 챗)
+                    </h2>
+<span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+</div>
+<div class="p-0 overflow-hidden flex-1 relative group">
+<pre class="w-full h-full p-4 text-[11px] font-mono leading-relaxed overflow-auto custom-scrollbar text-gray-600 dark:text-gray-300 bg-white dark:bg-[#1a2332]">{
+  <span class="text-purple-600 dark:text-purple-400">"current_agent"</span>: <span class="text-green-600 dark:text-green-400">"codex"</span>,
+  <span class="text-purple-600 dark:text-purple-400">"session_id"</span>: <span class="text-green-600 dark:text-green-400">"e87e050b..."</span>,
+  <span class="text-purple-600 dark:text-purple-400">"thread_id"</span>: <span class="text-blue-600 dark:text-blue-400">null</span>,
+  <span class="text-purple-600 dark:text-purple-400">"run_status"</span>: <span class="text-green-600 dark:text-green-400">"completed"</span>,
+  <span class="text-purple-600 dark:text-purple-400">"summary_preview"</span>: <span class="text-blue-600 dark:text-blue-400">null</span>
+}</pre>
+</div>
+</div>
+<div class="bg-surface-light dark:bg-surface-dark rounded-2xl border border-border-light dark:border-border-dark shadow-soft flex flex-col flex-1 min-h-0">
+<div class="px-5 py-3 border-b border-border-light dark:border-border-dark bg-gray-50/50 dark:bg-gray-900/20">
+<h2 class="text-xs font-bold flex items-center gap-2 text-gray-700 dark:text-gray-200 uppercase tracking-wider">
+<span class="material-symbols-outlined text-amber-500 icon-sm">analytics</span> 시스템 진단
+                    </h2>
+</div>
+<div class="flex-1 overflow-auto custom-scrollbar bg-white dark:bg-[#1a2332]">
+<pre class="p-4 text-[11px] font-mono leading-relaxed text-gray-600 dark:text-gray-300">{
+  <span class="text-purple-600 dark:text-purple-400">"health"</span>: {
+    <span class="text-purple-600 dark:text-purple-400">"bot"</span>: {
+      <span class="text-purple-600 dark:text-purple-400">"ok"</span>: <span class="text-blue-600 dark:text-blue-400">true</span>,
+      <span class="text-purple-600 dark:text-purple-400">"status_code"</span>: <span class="text-orange-600 dark:text-orange-400">200</span>,
+      <span class="text-purple-600 dark:text-purple-400">"latency_ms"</span>: <span class="text-orange-600 dark:text-orange-400">8</span>,
+      <span class="text-purple-600 dark:text-purple-400">"error"</span>: <span class="text-blue-600 dark:text-blue-400">null</span>
+    }
+  },
+  <span class="text-purple-600 dark:text-purple-400">"metrics"</span>: {
+    <span class="text-purple-600 dark:text-purple-400">"in_flight_runs"</span>: <span class="text-orange-600 dark:text-orange-400">0</span>,
+    <span class="text-purple-600 dark:text-purple-400">"worker_heartbeat"</span>: {
+      <span class="text-purple-600 dark:text-purple-400">"last_ping"</span>: <span class="text-orange-600 dark:text-orange-400">17722739</span>
+    }
+  }
+}</pre>
+<div class="h-px bg-border-light dark:bg-border-dark mx-4 my-1 bg-dashed border-t border-dashed border-gray-200"></div>
+<div class="px-4 py-2 text-[10px] font-bold text-text-muted-light uppercase tracking-widest flex items-center gap-1">
+<span class="material-symbols-outlined icon-xs">memory</span> State (Compact)
+                    </div>
+<pre class="p-4 pt-1 text-[11px] font-mono leading-relaxed text-gray-600 dark:text-gray-300">{
+  <span class="text-purple-600 dark:text-purple-400">"totals"</span>: {
+    <span class="text-purple-600 dark:text-purple-400">"updates_total"</span>: <span class="text-orange-600 dark:text-orange-400">58</span>,
+    <span class="text-purple-600 dark:text-purple-400">"messages_total"</span>: <span class="text-orange-600 dark:text-orange-400">380</span>
+  },
+  <span class="text-purple-600 dark:text-purple-400">"bot"</span>: {
+    <span class="text-purple-600 dark:text-purple-400">"token"</span>: <span class="text-green-600 dark:text-green-400">"mock...en_2"</span>,
+    <span class="text-purple-600 dark:text-purple-400">"webhook_enabled"</span>: <span class="text-blue-600 dark:text-blue-400">false</span>
+  }
+}</pre>
+</div>
+</div>
+<div class="bg-surface-light dark:bg-surface-dark rounded-2xl border border-border-light dark:border-border-dark shadow-soft flex flex-col h-1/3">
+<div class="px-5 py-3 border-b border-border-light dark:border-border-dark bg-gray-50/50 dark:bg-gray-900/20">
+<h2 class="text-xs font-bold flex items-center gap-2 text-gray-700 dark:text-gray-200 uppercase tracking-wider">
+<span class="material-symbols-outlined text-gray-400 icon-sm">forum</span> 활성 스레드 (Top 10)
+                    </h2>
+</div>
+<div class="flex-1 overflow-auto custom-scrollbar bg-white dark:bg-[#1a2332]">
+<pre class="p-4 text-[11px] font-mono leading-relaxed text-gray-600 dark:text-gray-300">[
+  {
+    <span class="text-purple-600 dark:text-purple-400">"chat_id"</span>: <span class="text-orange-600 dark:text-orange-400">1001</span>,
+    <span class="text-purple-600 dark:text-purple-400">"msg_count"</span>: <span class="text-orange-600 dark:text-orange-400">6</span>,
+    <span class="text-purple-600 dark:text-purple-400">"webhook"</span>: <span class="text-blue-600 dark:text-blue-400">false</span>
+  },
+  {
+    <span class="text-purple-600 dark:text-purple-400">"chat_id"</span>: <span class="text-orange-600 dark:text-orange-400">756841</span>,
+    <span class="text-purple-600 dark:text-purple-400">"msg_count"</span>: <span class="text-orange-600 dark:text-orange-400">4</span>
+  }
+]</pre>
+</div>
+</div>
+</section>
+</main>
+<script>
+        // Simple script to toggle dark mode
+        const toggleBtn = document.querySelector('.material-symbols-outlined[class*="dark_mode"]').parentElement;
+        toggleBtn.addEventListener('click', () => {
+            document.documentElement.classList.toggle('dark');
+        });
+    </script>
+
+</body></html>
