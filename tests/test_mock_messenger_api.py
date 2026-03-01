@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from telegram_bot_new.mock_messenger.api import create_app
 from telegram_bot_new.mock_messenger.store import MockMessengerStore
+from telegram_bot_new.settings import get_global_settings
 
 
 @pytest.fixture
@@ -323,6 +324,30 @@ def test_mock_bot_diagnostics_endpoint_with_bot_down(tmp_path: Path) -> None:
     store.close()
 
 
+def test_mock_bot_diagnostics_rejects_bot_token_mismatch(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "diagnostics-mismatch.db"),
+        data_dir=str(tmp_path / "diagnostics-mismatch-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=65430,
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/_mock/bot_diagnostics",
+            params={"bot_id": "bot-a", "token": "mock_token_b", "chat_id": 1001, "limit": 120},
+        )
+        assert response.status_code == 400
+        assert "token does not match bot_id" in response.json()["detail"]
+    store.close()
+
+
 def test_mock_projects_endpoint_lists_workspace_candidates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = MockMessengerStore(
         db_path=str(tmp_path / "projects.db"),
@@ -464,3 +489,34 @@ def test_mock_bot_catalog_add_endpoint_creates_missing_config(tmp_path: Path) ->
         assert payload["result"]["total_bots"] == 1
     assert missing_config.exists()
     store.close()
+
+
+def test_mock_bot_catalog_add_endpoint_rolls_back_when_config_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-add-strict.db"),
+        data_dir=str(tmp_path / "catalog-add-strict-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    monkeypatch.setenv("STRICT_BOT_DB_ISOLATION", "1")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:////tmp/mock-global.db")
+    get_global_settings.cache_clear()
+
+    try:
+        app = create_app(
+            store=store,
+            allow_get_updates_with_webhook=False,
+            bots_config_path=str(bots_yaml),
+            embedded_host="127.0.0.1",
+            embedded_base_port=8600,
+        )
+        with TestClient(app) as client:
+            created = client.post("/_mock/bot_catalog/add", json={"adapter": "gemini"})
+            assert created.status_code == 400
+            assert "failed to add bot" in created.json()["detail"]
+    finally:
+        get_global_settings.cache_clear()
+        store.close()

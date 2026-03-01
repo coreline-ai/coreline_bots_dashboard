@@ -57,12 +57,11 @@ async def run_supervisor(
                 gateway_host=gateway_host,
                 gateway_port=gateway_port,
             )
-            if desired_specs is not None:
-                await _reconcile_managed_processes(
-                    managed=managed,
-                    desired_specs=desired_specs,
-                    max_backoff_sec=global_settings.supervisor_restart_max_backoff_sec,
-                )
+            await _reconcile_managed_processes(
+                managed=managed,
+                desired_specs=desired_specs,
+                max_backoff_sec=global_settings.supervisor_restart_max_backoff_sec,
+            )
 
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=poll_interval_sec)
@@ -85,12 +84,12 @@ def _load_desired_specs(
     embedded_base_port: int,
     gateway_host: str,
     gateway_port: int,
-) -> dict[str, ProcessSpec] | None:
+) -> dict[str, ProcessSpec]:
     try:
         bots = load_bots_config(config_path, global_settings, allow_env_fallback=False)
     except Exception as error:
         LOGGER.error("failed to load bots config path=%s error=%s", config_path, error)
-        return None
+        return {}
 
     specs: dict[str, ProcessSpec] = {}
     embedded_port = embedded_base_port

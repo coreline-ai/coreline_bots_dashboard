@@ -279,13 +279,16 @@ def create_app(
     @app.post("/_mock/bot_catalog/add")
     async def add_bot_catalog_entry(request: BotCatalogAddRequest = Body(default_factory=BotCatalogAddRequest)) -> dict[str, Any]:
         async with catalog_mutation_lock:
-            created = create_dynamic_embedded_bot(
-                bots_config_path=bots_config_path,
-                adapter=request.adapter,
-                bot_id=request.bot_id,
-                token=request.token,
-                name=request.name,
-            )
+            try:
+                created = create_dynamic_embedded_bot(
+                    bots_config_path=bots_config_path,
+                    adapter=request.adapter,
+                    bot_id=request.bot_id,
+                    token=request.token,
+                    name=request.name,
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
             bots = build_bot_catalog(
                 bots_config_path=bots_config_path,
                 embedded_host=embedded_host,
@@ -337,6 +340,9 @@ def create_app(
         selected = next((row for row in catalog if row.get("bot_id") == bot_id), None)
         if selected is None:
             raise HTTPException(status_code=404, detail=f"unknown bot_id: {bot_id}")
+        expected_token = str(selected.get("token") or "").strip()
+        if expected_token != token:
+            raise HTTPException(status_code=400, detail=f"token does not match bot_id: {bot_id}")
 
         messages = store.get_messages(token=token, chat_id=chat_id, limit=resolved_limit)
         threads = store.list_threads(token=token)

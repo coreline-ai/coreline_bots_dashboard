@@ -27,6 +27,15 @@ async def run_gateway_server(bots: list[BotConfig], global_settings: GlobalSetti
 
     if not bots:
         raise ValueError("gateway mode requires at least one bot")
+    for bot in bots:
+        configured = str(bot.database_url or "").strip()
+        if configured and configured != global_settings.database_url:
+            LOGGER.warning(
+                "gateway ingress ignores per-bot database_url bot=%s configured=%s global=%s",
+                bot.bot_id,
+                configured,
+                global_settings.database_url,
+            )
 
     repository = create_repository(global_settings.database_url)
     bot_map = {bot.bot_id: bot for bot in bots}

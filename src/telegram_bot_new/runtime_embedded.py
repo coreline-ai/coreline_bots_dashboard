@@ -43,6 +43,20 @@ def _is_local_mock_base_url(base_url: str) -> bool:
     return normalized.startswith("http://127.0.0.1") or normalized.startswith("http://localhost")
 
 
+def _resolve_worker_database_url(bot: BotConfig, global_settings: GlobalSettings) -> str:
+    if bot.mode == "gateway":
+        configured = str(bot.database_url or "").strip()
+        if configured and configured != global_settings.database_url:
+            LOGGER.warning(
+                "gateway worker forcing global database_url bot=%s configured=%s global=%s",
+                bot.bot_id,
+                configured,
+                global_settings.database_url,
+            )
+        return global_settings.database_url
+    return resolve_bot_database_url(bot, global_settings)
+
+
 async def run_embedded_bot(bot: BotConfig, global_settings: GlobalSettings, host: str, port: int) -> None:
     logging.basicConfig(level=getattr(logging, global_settings.log_level.upper(), logging.INFO))
 
@@ -248,7 +262,7 @@ async def run_embedded_bot(bot: BotConfig, global_settings: GlobalSettings, host
 async def run_bot_workers_only(bot: BotConfig, global_settings: GlobalSettings) -> None:
     logging.basicConfig(level=getattr(logging, global_settings.log_level.upper(), logging.INFO))
 
-    repository = create_repository(resolve_bot_database_url(bot, global_settings))
+    repository = create_repository(_resolve_worker_database_url(bot, global_settings))
 
     async def _inc_metric(metric_key: str) -> None:
         try:

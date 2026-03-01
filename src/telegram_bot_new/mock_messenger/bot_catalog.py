@@ -30,10 +30,7 @@ def build_bot_catalog(
     config_path = Path(bots_config_path).expanduser().resolve()
     if not config_path.exists():
         return []
-    try:
-        settings = get_global_settings()
-    except Exception:
-        settings = GlobalSettings.model_validate({"DATABASE_URL": "postgresql+asyncpg://localhost/mock"})
+    settings = _resolve_catalog_settings()
     try:
         bots = load_bots_config(config_path, settings, allow_env_fallback=False)
     except Exception:
@@ -82,10 +79,13 @@ def create_dynamic_embedded_bot(
     bot_id: str | None = None,
     token: str | None = None,
     name: str | None = None,
+    settings: GlobalSettings | None = None,
 ) -> dict[str, Any]:
     config_path = Path(bots_config_path).expanduser().resolve()
+    resolved_settings = settings or _resolve_catalog_settings()
     raw = _read_bots_file_raw(config_path)
     bots = list(raw.get("bots") or [])
+    prior_bots = list(bots)
 
     used_bot_ids = {str(item.get("bot_id") or "").strip() for item in bots if isinstance(item, dict)}
     used_tokens = {str(item.get("telegram_token") or "").strip() for item in bots if isinstance(item, dict)}
@@ -108,6 +108,7 @@ def create_dynamic_embedded_bot(
         "mode": "embedded",
         "telegram_token": resolved_token,
         "adapter": adapter if adapter in SUPPORTED_AGENTS else "gemini",
+        "database_url": _build_dynamic_bot_database_url(config_path, resolved_bot_id),
         "webhook": {
             "path_secret": f"{resolved_bot_id}-path",
             "secret_token": f"{resolved_bot_id}-secret",
@@ -116,6 +117,12 @@ def create_dynamic_embedded_bot(
     bots.append(entry)
     raw["bots"] = bots
     _write_bots_file_raw(config_path, raw)
+    try:
+        load_bots_config(config_path, resolved_settings, allow_env_fallback=False)
+    except Exception as error:
+        raw["bots"] = prior_bots
+        _write_bots_file_raw(config_path, raw)
+        raise ValueError(f"failed to add bot '{resolved_bot_id}': {error}") from error
 
     return entry
 
@@ -164,6 +171,18 @@ def _write_bots_file_raw(path: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_suffix(f"{path.suffix}.tmp")
     tmp_path.write_text(serialized, encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _resolve_catalog_settings() -> GlobalSettings:
+    try:
+        return get_global_settings()
+    except Exception:
+        return GlobalSettings.model_validate({"DATABASE_URL": "postgresql+asyncpg://localhost/mock"})
+
+
+def _build_dynamic_bot_database_url(config_path: Path, bot_id: str) -> str:
+    db_path = (config_path.parent / "state" / f"{bot_id}.db").resolve()
+    return f"sqlite+aiosqlite:///{db_path.as_posix()}"
 
 
 def _resolve_unique_text(*, preferred: str, used: set[str], pattern_prefix: str) -> str:
