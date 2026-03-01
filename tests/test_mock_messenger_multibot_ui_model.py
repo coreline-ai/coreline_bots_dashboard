@@ -19,6 +19,7 @@ def test_infer_session_view_from_messages() -> None:
     ]
     inferred = infer_session_view_from_messages(messages)
     assert inferred["current_agent"] == "gemini"
+    assert inferred["current_model"] is None
     assert inferred["session_id"] == "s-1"
     assert inferred["thread_id"] == "t-1"
     assert inferred["summary_preview"] == "hello world"
@@ -75,3 +76,16 @@ def test_compact_threads_puts_selected_chat_first() -> None:
     compact = compact_threads(rows, selected_chat_id=1001)
     assert compact[0]["chat_id"] == 1001
     assert len(compact) == 3
+
+
+def test_infer_session_view_reads_non_default_model() -> None:
+    messages = [
+        {
+            "message_id": 1,
+            "direction": "bot",
+            "text": "bot=bot-a\nadapter=codex\nmodel=gpt-5\nsession=s-9\nthread=t-9\nsummary=none",
+        }
+    ]
+    inferred = infer_session_view_from_messages(messages)
+    assert inferred["current_agent"] == "codex"
+    assert inferred["current_model"] == "gpt-5"

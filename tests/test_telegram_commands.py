@@ -39,10 +39,26 @@ class FakeSessionService:
     def __init__(self, summary: str = "") -> None:
         self.summary = summary
 
-    async def get_or_create(self, *, bot_id: str, chat_id: str, adapter_name: str, now: int) -> FakeSession:
+    async def get_or_create(
+        self,
+        *,
+        bot_id: str,
+        chat_id: str,
+        adapter_name: str,
+        adapter_model: str | None,
+        now: int,
+    ) -> FakeSession:
         return FakeSession(session_id="session-1")
 
-    async def create_new(self, *, bot_id: str, chat_id: str, adapter_name: str, now: int) -> FakeSession:
+    async def create_new(
+        self,
+        *,
+        bot_id: str,
+        chat_id: str,
+        adapter_name: str,
+        adapter_model: str | None,
+        now: int,
+    ) -> FakeSession:
         return FakeSession(session_id="session-new")
 
     async def status(self, *, bot_id: str, chat_id: str):
@@ -59,16 +75,37 @@ class FakeSessionServiceForMode:
     def __init__(self, *, adapter_name: str = "codex") -> None:
         self.session_id = "session-1"
         self.adapter_name = adapter_name
+        self.adapter_model = "gpt-5" if adapter_name == "codex" else None
         self.summary_preview = "summary"
         self.last_create_new_adapter: str | None = None
+        self.last_create_new_model: str | None = None
 
-    async def get_or_create(self, *, bot_id: str, chat_id: str, adapter_name: str, now: int):
+    async def get_or_create(
+        self,
+        *,
+        bot_id: str,
+        chat_id: str,
+        adapter_name: str,
+        adapter_model: str | None,
+        now: int,
+    ):
         self.adapter_name = adapter_name
+        self.adapter_model = adapter_model
         return SimpleNamespace(session_id=self.session_id)
 
-    async def create_new(self, *, bot_id: str, chat_id: str, adapter_name: str, now: int):
+    async def create_new(
+        self,
+        *,
+        bot_id: str,
+        chat_id: str,
+        adapter_name: str,
+        adapter_model: str | None,
+        now: int,
+    ):
         self.last_create_new_adapter = adapter_name
+        self.last_create_new_model = adapter_model
         self.adapter_name = adapter_name
+        self.adapter_model = adapter_model
         self.session_id = "session-new"
         return SimpleNamespace(session_id=self.session_id)
 
@@ -76,6 +113,7 @@ class FakeSessionServiceForMode:
         return SimpleNamespace(
             session_id=self.session_id,
             adapter_name=self.adapter_name,
+            adapter_model=self.adapter_model,
             adapter_thread_id=None,
             summary_preview=self.summary_preview,
         )
@@ -83,8 +121,19 @@ class FakeSessionServiceForMode:
     async def reset(self, *, session_id: str, now: int) -> None:
         return None
 
-    async def switch_adapter(self, *, session_id: str, adapter_name: str, now: int) -> None:
+    async def switch_adapter(
+        self,
+        *,
+        session_id: str,
+        adapter_name: str,
+        adapter_model: str | None,
+        now: int,
+    ) -> None:
         self.adapter_name = adapter_name
+        self.adapter_model = adapter_model
+
+    async def set_model(self, *, session_id: str, adapter_model: str | None, now: int) -> None:
+        self.adapter_model = adapter_model
 
     async def get_summary(self, *, bot_id: str, chat_id: str) -> str:
         return "summary"
@@ -726,6 +775,35 @@ async def test_mode_without_argument_shows_current_adapter_and_usage() -> None:
 
 
 @pytest.mark.asyncio
+async def test_status_uses_session_model_when_present() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="gemini")
+    session_service.adapter_model = "gemini-2.5-flash"
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(
+            bot_id="b1",
+            bot_name="Bot",
+            adapter="gemini",
+            owner_user_id=999,
+            default_models={"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        ),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 170,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 170, "text": "/status"},
+    }
+    await handler.handle_update_payload(payload, now_ms=170)
+
+    text = client.messages[-1][1]
+    assert "adapter=gemini" in text
+    assert "model=gemini-2.5-flash" in text
+
+
+@pytest.mark.asyncio
 async def test_mode_switches_provider_and_increments_metric() -> None:
     client = FakeTelegramClient()
     session_service = FakeSessionServiceForMode(adapter_name="codex")
@@ -751,6 +829,7 @@ async def test_mode_switches_provider_and_increments_metric() -> None:
     await handler.handle_update_payload(payload, now_ms=18)
 
     assert session_service.adapter_name == "gemini"
+    assert session_service.adapter_model == "gemini-2.5-pro"
     assert "mode switched: codex -> gemini" in client.messages[-1][1]
     assert ("b1", "provider_switch_total.gemini") in repo.metrics
 
@@ -775,6 +854,119 @@ async def test_mode_switch_is_blocked_when_run_is_active() -> None:
     await handler.handle_update_payload(payload, now_ms=19)
 
     assert session_service.adapter_name == "codex"
+    assert "Use /stop first" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_model_without_argument_shows_current_and_available_models() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="gemini")
+    session_service.adapter_model = "gemini-2.5-pro"
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(
+            bot_id="b1",
+            bot_name="Bot",
+            adapter="gemini",
+            owner_user_id=999,
+            default_models={"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        ),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 31,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 31, "text": "/model"},
+    }
+    await handler.handle_update_payload(payload, now_ms=31)
+
+    text = client.messages[-1][1]
+    assert "adapter=gemini" in text
+    assert "model=gemini-2.5-pro" in text
+    assert "available_models=gemini-2.5-pro, gemini-2.5-flash" in text
+
+
+@pytest.mark.asyncio
+async def test_model_updates_session_model() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="gemini")
+    session_service.adapter_model = "gemini-2.5-pro"
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(
+            bot_id="b1",
+            bot_name="Bot",
+            adapter="gemini",
+            owner_user_id=999,
+            default_models={"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        ),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 32,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 32, "text": "/model gemini-2.5-flash"},
+    }
+    await handler.handle_update_payload(payload, now_ms=32)
+
+    assert session_service.adapter_model == "gemini-2.5-flash"
+    assert "model updated: gemini-2.5-pro -> gemini-2.5-flash" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_model_rejects_unsupported_model() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    session_service.adapter_model = "gpt-5"
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(
+            bot_id="b1",
+            bot_name="Bot",
+            adapter="codex",
+            owner_user_id=999,
+            default_models={"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        ),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 33,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 33, "text": "/model gemini-2.5-pro"},
+    }
+    await handler.handle_update_payload(payload, now_ms=33)
+
+    assert "Unsupported model for codex" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_model_switch_is_blocked_when_run_is_active() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="claude")
+    run_service = FakeRunService()
+    run_service.has_active = True
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(
+            bot_id="b1",
+            bot_name="Bot",
+            adapter="claude",
+            owner_user_id=999,
+            default_models={"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        ),
+        client=client,
+        session_service=session_service,
+        run_service=run_service,
+    )
+
+    payload = {
+        "update_id": 34,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 34, "text": "/model claude-sonnet-4-5"},
+    }
+    await handler.handle_update_payload(payload, now_ms=34)
+
     assert "Use /stop first" in client.messages[-1][1]
 
 

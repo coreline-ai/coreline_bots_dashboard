@@ -73,6 +73,7 @@ class SessionView:
     bot_id: str
     chat_id: str
     adapter_name: str
+    adapter_model: str | None
     adapter_thread_id: str | None
     status: str
     rolling_summary_md: str
@@ -291,7 +292,15 @@ class Repository:
             )
             return result.scalar_one_or_none()
 
-    async def get_or_create_active_session(self, *, bot_id: str, chat_id: str, adapter_name: str, now: int) -> SessionView:
+    async def get_or_create_active_session(
+        self,
+        *,
+        bot_id: str,
+        chat_id: str,
+        adapter_name: str,
+        adapter_model: str | None,
+        now: int,
+    ) -> SessionView:
         async with self._session_factory() as session:
             result = await session.execute(
                 select(Session)
@@ -306,6 +315,7 @@ class Repository:
                     bot_id=bot_id,
                     chat_id=chat_id,
                     adapter_name=adapter_name,
+                    adapter_model=adapter_model,
                     adapter_thread_id=None,
                     status="active",
                     rolling_summary_md="",
@@ -335,6 +345,7 @@ class Repository:
                 bot_id=found.bot_id,
                 chat_id=found.chat_id,
                 adapter_name=found.adapter_name,
+                adapter_model=found.adapter_model,
                 adapter_thread_id=found.adapter_thread_id,
                 status=found.status,
                 rolling_summary_md=found.rolling_summary_md,
@@ -350,13 +361,22 @@ class Repository:
             )
             await session.commit()
 
-    async def create_fresh_session(self, *, bot_id: str, chat_id: str, adapter_name: str, now: int) -> SessionView:
+    async def create_fresh_session(
+        self,
+        *,
+        bot_id: str,
+        chat_id: str,
+        adapter_name: str,
+        adapter_model: str | None,
+        now: int,
+    ) -> SessionView:
         async with self._session_factory() as session:
             entity = Session(
                 session_id=str(uuid4()),
                 bot_id=bot_id,
                 chat_id=chat_id,
                 adapter_name=adapter_name,
+                adapter_model=adapter_model,
                 adapter_thread_id=None,
                 status="active",
                 rolling_summary_md="",
@@ -377,6 +397,7 @@ class Repository:
                 bot_id=entity.bot_id,
                 chat_id=entity.chat_id,
                 adapter_name=entity.adapter_name,
+                adapter_model=entity.adapter_model,
                 adapter_thread_id=entity.adapter_thread_id,
                 status=entity.status,
                 rolling_summary_md=entity.rolling_summary_md,
@@ -393,6 +414,7 @@ class Repository:
                 bot_id=found.bot_id,
                 chat_id=found.chat_id,
                 adapter_name=found.adapter_name,
+                adapter_model=found.adapter_model,
                 adapter_thread_id=found.adapter_thread_id,
                 status=found.status,
                 rolling_summary_md=found.rolling_summary_md,
@@ -408,13 +430,35 @@ class Repository:
             )
             await session.commit()
 
-    async def set_session_adapter(self, *, session_id: str, adapter_name: str, now: int) -> None:
+    async def set_session_adapter(
+        self,
+        *,
+        session_id: str,
+        adapter_name: str,
+        adapter_model: str | None,
+        now: int,
+    ) -> None:
         async with self._session_factory() as session:
             await session.execute(
                 update(Session)
                 .where(Session.session_id == session_id)
                 .values(
                     adapter_name=adapter_name,
+                    adapter_model=adapter_model,
+                    adapter_thread_id=None,
+                    status="active",
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+    async def set_session_model(self, *, session_id: str, adapter_model: str | None, now: int) -> None:
+        async with self._session_factory() as session:
+            await session.execute(
+                update(Session)
+                .where(Session.session_id == session_id)
+                .values(
+                    adapter_model=adapter_model,
                     adapter_thread_id=None,
                     status="active",
                     updated_at=now,

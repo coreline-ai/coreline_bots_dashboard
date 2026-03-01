@@ -70,10 +70,13 @@ async def test_orchestrator_round_robin_order(tmp_path: Path) -> None:
             store.store_bot_message(token=token, chat_id=chat_id, text="ok")
             return {"ok": True}
         turn_tokens.append(token)
+        response_text = "주장: A\n반박: B\n질문: C"
+        if "최종 라운드" in text:
+            response_text = "요약: 핵심 쟁점 정리\n결론: 최종 결론"
         store.store_bot_message(
             token=token,
             chat_id=chat_id,
-            text="[1][12:00:00][assistant_message] 주장: A\n반박: B\n질문: C",
+            text=f"[1][12:00:00][assistant_message] {response_text}",
         )
         store.store_bot_message(
             token=token,
@@ -91,7 +94,11 @@ async def test_orchestrator_round_robin_order(tmp_path: Path) -> None:
     done = await _wait_terminal(orchestrator, debate_id)
 
     assert done["status"] == "completed"
-    assert turn_tokens == ["token-a", "token-b", "token-a", "token-b"]
+    # round1: A -> B, final round(2): starter(A) synthesis only
+    assert turn_tokens == ["token-a", "token-b", "token-a"]
+    assert len(done["turns"]) == 3
+    assert "요약:" in str(done["turns"][-1]["prompt_text"])
+    assert "결론:" in str(done["turns"][-1]["prompt_text"])
     await orchestrator.shutdown()
     store.close()
 
@@ -114,10 +121,13 @@ async def test_orchestrator_continues_after_timeout_and_error(tmp_path: Path) ->
             store.store_bot_message(token=token, chat_id=chat_id, text="[1][12:00:00][error] forced error")
             return {"ok": True}
         if turn_count >= 3:
+            response_text = "주장: A\n반박: B\n질문: C"
+            if "최종 라운드" in text:
+                response_text = "요약: 핵심 요약\n결론: 최종 결론"
             store.store_bot_message(
                 token=token,
                 chat_id=chat_id,
-                text="[1][12:00:00][assistant_message] 주장: A\n반박: B\n질문: C",
+                text=f"[1][12:00:00][assistant_message] {response_text}",
             )
             store.store_bot_message(
                 token=token,
@@ -136,7 +146,8 @@ async def test_orchestrator_continues_after_timeout_and_error(tmp_path: Path) ->
 
     assert done["status"] == "completed"
     statuses = [str(turn["status"]) for turn in done["turns"]]
-    assert len(statuses) == 4
+    # round1 two turns + final round(2) starter-only one turn
+    assert len(statuses) == 3
     assert "timeout" in statuses
     assert "error" in statuses
     assert statuses.count("success") >= 1
@@ -250,6 +261,56 @@ async def test_orchestrator_template_repair_recovers_to_success(tmp_path: Path) 
     )
     debate_id = str(started["debate_id"])
     done = await _wait_terminal(orchestrator, debate_id)
+
+    assert done["status"] == "completed"
+    assert len(done["turns"]) == 2
+    assert all(str(turn["status"]) == "success" for turn in done["turns"])
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_waits_for_turn_completed_before_success(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "debate-orchestrator-streamed.db"),
+        data_dir=str(tmp_path / "debate-orchestrator-streamed-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            return {"ok": True}
+
+        # First chunk is incomplete; completion arrives shortly after.
+        store.store_bot_message(
+            token=token,
+            chat_id=chat_id,
+            text="[1][12:00:00][assistant_message] 주장: A",
+        )
+
+        async def delayed_completion(*, token_value: str = token, chat_id_value: int = chat_id) -> None:
+            await asyncio.sleep(0.08)
+            store.store_bot_message(
+                token=token_value,
+                chat_id=chat_id_value,
+                text="[1][12:00:01][assistant_message] 반박: B\n질문: C",
+            )
+            store.store_bot_message(
+                token=token_value,
+                chat_id=chat_id_value,
+                text='[1][12:00:01][turn_completed] {"status":"success"}',
+            )
+
+        asyncio.create_task(delayed_completion())
+        return {"ok": True}
+
+    orchestrator = DebateOrchestrator(store=store, send_user_message=sender, poll_interval_sec=0.02, cool_down_sec=0.0)
+    started = await orchestrator.start_debate(
+        request=_request(topic="streamed completion", rounds=1, max_turn_sec=2),
+        participants=_participants(chat_id=1601),
+    )
+    debate_id = str(started["debate_id"])
+    done = await _wait_terminal(orchestrator, debate_id, timeout_sec=6.0)
 
     assert done["status"] == "completed"
     assert len(done["turns"]) == 2

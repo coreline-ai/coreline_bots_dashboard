@@ -22,6 +22,9 @@ ERROR_HINTS = (
     "failed to send telegram message",
 )
 
+DEFAULT_TURN_SECTIONS: tuple[str, ...] = ("주장", "반박", "질문")
+FINAL_ROUND_SECTIONS: tuple[str, ...] = ("요약", "결론")
+
 DebateSendFn = Callable[[str, int, int, str], Awaitable[dict[str, Any]]]
 
 
@@ -173,7 +176,9 @@ class DebateOrchestrator:
             max_turn_sec = int(debate.get("max_turn_sec") or 90)
 
             for round_no in range(1, rounds_total + 1):
-                for participant in participants:
+                # Final round is a single synthesis turn by the starter bot (position=1).
+                round_participants = participants[:1] if rounds_total > 1 and round_no == rounds_total else participants
+                for participant in round_participants:
                     if self._is_stop_requested(debate_id):
                         self._store.finish_debate(debate_id=debate_id, status="stopped")
                         return
@@ -181,12 +186,16 @@ class DebateOrchestrator:
                     position = int(participant.get("position") or 0)
                     speaker_label = str(participant.get("label") or participant.get("bot_id") or f"bot-{position}")
                     speaker_bot_id = str(participant.get("bot_id") or "")
+                    is_final_conclusion_turn = rounds_total > 1 and round_no == rounds_total and position == 1
+                    required_sections = FINAL_ROUND_SECTIONS if is_final_conclusion_turn else DEFAULT_TURN_SECTIONS
                     prompt_text = self._build_turn_prompt(
                         topic=str(debate.get("topic") or ""),
                         round_no=round_no,
+                        rounds_total=rounds_total,
                         participant=participant,
                         participants=participants,
                         transcript=transcript,
+                        is_final_conclusion_turn=is_final_conclusion_turn,
                     )
                     turn_id = self._store.insert_debate_turn_start(
                         debate_id=debate_id,
@@ -218,7 +227,10 @@ class DebateOrchestrator:
                     final_error = outcome.error_text
                     final_response = outcome.response_text
                     if outcome.status == "success":
-                        template_ok, template_error, missing_sections = self._validate_template(outcome.response_text or "")
+                        template_ok, template_error, missing_sections = self._validate_template(
+                            outcome.response_text or "",
+                            required_sections=required_sections,
+                        )
                         if not template_ok:
                             repaired = await self._attempt_template_repair(
                                 debate_id=debate_id,
@@ -229,10 +241,14 @@ class DebateOrchestrator:
                                 speaker_bot_id=speaker_bot_id,
                                 original_response=outcome.response_text or "",
                                 missing_sections=missing_sections,
+                                required_sections=required_sections,
                                 max_turn_sec=max_turn_sec,
                             )
                             if repaired is not None and repaired.status == "success":
-                                fixed_ok, fixed_error, _ = self._validate_template(repaired.response_text or "")
+                                fixed_ok, fixed_error, _ = self._validate_template(
+                                    repaired.response_text or "",
+                                    required_sections=required_sections,
+                                )
                                 if fixed_ok:
                                     final_status = "success"
                                     final_error = None
@@ -338,6 +354,7 @@ class DebateOrchestrator:
         speaker_bot_id: str,
         original_response: str,
         missing_sections: list[str],
+        required_sections: tuple[str, ...],
         max_turn_sec: int,
     ) -> TurnOutcome | None:
         try:
@@ -348,6 +365,7 @@ class DebateOrchestrator:
                 speaker_bot_id=speaker_bot_id,
                 original_response=original_response,
                 missing_sections=missing_sections,
+                required_sections=required_sections,
             )
             baseline = self._max_message_id(participant)
             await self._send_participant_message(participant, repair_prompt)
@@ -382,7 +400,16 @@ class DebateOrchestrator:
                 latest_fallback = text
             assistant_text = parsed.get("assistant_text") or ""
             if assistant_text:
-                latest_assistant = assistant_text
+                # Prefer the most complete assistant snapshot, but preserve additive chunks
+                # when stream data arrives split across multiple messages.
+                if not latest_assistant:
+                    latest_assistant = assistant_text
+                elif assistant_text in latest_assistant:
+                    pass
+                elif latest_assistant in assistant_text:
+                    latest_assistant = assistant_text
+                else:
+                    latest_assistant = f"{latest_assistant}\n{assistant_text}".strip()
             if parsed.get("error_text"):
                 error_text = str(parsed["error_text"])
                 return TurnOutcome(done=True, status="error", detail="error_event", error_text=error_text)
@@ -395,7 +422,9 @@ class DebateOrchestrator:
             if any(token in lowered for token in ERROR_HINTS):
                 return TurnOutcome(done=True, status="error", detail="error_hint", error_text=text)
 
-        if latest_assistant:
+        # Streamed assistant chunks can arrive before the terminal turn_completed event.
+        # Treat the turn as successful only after completion is observed.
+        if saw_turn_completed and latest_assistant:
             return TurnOutcome(done=True, status="success", detail="assistant_message", response_text=latest_assistant)
         if saw_turn_completed:
             return TurnOutcome(done=True, status="success", detail="turn_completed", response_text=latest_fallback)
@@ -455,15 +484,32 @@ class DebateOrchestrator:
         *,
         topic: str,
         round_no: int,
+        rounds_total: int,
         participant: dict[str, Any],
         participants: list[dict[str, Any]],
         transcript: list[dict[str, Any]],
+        is_final_conclusion_turn: bool,
     ) -> str:
         speaker_label = str(participant.get("label") or participant.get("bot_id") or "Bot")
         speaker_bot_id = str(participant.get("bot_id") or "")
         position = int(participant.get("position") or 0)
         total = len(participants)
         transcript_text = self._build_transcript_summary(transcript)
+
+        if is_final_conclusion_turn:
+            return (
+                "멀티봇 토론의 최종 라운드입니다.\n"
+                f"주제: {topic}\n"
+                f"현재 라운드: {round_no}/{rounds_total}\n"
+                f"발언자: {speaker_label} ({speaker_bot_id})\n"
+                "역할: 시작 발언자로서 전체 토론을 정리하고 최종 결론을 제시하세요.\n\n"
+                "전체 토론 요약:\n"
+                f"{transcript_text}\n\n"
+                "반드시 아래 형식을 정확히 지켜서 답하세요.\n"
+                "요약: (핵심 논점 3~5개를 통합 정리)\n"
+                "결론: (최종 판단 1개 + 이유)\n"
+                "전체 길이는 900자 이내로 작성하세요."
+            )
 
         return (
             "멀티봇 토론을 진행합니다.\n"
@@ -489,11 +535,13 @@ class DebateOrchestrator:
         speaker_bot_id: str,
         original_response: str,
         missing_sections: list[str],
+        required_sections: tuple[str, ...],
     ) -> str:
         missing = ", ".join(missing_sections) if missing_sections else "형식 준수"
         clipped = original_response.strip()
         if len(clipped) > 1000:
             clipped = f"{clipped[:1000]}..."
+        format_lines = "\n".join(f"{section}: ..." for section in required_sections)
         return (
             "이전 답변에서 형식 누락이 감지되었습니다. 아래 규칙만 다시 맞춰서 재작성하세요.\n"
             f"주제: {topic}\n"
@@ -502,11 +550,9 @@ class DebateOrchestrator:
             f"누락된 항목: {missing}\n\n"
             "이전 답변:\n"
             f"{clipped}\n\n"
-            "반드시 아래 3줄 형식으로만 출력하세요.\n"
-            "주장: ...\n"
-            "반박: ...\n"
-            "질문: ...\n"
-            "총 길이는 700자 이내."
+            f"반드시 아래 {len(required_sections)}줄 형식으로만 출력하세요.\n"
+            f"{format_lines}\n"
+            "총 길이는 900자 이내."
         )
 
     def _build_transcript_summary(self, transcript: list[dict[str, Any]]) -> str:
@@ -526,8 +572,8 @@ class DebateOrchestrator:
             lines.append(line)
         return "\n".join(lines) if lines else "- 요약이 없습니다."
 
-    def _validate_template(self, text: str) -> tuple[bool, str | None, list[str]]:
-        missing = [key for key in ("주장", "반박", "질문") if key not in text]
+    def _validate_template(self, text: str, *, required_sections: tuple[str, ...]) -> tuple[bool, str | None, list[str]]:
+        missing = [key for key in required_sections if key not in text]
         if missing:
             return False, f"missing sections: {', '.join(missing)}", missing
         return True, None, []

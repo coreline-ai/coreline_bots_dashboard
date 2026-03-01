@@ -3,6 +3,7 @@
 const tokenInput = document.getElementById("token-input");
 const chatIdInput = document.getElementById("chat-id-input");
 const userIdInput = document.getElementById("user-id-input");
+const botIdInput = document.getElementById("bot-id-input");
 const messageInput = document.getElementById("message-input");
 const webhookUrlInput = document.getElementById("webhook-url-input");
 const webhookSecretInput = document.getElementById("webhook-secret-input");
@@ -87,12 +88,27 @@ const COMMAND_CATALOG = [
   { command: "/reset", usage: "/reset", nameKo: "초기화", description: "현재 세션을 초기화하고 새 세션으로 전환합니다." },
   { command: "/summary", usage: "/summary", nameKo: "요약 보기", description: "누적 요약(rolling summary)을 출력합니다." },
   { command: "/mode", usage: "/mode ", nameKo: "에이전트 전환", description: "codex/gemini/claude 모드 조회 또는 전환합니다." },
+  { command: "/model", usage: "/model ", nameKo: "모델 전환", description: "현재 provider의 모델 조회 또는 전환합니다." },
   { command: "/providers", usage: "/providers", nameKo: "제공자 상태", description: "CLI 제공자 설치 여부와 기본 모델을 확인합니다." },
   { command: "/stop", usage: "/stop", nameKo: "실행 중단", description: "현재 실행 중인 turn을 중단 요청합니다." },
   { command: "/youtube", usage: "/youtube ", nameKo: "유튜브 검색", description: "검색어로 유튜브 영상을 찾아 링크를 보냅니다." },
   { command: "/yt", usage: "/yt ", nameKo: "유튜브 검색(축약)", description: "/youtube의 축약 명령입니다." },
   { command: "/echo", usage: "/echo ", nameKo: "에코", description: "입력한 텍스트를 그대로 응답합니다." }
 ];
+const SUPPORTED_PROVIDER_OPTIONS = ["codex", "gemini", "claude"];
+const FALLBACK_AVAILABLE_MODELS = {
+  codex: [
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.2",
+    "gpt-5.1-codex-mini",
+    "gpt-5"
+  ],
+  gemini: ["gemini-2.5-pro", "gemini-2.5-flash"],
+  claude: ["claude-sonnet-4-5"]
+};
 
 let followTimeline = true;
 let timelinePointerDown = false;
@@ -119,6 +135,7 @@ let parallelSendBusy = false;
 let debateBusy = false;
 let debatePollingTimer = null;
 let debateLastStatus = "";
+const profileModelApplyBusy = new Set();
 
 function makeProfileId() {
   if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
@@ -140,6 +157,77 @@ function currentProfile() {
     return null;
   }
   return uiState.profiles.find((profile) => profile.profile_id === uiState.selected_profile_id) || null;
+}
+
+function providerDefaultModel(catalogRow, provider) {
+  const modelsByProvider = catalogRow?.default_models && typeof catalogRow.default_models === "object"
+    ? catalogRow.default_models
+    : null;
+  const raw = modelsByProvider ? modelsByProvider[provider] : null;
+  if (!raw || typeof raw !== "string") {
+    return "";
+  }
+  return raw.trim();
+}
+
+function availableModelsForProvider(catalogRow, provider) {
+  const fromCatalog = catalogRow?.available_models && typeof catalogRow.available_models === "object"
+    ? catalogRow.available_models[provider]
+    : null;
+  if (Array.isArray(fromCatalog)) {
+    const normalized = fromCatalog
+      .map((item) => String(item || "").trim())
+      .filter((item) => item.length > 0);
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+  const fallback = FALLBACK_AVAILABLE_MODELS[provider];
+  return Array.isArray(fallback) ? [...fallback] : [];
+}
+
+function normalizeProvider(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (SUPPORTED_PROVIDER_OPTIONS.includes(normalized)) {
+    return normalized;
+  }
+  return "";
+}
+
+function resolveProfileProvider(profile, diagnostics, catalogRow) {
+  const diagnosticProvider = normalizeProvider(diagnostics?.session?.current_agent);
+  if (diagnosticProvider) {
+    return diagnosticProvider;
+  }
+  const selectedProvider = normalizeProvider(profile?.selected_provider);
+  if (selectedProvider) {
+    return selectedProvider;
+  }
+  const defaultProvider = normalizeProvider(catalogRow?.default_adapter);
+  if (defaultProvider) {
+    return defaultProvider;
+  }
+  return "gemini";
+}
+
+function resolveProfileModel(profile, diagnostics, catalogRow, provider) {
+  const models = availableModelsForProvider(catalogRow, provider);
+  if (!models.length) {
+    return "";
+  }
+  const diagnosticModel = String(diagnostics?.session?.current_model || "").trim();
+  if (diagnosticModel && models.includes(diagnosticModel)) {
+    return diagnosticModel;
+  }
+  const selectedModel = String(profile?.selected_model || "").trim();
+  if (selectedModel && models.includes(selectedModel)) {
+    return selectedModel;
+  }
+  const defaultModel = providerDefaultModel(catalogRow, provider);
+  if (defaultModel && models.includes(defaultModel)) {
+    return defaultModel;
+  }
+  return models[0];
 }
 
 function updateAddProfileButtonState() {
@@ -181,7 +269,9 @@ function loadState() {
             token: String(profile.token || ""),
             chat_id: numberOrDefault(profile.chat_id, 1001),
             user_id: numberOrDefault(profile.user_id, 9001),
-            selected_for_parallel: profile.selected_for_parallel !== false
+            selected_for_parallel: profile.selected_for_parallel !== false,
+            selected_provider: String(profile.selected_provider || ""),
+            selected_model: String(profile.selected_model || "")
           }))
           .filter((profile) => profile.token || profile.bot_id)
       : [];
@@ -346,6 +436,8 @@ function upsertCurrentProfileFromInputs() {
   const catalogRow = catalogByBotId.get(profile.bot_id);
   if (catalogRow && profile.token !== catalogRow.token) {
     profile.bot_id = "";
+    profile.selected_provider = "";
+    profile.selected_model = "";
   }
   saveState();
 }
@@ -367,10 +459,12 @@ function buildStatusChips(profile, diagnostics) {
   const session = diagnostics?.session || {};
   const health = diagnostics?.health?.bot || {};
   const agent = String(session.current_agent || "unknown").toLowerCase();
+  const model = String(session.current_model || "default");
   const runStatus = String(session.run_status || "idle").toLowerCase();
   const rows = [
     { key: "bot", value: profile?.bot_id || "none", extraClass: "" },
     { key: "agent", value: agent, extraClass: `status-chip--agent-${agent}` },
+    { key: "model", value: model, extraClass: "" },
     { key: "thread", value: session.thread_id || "none", extraClass: "" },
     { key: "run", value: runStatus, extraClass: runStatus === "error" ? "status-chip--run-error" : "" },
     { key: "health", value: health.ok ? "ok" : "down", extraClass: health.ok ? "status-chip--health-ok" : "status-chip--health-down" }
@@ -587,10 +681,16 @@ function syncWebhookFormFromProfile(profile) {
 
 function applyProfileToInputs(profile) {
   if (!profile) {
+    if (botIdInput) {
+      botIdInput.value = "";
+    }
     tokenInput.value = "";
     chatIdInput.value = "1001";
     userIdInput.value = "9001";
     return;
+  }
+  if (botIdInput) {
+    botIdInput.value = profile.bot_id || "";
   }
   tokenInput.value = profile.token || "";
   chatIdInput.value = String(numberOrDefault(profile.chat_id, 1001));
@@ -620,6 +720,7 @@ function buildBotListRenderKey() {
       const session = diag?.session || {};
       const healthOk = diag?.health?.bot?.ok === true ? "1" : "0";
       const provider = String(session.current_agent || "");
+      const model = String(session.current_model || "");
       const runStatus = String(session.run_status || "");
       const selected = uiState.selected_profile_id === profile.profile_id ? "1" : "0";
       const checked = profile.selected_for_parallel !== false ? "1" : "0";
@@ -632,12 +733,114 @@ function buildBotListRenderKey() {
         profile.user_id,
         checked,
         selected,
+        profile.selected_provider || "",
+        profile.selected_model || "",
         provider,
+        model,
         runStatus,
         healthOk,
       ].join("|");
     })
     .join("||");
+}
+
+function isProfileModelApplyBusy(profileId) {
+  return profileModelApplyBusy.has(String(profileId || ""));
+}
+
+function setProfileModelApplyBusy(profileId, busy) {
+  const key = String(profileId || "");
+  if (!key) {
+    return;
+  }
+  if (busy) {
+    profileModelApplyBusy.add(key);
+  } else {
+    profileModelApplyBusy.delete(key);
+  }
+  renderBotList(true);
+}
+
+async function applyProfileProviderAndModel(profile, provider, model) {
+  const profileId = String(profile?.profile_id || "");
+  if (!profileId || isProfileModelApplyBusy(profileId)) {
+    return false;
+  }
+  const previousProvider = String(profile.selected_provider || "");
+  const previousModel = String(profile.selected_model || "");
+  setProfileModelApplyBusy(profileId, true);
+  try {
+    await stopActiveRunBeforeModelApply(profile);
+
+    const modeBaseline = await maxMessageIdForProfile(profile);
+    await sendTextToProfile(profile, `/mode ${provider}`);
+    const modeOutcome = await waitForCommandOutcome(profile, modeBaseline, "mode", 30);
+    if (modeOutcome.status !== "PASS") {
+      throw new Error(`provider change failed: ${modeOutcome.detail}`);
+    }
+
+    const modelBaseline = await maxMessageIdForProfile(profile);
+    await sendTextToProfile(profile, `/model ${model}`);
+    const modelOutcome = await waitForCommandOutcome(profile, modelBaseline, "model", 30);
+    if (modelOutcome.status !== "PASS") {
+      throw new Error(`model change failed: ${modelOutcome.detail}`);
+    }
+
+    profile.selected_provider = provider;
+    profile.selected_model = model;
+    saveState();
+    await refresh();
+    return true;
+  } catch (error) {
+    profile.selected_provider = previousProvider;
+    profile.selected_model = previousModel;
+    saveState();
+    appendBubble("meta", `${profile.label}: ${error.message}`);
+    await refresh();
+    return false;
+  } finally {
+    setProfileModelApplyBusy(profileId, false);
+  }
+}
+
+async function applyProfileModelOnly(profile, model) {
+  const profileId = String(profile?.profile_id || "");
+  if (!profileId || isProfileModelApplyBusy(profileId)) {
+    return false;
+  }
+  const previousModel = String(profile.selected_model || "");
+  setProfileModelApplyBusy(profileId, true);
+  try {
+    await stopActiveRunBeforeModelApply(profile);
+
+    const baseline = await maxMessageIdForProfile(profile);
+    await sendTextToProfile(profile, `/model ${model}`);
+    const outcome = await waitForCommandOutcome(profile, baseline, "model", 30);
+    if (outcome.status !== "PASS") {
+      throw new Error(`model change failed: ${outcome.detail}`);
+    }
+    profile.selected_model = model;
+    saveState();
+    await refresh();
+    return true;
+  } catch (error) {
+    profile.selected_model = previousModel;
+    saveState();
+    appendBubble("meta", `${profile.label}: ${error.message}`);
+    await refresh();
+    return false;
+  } finally {
+    setProfileModelApplyBusy(profileId, false);
+  }
+}
+
+async function stopActiveRunBeforeModelApply(profile) {
+  const stopBaseline = await maxMessageIdForProfile(profile);
+  await sendTextToProfile(profile, "/stop");
+  const stopOutcome = await waitForCommandOutcome(profile, stopBaseline, "stop", 20);
+  if (stopOutcome.status !== "PASS") {
+    throw new Error(`stop failed: ${stopOutcome.detail}`);
+  }
 }
 
 function renderBotList(force = false) {
@@ -664,7 +867,13 @@ function renderBotList(force = false) {
     const session = diag?.session || {};
     const healthOk = Boolean(diag?.health?.bot?.ok);
     const catalogRow = catalogByBotId.get(profile.bot_id);
-    const provider = session.current_agent || catalogRow?.default_adapter || "unknown";
+    const provider = resolveProfileProvider(profile, diag, catalogRow);
+    const modelOptions = availableModelsForProvider(catalogRow, provider);
+    const model = resolveProfileModel(profile, diag, catalogRow, provider);
+    const applyingModel = isProfileModelApplyBusy(profile.profile_id);
+    const controlsDisabled = applyingModel || parallelSendBusy || debateBusy;
+    profile.selected_provider = provider;
+    profile.selected_model = model;
 
     const item = document.createElement("div");
     item.className = "bot-item";
@@ -723,18 +932,76 @@ function renderBotList(force = false) {
 
     const meta = document.createElement("div");
     meta.className = "bot-item-meta";
-    const tokenLabel = maskToken(profile.token || "");
-    const rows = [
-      `bot_id=${profile.bot_id || "(manual)"}`,
-      `token=${tokenLabel || "none"}`,
-      `chat=${profile.chat_id} user=${profile.user_id}`
-    ];
-    for (const rowText of rows) {
-      const row = document.createElement("div");
-      row.className = "bot-item-meta-row";
-      row.textContent = rowText;
-      meta.appendChild(row);
+
+    const modelControl = document.createElement("div");
+    modelControl.className = "bot-item-model-control";
+
+    const providerLabel = document.createElement("label");
+    providerLabel.className = "bot-item-model-label";
+    providerLabel.textContent = "Provider";
+    const providerSelect = document.createElement("select");
+    providerSelect.className = "bot-item-model-select";
+    providerSelect.disabled = controlsDisabled;
+    providerSelect.addEventListener("click", (event) => event.stopPropagation());
+    for (const optionValue of SUPPORTED_PROVIDER_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = optionValue;
+      option.textContent = optionValue;
+      option.selected = optionValue === provider;
+      providerSelect.appendChild(option);
     }
+    providerSelect.addEventListener("change", async (event) => {
+      event.stopPropagation();
+      const nextProvider = normalizeProvider(providerSelect.value);
+      if (!nextProvider || nextProvider === provider) {
+        providerSelect.value = provider;
+        return;
+      }
+      const nextModels = availableModelsForProvider(catalogRow, nextProvider);
+      const nextDefault = providerDefaultModel(catalogRow, nextProvider);
+      const nextModel = nextModels.includes(nextDefault) ? nextDefault : (nextModels[0] || "");
+      if (!nextModel) {
+        providerSelect.value = provider;
+        appendBubble("meta", `${profile.label}: ${nextProvider} 모델 목록이 없습니다.`);
+        return;
+      }
+      const ok = await applyProfileProviderAndModel(profile, nextProvider, nextModel);
+      if (!ok) {
+        providerSelect.value = provider;
+      }
+    });
+    providerLabel.appendChild(providerSelect);
+
+    const modelLabel = document.createElement("label");
+    modelLabel.className = "bot-item-model-label";
+    modelLabel.textContent = "Model";
+    const modelSelect = document.createElement("select");
+    modelSelect.className = "bot-item-model-select";
+    modelSelect.disabled = controlsDisabled || modelOptions.length === 0;
+    modelSelect.addEventListener("click", (event) => event.stopPropagation());
+    for (const modelName of modelOptions) {
+      const option = document.createElement("option");
+      option.value = modelName;
+      option.textContent = modelName;
+      option.selected = modelName === model;
+      modelSelect.appendChild(option);
+    }
+    modelSelect.addEventListener("change", async (event) => {
+      event.stopPropagation();
+      const nextModel = String(modelSelect.value || "").trim();
+      if (!nextModel || nextModel === model) {
+        modelSelect.value = model;
+        return;
+      }
+      const ok = await applyProfileModelOnly(profile, nextModel);
+      if (!ok) {
+        modelSelect.value = model;
+      }
+    });
+    modelLabel.appendChild(modelSelect);
+    modelControl.appendChild(providerLabel);
+    modelControl.appendChild(modelLabel);
+    meta.appendChild(modelControl);
 
     item.appendChild(head);
     item.appendChild(meta);
@@ -794,7 +1061,9 @@ function ensureInitialProfileFromParams() {
     token: paramToken || defaultBot?.token || DEFAULT_TOKEN,
     chat_id: paramChatId,
     user_id: paramUserId,
-    selected_for_parallel: true
+    selected_for_parallel: true,
+    selected_provider: normalizeProvider(defaultBot?.default_adapter || "gemini"),
+    selected_model: ""
   });
   uiState.selected_profile_id = uiState.profiles[0].profile_id;
 }
@@ -1510,6 +1779,7 @@ function compactState(result) {
 function inferCurrentAgent(messages) {
   const empty = {
     current_agent: "unknown",
+    current_model: null,
     source: null,
     session_id: null,
     message_id: null
@@ -1519,6 +1789,7 @@ function inferCurrentAgent(messages) {
   }
 
   let sessionId = null;
+  let currentModel = null;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
     const text = typeof msg?.text === "string" ? msg.text : "";
@@ -1528,11 +1799,19 @@ function inferCurrentAgent(messages) {
         sessionId = sessionMatch[1];
       }
     }
+    if (!currentModel) {
+      const modelMatch = text.match(/(?:^|\n)model=([^\s\n]+)/i);
+      if (modelMatch && modelMatch[1]) {
+        const raw = modelMatch[1].trim();
+        currentModel = raw.toLowerCase() === "default" ? null : raw;
+      }
+    }
 
     const queuedMatch = text.match(/\bagent=(codex|gemini|claude)\b/i);
     if (queuedMatch && queuedMatch[1]) {
       return {
         current_agent: queuedMatch[1].toLowerCase(),
+        current_model: currentModel,
         source: "queued_turn",
         session_id: sessionId,
         message_id: msg.message_id ?? null
@@ -1543,6 +1822,7 @@ function inferCurrentAgent(messages) {
     if (statusMatch && statusMatch[1]) {
       return {
         current_agent: statusMatch[1].toLowerCase(),
+        current_model: currentModel,
         source: "status",
         session_id: sessionId,
         message_id: msg.message_id ?? null
@@ -1553,6 +1833,7 @@ function inferCurrentAgent(messages) {
     if (modeSwitchMatch && modeSwitchMatch[1]) {
       return {
         current_agent: modeSwitchMatch[1].toLowerCase(),
+        current_model: currentModel,
         source: "mode_switch",
         session_id: sessionId,
         message_id: msg.message_id ?? null
@@ -1560,7 +1841,7 @@ function inferCurrentAgent(messages) {
     }
   }
 
-  return { ...empty, session_id: sessionId };
+  return { ...empty, session_id: sessionId, current_model: currentModel };
 }
 
 function compactThreads(result, selectedChatId) {
@@ -1630,6 +1911,42 @@ function classifyOutcomeFromTexts(texts) {
   return { done: false, status: "WAIT", detail: "running" };
 }
 
+function classifyCommandOutcomeFromTexts(texts, commandType) {
+  const joined = (texts || []).join("\n");
+  const lowered = joined.toLowerCase();
+  if (!lowered.trim()) {
+    return { done: false, status: "WAIT", detail: "running" };
+  }
+
+  if (
+    lowered.includes("a run is active") ||
+    lowered.includes("use /stop first") ||
+    lowered.includes("unsupported provider") ||
+    lowered.includes("unsupported model") ||
+    lowered.includes("model name is required") ||
+    lowered.includes("no selectable model") ||
+    lowered.includes("access denied")
+  ) {
+    return { done: true, status: "FAIL", detail: "command_rejected" };
+  }
+
+  if (commandType === "mode") {
+    if (/\bmode switched:/i.test(joined) || /\bmode unchanged:/i.test(joined)) {
+      return { done: true, status: "PASS", detail: "mode_applied" };
+    }
+  } else if (commandType === "stop") {
+    if (/\bstop requested\./i.test(joined) || /\bno active run\./i.test(joined) || /\bstopping\.\.\./i.test(joined)) {
+      return { done: true, status: "PASS", detail: "stop_applied" };
+    }
+  } else if (commandType === "model") {
+    if (/\bmodel updated:/i.test(joined)) {
+      return { done: true, status: "PASS", detail: "model_applied" };
+    }
+  }
+
+  return { done: false, status: "WAIT", detail: "running" };
+}
+
 async function waitForParallelOutcome(profile, baselineMessageId, timeoutSec = 60) {
   for (let elapsed = 0; elapsed < timeoutSec; elapsed += 1) {
     const [messagesResp, diagnosticsResp] = await Promise.all([
@@ -1656,6 +1973,38 @@ async function waitForParallelOutcome(profile, baselineMessageId, timeoutSec = 6
     if (texts.length > 0 && runStatus === "completed") {
       return { done: true, status: "PASS", detail: "run_status=completed" };
     }
+    if (runStatus === "error") {
+      const tag = String(diagnostics?.last_error_tag || "error");
+      return { done: true, status: "FAIL", detail: tag };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return { done: true, status: "FAIL", detail: "timeout" };
+}
+
+async function waitForCommandOutcome(profile, baselineMessageId, commandType, timeoutSec = 30) {
+  for (let elapsed = 0; elapsed < timeoutSec; elapsed += 1) {
+    const [messagesResp, diagnosticsResp] = await Promise.all([
+      requestJson(`/_mock/messages?token=${encodeURIComponent(profile.token)}&chat_id=${Number(profile.chat_id)}&limit=120`),
+      requestJson(
+        `/_mock/bot_diagnostics?bot_id=${encodeURIComponent(profile.bot_id)}&token=${encodeURIComponent(
+          profile.token
+        )}&chat_id=${Number(profile.chat_id)}&limit=120`
+      ),
+    ]);
+
+    const messages = Array.isArray(messagesResp?.result?.messages) ? messagesResp.result.messages : [];
+    const texts = messages
+      .filter((message) => Number(message.message_id || 0) > baselineMessageId && message.direction === "bot")
+      .map((message) => String(message.text || ""));
+
+    const outcome = classifyCommandOutcomeFromTexts(texts, commandType);
+    if (outcome.done) {
+      return outcome;
+    }
+
+    const diagnostics = diagnosticsResp?.result || {};
+    const runStatus = String(diagnostics?.session?.run_status || "").toLowerCase();
     if (runStatus === "error") {
       const tag = String(diagnostics?.last_error_tag || "error");
       return { done: true, status: "FAIL", detail: tag };
@@ -2183,6 +2532,8 @@ async function addProfileAutomatically() {
     chat_id: chatId,
     user_id: userId,
     selected_for_parallel: true,
+    selected_provider: normalizeProvider(created.default_adapter || "gemini"),
+    selected_model: "",
   };
 
   uiState.profiles.push(profile);
@@ -2245,7 +2596,9 @@ function addProfileFromDialog() {
     token: row?.token || DEFAULT_TOKEN,
     chat_id: numberOrDefault(profileChatIdInput.value, 1001),
     user_id: numberOrDefault(profileUserIdInput.value, 9001),
-    selected_for_parallel: true
+    selected_for_parallel: true,
+    selected_provider: normalizeProvider(row?.default_adapter || "gemini"),
+    selected_model: ""
   };
   uiState.profiles.push(profile);
   uiState.selected_profile_id = profile.profile_id;

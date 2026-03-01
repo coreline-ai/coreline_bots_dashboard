@@ -39,7 +39,7 @@ Telegram <-> CLI adapter bridge MVP.
 
 ## 특징
 
-- 각 봇은 기본적으로 `/mode` 명령을 통해 `gemini`, `codex`, `claude` 모드를 자유롭게 전환할 수 있습니다.
+- 각 봇은 기본적으로 `/mode` 명령으로 `gemini`, `codex`, `claude` 모드를 전환할 수 있고, 대시보드 봇 카드에서 provider/model 드롭다운으로 즉시 변경할 수 있습니다.
 - 멀티봇을 지원하여, 한 번의 프롬프트로 여러 봇에서 다양한 형태의 결과물을 병렬로 얻을 수 있습니다.
 - 멀티봇은 동적으로 다수 생성 및 삭제가 가능합니다.
 - 대시보드를 제공하여 시뮬레이션과 다양한 추가 개발 테스트를 수행할 수 있습니다.
@@ -317,6 +317,8 @@ CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
 | `/summary` | rolling summary 출력 |
 | `/mode` | 현재 provider 확인 + 사용법 안내 |
 | `/mode <codex\|gemini\|claude>` | provider 전환 (활성 run 중이면 차단) |
+| `/model` | 현재 provider의 model/허용 목록 조회 |
+| `/model <name>` | 현재 provider model 변경 (활성 run 중이면 차단) |
 | `/providers` | provider binary 설치여부 + 기본 model 표시 |
 | `/stop` | 활성 run 취소 요청 |
 | `/youtube <query>` / `/yt <query>` | YouTube 검색 후 watch URL 전송 |

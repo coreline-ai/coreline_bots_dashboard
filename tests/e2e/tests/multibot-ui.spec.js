@@ -98,6 +98,178 @@ test('add profile creates new runtime bot instance every time', async ({ page })
   }
 });
 
+test('bot card shows provider and model dropdown controls', async ({ page }) => {
+  await page.goto('/_mock/ui');
+
+  await expect(page.locator('.bot-item')).toHaveCount(1);
+  await expect(page.locator('.bot-item-model-control')).toHaveCount(1);
+  await expect(page.locator('.bot-item-model-control select').first()).toBeVisible();
+  await expect(page.locator('.bot-item-model-control select').nth(1)).toBeVisible();
+});
+
+test('provider dropdown applies /mode then /model immediately', async ({ page }) => {
+  const state = {
+    agent: 'gemini',
+    model: 'gemini-2.5-pro',
+    nextMessageId: 2000,
+    messages: [],
+    sent: []
+  };
+
+  await page.route('**/_mock/send', async (route) => {
+    const payload = route.request().postDataJSON() || {};
+    const text = String(payload.text || '');
+    state.sent.push(text);
+    if (text.startsWith('/mode ')) {
+      const nextAgent = text.replace('/mode ', '').trim().toLowerCase();
+      state.agent = nextAgent;
+      state.model = nextAgent === 'codex' ? 'gpt-5' : (nextAgent === 'claude' ? 'claude-sonnet-4-5' : 'gemini-2.5-pro');
+      state.messages.push({
+        message_id: ++state.nextMessageId,
+        direction: 'bot',
+        text: `mode switched: gemini -> ${state.agent}\nmodel=${state.model}\nsession=session-e2e`
+      });
+    } else if (text.startsWith('/model ')) {
+      const nextModel = text.replace('/model ', '').trim();
+      state.model = nextModel;
+      state.messages.push({
+        message_id: ++state.nextMessageId,
+        direction: 'bot',
+        text: `model updated: previous -> ${state.model}\nadapter=${state.agent}\nmodel=${state.model}\nsession=session-e2e`
+      });
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: { update_id: state.nextMessageId, delivery_mode: 'polling', delivered_via_webhook: false, webhook_error: null }
+      })
+    });
+  });
+
+  await page.route('**/_mock/messages*', async (route) => {
+    const limit = Number(new URL(route.request().url()).searchParams.get('limit') || '120');
+    const messages = state.messages.slice(-Math.max(1, Math.min(limit, 1000)));
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, result: { messages, updates: [] } })
+    });
+  });
+
+  await page.route('**/_mock/bot_diagnostics*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          health: { bot: { ok: true }, runtime: { ok: true } },
+          session: {
+            current_agent: state.agent,
+            current_model: state.model,
+            session_id: 'session-e2e',
+            thread_id: null,
+            run_status: 'idle',
+            summary_preview: null
+          },
+          metrics: {},
+          last_error_tag: 'unknown'
+        }
+      })
+    });
+  });
+
+  await page.goto('/_mock/ui');
+
+  const providerSelect = page.locator('.bot-item-model-control select').first();
+  const modelSelect = page.locator('.bot-item-model-control select').nth(1);
+  await expect(providerSelect).toHaveValue('gemini');
+  await expect(modelSelect).toHaveValue('gemini-2.5-pro');
+
+  await providerSelect.selectOption('codex');
+
+  await expect.poll(() => state.sent.includes('/mode codex')).toBeTruthy();
+  await expect.poll(() => state.sent.includes('/model gpt-5')).toBeTruthy();
+  await expect(providerSelect).toHaveValue('codex');
+  await expect(modelSelect).toHaveValue('gpt-5');
+});
+
+test('model apply failure rolls back dropdown value', async ({ page }) => {
+  const state = {
+    agent: 'gemini',
+    model: 'gemini-2.5-pro',
+    nextMessageId: 3000,
+    messages: [],
+    sent: []
+  };
+
+  await page.route('**/_mock/send', async (route) => {
+    const payload = route.request().postDataJSON() || {};
+    const text = String(payload.text || '');
+    state.sent.push(text);
+    if (text.startsWith('/model ')) {
+      state.messages.push({
+        message_id: ++state.nextMessageId,
+        direction: 'bot',
+        text: 'A run is active. Use /stop first, then retry /model.'
+      });
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: { update_id: state.nextMessageId, delivery_mode: 'polling', delivered_via_webhook: false, webhook_error: null }
+      })
+    });
+  });
+
+  await page.route('**/_mock/messages*', async (route) => {
+    const limit = Number(new URL(route.request().url()).searchParams.get('limit') || '120');
+    const messages = state.messages.slice(-Math.max(1, Math.min(limit, 1000)));
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, result: { messages, updates: [] } })
+    });
+  });
+
+  await page.route('**/_mock/bot_diagnostics*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          health: { bot: { ok: true }, runtime: { ok: true } },
+          session: {
+            current_agent: state.agent,
+            current_model: state.model,
+            session_id: 'session-e2e',
+            thread_id: null,
+            run_status: 'idle',
+            summary_preview: null
+          },
+          metrics: {},
+          last_error_tag: 'active_run'
+        }
+      })
+    });
+  });
+
+  await page.goto('/_mock/ui');
+
+  const modelSelect = page.locator('.bot-item-model-control select').nth(1);
+  await expect(modelSelect).toHaveValue('gemini-2.5-pro');
+
+  await modelSelect.selectOption('gemini-2.5-flash');
+  await expect.poll(() => state.sent.includes('/model gemini-2.5-flash')).toBeTruthy();
+  await expect(modelSelect).toHaveValue('gemini-2.5-pro');
+  await expect(page.locator('#timeline-list')).toContainText('Use /stop first');
+});
+
 test('parallel send succeeds across at least three selected bots', async ({ page }) => {
   test.setTimeout(120000);
   await page.goto('/_mock/ui');

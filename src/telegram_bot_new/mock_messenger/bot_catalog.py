@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import yaml
 
+from telegram_bot_new.model_presets import AVAILABLE_MODELS_BY_PROVIDER
 from telegram_bot_new.settings import GlobalSettings, get_global_settings, load_bots_config
 
 EVENT_LINE_RE = re.compile(r"^\[(\d+|~)\]\[(\d{2}:\d{2}:\d{2})\]\[([a-z_]+)\]\s?(.*)$", re.IGNORECASE)
@@ -58,6 +59,10 @@ def build_bot_catalog(
                     "codex": bot.codex.model,
                     "gemini": bot.gemini.model,
                     "claude": bot.claude.model,
+                },
+                "available_models": {
+                    provider: list(models)
+                    for provider, models in AVAILABLE_MODELS_BY_PROVIDER.items()
                 },
                 "embedded_url": embedded_url,
                 "webhook": {
@@ -184,6 +189,7 @@ def _build_default_name(bot_id: str) -> str:
 def infer_session_view_from_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {
         "current_agent": "unknown",
+        "current_model": None,
         "session_id": None,
         "thread_id": None,
         "run_status": "idle",
@@ -221,6 +227,12 @@ def infer_session_view_from_messages(messages: list[dict[str, Any]]) -> dict[str
             if match:
                 raw = match.group(1).strip()
                 result["summary_preview"] = None if raw == "none" else raw
+
+        if result["current_model"] is None:
+            match = re.search(r"(?:^|\n)model=([^\s\n]+)", text, flags=re.IGNORECASE)
+            if match:
+                raw = match.group(1).strip()
+                result["current_model"] = None if raw.lower() == "default" else raw
 
         if result["current_agent"] == "unknown":
             queued = re.search(r"\bagent=(codex|gemini|claude)\b", text, flags=re.IGNORECASE)

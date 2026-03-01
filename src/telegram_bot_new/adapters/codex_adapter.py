@@ -13,9 +13,22 @@ class CodexAdapter(CliAdapter):
     def __init__(self, codex_bin: str = "codex") -> None:
         self._codex_bin = codex_bin
 
+    @staticmethod
+    def _base_exec_args(codex_bin: str) -> list[str]:
+        # Force a safe effort level for non-interactive workers so a user's global
+        # Codex config (e.g. model_reasoning_effort="xhigh") cannot break gpt-5 runs.
+        return [
+            codex_bin,
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "-c",
+            'model_reasoning_effort="high"',
+        ]
+
     async def run_new_turn(self, request: AdapterRunRequest) -> AsyncIterator[AdapterEvent]:
         prompt = self._compose_prompt(request.preamble, request.prompt)
-        args = [self._codex_bin, "exec", "--json", "--skip-git-repo-check"]
+        args = self._base_exec_args(self._codex_bin)
         if request.model:
             args.extend(["-m", request.model])
         if request.sandbox:
@@ -27,7 +40,7 @@ class CodexAdapter(CliAdapter):
 
     async def run_resume_turn(self, request: AdapterResumeRequest) -> AsyncIterator[AdapterEvent]:
         prompt = self._compose_prompt(request.preamble, request.prompt)
-        args = [self._codex_bin, "exec", "--json", "--skip-git-repo-check"]
+        args = self._base_exec_args(self._codex_bin)
         if request.model:
             args.extend(["-m", request.model])
         if request.sandbox:

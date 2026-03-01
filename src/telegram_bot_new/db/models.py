@@ -57,6 +57,7 @@ class Session(Base):
     bot_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     chat_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     adapter_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    adapter_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     adapter_thread_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     rolling_summary_md: Mapped[str] = mapped_column(Text, nullable=False, default="")

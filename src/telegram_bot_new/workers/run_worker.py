@@ -359,7 +359,7 @@ async def _process_run_job(
         preamble = summary_service.build_recovery_preamble(session.rolling_summary_md)
         run_started_epoch = time.time()
         execution_prompt = _augment_prompt_for_generation_request(turn.user_text)
-        selected_model = default_models_by_provider.get(provider)
+        selected_model = getattr(session, "adapter_model", None) or default_models_by_provider.get(provider)
         selected_sandbox = default_sandbox if provider == "codex" else ""
 
         async def should_cancel() -> bool:

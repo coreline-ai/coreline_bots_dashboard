@@ -8,6 +8,13 @@ import time
 from typing import Any, Protocol
 
 from telegram_bot_new.db.repository import ActiveRunExistsError, Repository
+from telegram_bot_new.model_presets import (
+    SUPPORTED_CLI_PROVIDERS,
+    get_available_models,
+    is_allowed_model,
+    resolve_provider_default_model,
+    resolve_selected_model,
+)
 from telegram_bot_new.services.action_token_service import ActionTokenPayload, ActionTokenService
 from telegram_bot_new.services.button_prompt_service import ButtonPromptService
 from telegram_bot_new.services.run_service import RunService
@@ -18,7 +25,7 @@ from telegram_bot_new.telegram.client import TelegramClient
 
 
 INLINE_ACTIONS = ("summary", "regen", "next", "stop")
-SUPPORTED_PROVIDERS = ("codex", "gemini", "claude")
+SUPPORTED_PROVIDERS = SUPPORTED_CLI_PROVIDERS
 LOGGER = logging.getLogger(__name__)
 
 
@@ -103,10 +110,12 @@ class TelegramCommandHandler:
             return
 
         adapter_name = await self._resolve_chat_adapter(chat_id=str(parsed.chat_id))
+        adapter_model = self._provider_default_or_preset_model(adapter_name)
         session = await self._session_service.get_or_create(
             bot_id=self._bot.bot_id,
             chat_id=str(parsed.chat_id),
             adapter_name=adapter_name,
+            adapter_model=adapter_model,
             now=now_ms,
         )
         try:
@@ -275,10 +284,12 @@ class TelegramCommandHandler:
 
         if command == "/new":
             adapter_name = await self._resolve_chat_adapter(chat_id=str(chat_id))
+            adapter_model = self._provider_default_or_preset_model(adapter_name)
             session = await self._session_service.create_new(
                 bot_id=self._bot.bot_id,
                 chat_id=str(chat_id),
                 adapter_name=adapter_name,
+                adapter_model=adapter_model,
                 now=now_ms,
             )
             await self._client.send_message(chat_id, f"New session created: {session.session_id} (adapter={adapter_name})")
@@ -289,7 +300,11 @@ class TelegramCommandHandler:
             if status is None:
                 await self._client.send_message(chat_id, "No session yet. Send a message to start.")
                 return
-            model = self._provider_default_model(status.adapter_name)
+            model = resolve_selected_model(
+                provider=status.adapter_name,
+                session_model=getattr(status, "adapter_model", None),
+                default_models=self._bot.default_models,
+            )
             await self._client.send_message(
                 chat_id,
                 "\n".join(
@@ -308,12 +323,14 @@ class TelegramCommandHandler:
         if command == "/reset":
             existing = await self._session_service.status(bot_id=self._bot.bot_id, chat_id=str(chat_id))
             adapter_name = existing.adapter_name if existing is not None else self._bot.adapter
+            adapter_model = self._provider_default_or_preset_model(adapter_name)
             if existing:
                 await self._session_service.reset(session_id=existing.session_id, now=now_ms)
             new_s = await self._session_service.create_new(
                 bot_id=self._bot.bot_id,
                 chat_id=str(chat_id),
                 adapter_name=adapter_name,
+                adapter_model=adapter_model,
                 now=now_ms,
             )
             await self._client.send_message(chat_id, f"Session reset. New session={new_s.session_id} (adapter={adapter_name})")
@@ -329,6 +346,10 @@ class TelegramCommandHandler:
 
         if command == "/mode":
             await self._handle_mode_command(chat_id=chat_id, arg=arg, now_ms=now_ms)
+            return
+
+        if command == "/model":
+            await self._handle_model_command(chat_id=chat_id, arg=arg, now_ms=now_ms)
             return
 
         if command == "/providers":
@@ -355,10 +376,23 @@ class TelegramCommandHandler:
     def _provider_default_model(self, provider: str) -> str | None:
         return self._bot.default_models.get(provider)
 
+    def _provider_default_or_preset_model(self, provider: str) -> str | None:
+        return resolve_provider_default_model(provider, self._provider_default_model(provider))
+
+    def _provider_models_text(self, provider: str) -> str:
+        candidates = get_available_models(provider)
+        if not candidates:
+            return "none"
+        return ", ".join(candidates)
+
     async def _handle_mode_command(self, *, chat_id: int, arg: str, now_ms: int) -> None:
         status = await self._session_service.status(bot_id=self._bot.bot_id, chat_id=str(chat_id))
         current_adapter = status.adapter_name if status is not None else self._bot.adapter
-        current_model = self._provider_default_model(current_adapter) or "default"
+        current_model = resolve_selected_model(
+            provider=current_adapter,
+            session_model=getattr(status, "adapter_model", None),
+            default_models=self._bot.default_models,
+        ) or "default"
 
         if not arg:
             await self._client.send_message(
@@ -395,11 +429,13 @@ class TelegramCommandHandler:
                 bot_id=self._bot.bot_id,
                 chat_id=str(chat_id),
                 adapter_name=next_adapter,
+                adapter_model=self._provider_default_or_preset_model(next_adapter),
                 now=now_ms,
             )
             await self._session_service.switch_adapter(
                 session_id=session.session_id,
                 adapter_name=next_adapter,
+                adapter_model=self._provider_default_or_preset_model(next_adapter),
                 now=now_ms,
             )
             session_id = session.session_id
@@ -407,6 +443,7 @@ class TelegramCommandHandler:
             await self._session_service.switch_adapter(
                 session_id=status.session_id,
                 adapter_name=next_adapter,
+                adapter_model=self._provider_default_or_preset_model(next_adapter),
                 now=now_ms,
             )
             session_id = status.session_id
@@ -424,8 +461,83 @@ class TelegramCommandHandler:
             "\n".join(
                 [
                     f"mode switched: {current_adapter} -> {next_adapter}",
+                    f"model={self._provider_default_or_preset_model(next_adapter) or 'default'}",
                     f"session={session_id}",
                     "context continuity: rolling summary retained, provider thread reset.",
+                ]
+            ),
+        )
+
+    async def _handle_model_command(self, *, chat_id: int, arg: str, now_ms: int) -> None:
+        status = await self._session_service.status(bot_id=self._bot.bot_id, chat_id=str(chat_id))
+        current_adapter = status.adapter_name if status is not None else self._bot.adapter
+        current_model = resolve_selected_model(
+            provider=current_adapter,
+            session_model=getattr(status, "adapter_model", None),
+            default_models=self._bot.default_models,
+        ) or "default"
+        allowed_models = get_available_models(current_adapter)
+
+        if not arg:
+            await self._client.send_message(
+                chat_id,
+                "\n".join(
+                    [
+                        f"adapter={current_adapter}",
+                        f"model={current_model}",
+                        f"available_models={self._provider_models_text(current_adapter)}",
+                        "usage: /model <model-name>",
+                    ]
+                ),
+            )
+            return
+
+        next_model = arg.strip()
+        if not next_model:
+            await self._client.send_message(chat_id, "Model name is required. usage: /model <model-name>")
+            return
+
+        if not allowed_models:
+            await self._client.send_message(chat_id, f"No selectable model for provider={current_adapter}")
+            return
+
+        if not is_allowed_model(current_adapter, next_model):
+            await self._client.send_message(
+                chat_id,
+                f"Unsupported model for {current_adapter}: {next_model}\nallowed={self._provider_models_text(current_adapter)}",
+            )
+            return
+
+        active = await self._run_service.has_active_run(bot_id=self._bot.bot_id, chat_id=str(chat_id))
+        if active:
+            await self._client.send_message(chat_id, "A run is active. Use /stop first, then retry /model.")
+            return
+
+        if status is None:
+            session = await self._session_service.get_or_create(
+                bot_id=self._bot.bot_id,
+                chat_id=str(chat_id),
+                adapter_name=current_adapter,
+                adapter_model=next_model,
+                now=now_ms,
+            )
+            session_id = session.session_id
+        else:
+            session_id = status.session_id
+
+        await self._session_service.set_model(
+            session_id=session_id,
+            adapter_model=next_model,
+            now=now_ms,
+        )
+        await self._client.send_message(
+            chat_id,
+            "\n".join(
+                [
+                    f"model updated: {current_model} -> {next_model}",
+                    f"adapter={current_adapter}",
+                    f"model={next_model}",
+                    f"session={session_id}",
                 ]
             ),
         )
@@ -514,7 +626,7 @@ class TelegramCommandHandler:
 
     def _help_text(self) -> str:
         return (
-            "/start /help /new /status /reset /summary /mode /providers /stop /youtube\n"
+            "/start /help /new /status /reset /summary /mode /model /providers /stop /youtube\n"
             "Plain text message => enqueue CLI turn"
         )
 

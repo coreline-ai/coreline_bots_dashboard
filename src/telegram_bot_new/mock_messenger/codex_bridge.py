@@ -625,7 +625,7 @@ def _build_codex_command(
     model: str | None,
     sandbox: str,
 ) -> list[str]:
-    cmd = [codex_bin, "exec", "--json", "--skip-git-repo-check"]
+    cmd = [codex_bin, "exec", "--json", "--skip-git-repo-check", "-c", 'model_reasoning_effort="high"']
     if model:
         cmd.extend(["-m", model])
     if sandbox:
@@ -638,7 +638,7 @@ def _build_codex_command(
 
 
 def _cmd_preview(*, codex_bin: str, thread_id: str | None, model: str | None, sandbox: str) -> str:
-    parts = [codex_bin, "exec", "--json", "--skip-git-repo-check"]
+    parts = [codex_bin, "exec", "--json", "--skip-git-repo-check", "-c", 'model_reasoning_effort="high"']
     if model:
         parts.extend(["-m", model])
     if sandbox:

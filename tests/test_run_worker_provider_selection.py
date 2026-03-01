@@ -75,8 +75,9 @@ class _TelegramClientNoop:
 
 
 class _Repository:
-    def __init__(self, *, adapter_name: str) -> None:
+    def __init__(self, *, adapter_name: str, adapter_model: str | None = None) -> None:
         self.adapter_name = adapter_name
+        self.adapter_model = adapter_model
         self.completed = False
         self.failed = False
         self.failed_error = ""
@@ -90,6 +91,7 @@ class _Repository:
         return SimpleNamespace(
             session_id=session_id,
             adapter_name=self.adapter_name,
+            adapter_model=self.adapter_model,
             rolling_summary_md="",
             adapter_thread_id=None,
         )
@@ -203,3 +205,27 @@ async def test_process_run_job_reports_missing_provider_binary_with_standard_mes
     assert "turn_completed" in event_types
     payloads = [json.loads(payload_json) for _, payload_json in repo.appended_events]
     assert any("provider=gemini executable not found" in (payload.get("payload", {}).get("message", "")) for payload in payloads)
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_prefers_session_model_over_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _CaptureAdapter()
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: adapter)
+    repo = _Repository(adapter_name="gemini", adapter_model="gemini-2.5-flash")
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-3", turn_id="turn-3", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert adapter.last_request is not None
+    assert adapter.last_request.model == "gemini-2.5-flash"
