@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Optional
 from uuid import uuid4
 
 from telegram_bot_new.db.repository import Repository
@@ -10,7 +11,7 @@ from telegram_bot_new.db.repository import Repository
 DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
 
 
-@dataclass(slots=True)
+@dataclass
 class ActionTokenPayload:
     action_type: str
     run_source: str
@@ -61,7 +62,7 @@ class ActionTokenService:
         bot_id: str,
         chat_id: str,
         now: int,
-    ) -> ActionTokenPayload | None:
+    ) -> Optional[ActionTokenPayload]:
         found = await self._repository.consume_action_token(
             token=token,
             bot_id=bot_id,

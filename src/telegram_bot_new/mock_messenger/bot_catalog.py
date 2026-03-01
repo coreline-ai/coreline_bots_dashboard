@@ -190,6 +190,8 @@ def infer_session_view_from_messages(messages: list[dict[str, Any]]) -> dict[str
     result: dict[str, Any] = {
         "current_agent": "unknown",
         "current_model": None,
+        "current_project": None,
+        "unsafe_until": None,
         "session_id": None,
         "thread_id": None,
         "run_status": "idle",
@@ -233,6 +235,34 @@ def infer_session_view_from_messages(messages: list[dict[str, Any]]) -> dict[str
             if match:
                 raw = match.group(1).strip()
                 result["current_model"] = None if raw.lower() == "default" else raw
+
+        if result["current_project"] is None:
+            match = re.search(r"(?:^|\n)project=([^\n]+)", text, flags=re.IGNORECASE)
+            if match:
+                raw = match.group(1).strip()
+                lowered = raw.lower()
+                result["current_project"] = None if lowered in {"default", "none", "off"} else raw
+            else:
+                updated = re.search(r"project updated:\s*(.+?)\s*->\s*(.+)", text, flags=re.IGNORECASE)
+                if updated:
+                    raw_next = updated.group(2).strip()
+                    lowered_next = raw_next.lower()
+                    result["current_project"] = None if lowered_next in {"default", "none", "off"} else raw_next
+
+        if result["unsafe_until"] is None:
+            match = re.search(r"(?:^|\n)unsafe_until=([^\s\n]+)", text, flags=re.IGNORECASE)
+            if match:
+                raw = match.group(1).strip()
+                lowered = raw.lower()
+                if lowered not in {"off", "none"} and raw.isdigit():
+                    result["unsafe_until"] = int(raw)
+            else:
+                updated = re.search(r"unsafe updated:\s*([^\s\n]+)\s*->\s*([^\s\n]+)", text, flags=re.IGNORECASE)
+                if updated:
+                    raw_next = updated.group(2).strip()
+                    lowered_next = raw_next.lower()
+                    if lowered_next not in {"off", "none"} and raw_next.isdigit():
+                        result["unsafe_until"] = int(raw_next)
 
         if result["current_agent"] == "unknown":
             queued = re.search(r"\bagent=(codex|gemini|claude)\b", text, flags=re.IGNORECASE)
@@ -441,6 +471,49 @@ async def fetch_embedded_runtime(embedded_url: str | None) -> tuple[dict[str, An
             },
             None,
         )
+
+
+async def fetch_embedded_audit_logs(
+    embedded_url: str | None,
+    *,
+    chat_id: int | None,
+    limit: int,
+) -> tuple[list[dict[str, Any]], str | None]:
+    if not embedded_url:
+        return [], "gateway mode: no dedicated embedded audit endpoint"
+
+    timeout = httpx.Timeout(2.0)
+    params: dict[str, Any] = {"limit": max(1, min(int(limit), 500))}
+    if chat_id is not None:
+        params["chat_id"] = str(chat_id)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(f"{embedded_url}/audit_logs", params=params)
+        if response.status_code < 200 or response.status_code >= 300:
+            return [], f"audit_logs status={response.status_code}"
+        payload = response.json() if response.content else {}
+        logs = payload.get("result", {}).get("logs") if isinstance(payload, dict) else None
+        if not isinstance(logs, list):
+            return [], "invalid audit_logs response"
+        normalized: list[dict[str, Any]] = []
+        for row in logs:
+            if not isinstance(row, dict):
+                continue
+            normalized.append(
+                {
+                    "id": str(row.get("id") or ""),
+                    "bot_id": str(row.get("bot_id") or ""),
+                    "chat_id": row.get("chat_id"),
+                    "session_id": row.get("session_id"),
+                    "action": str(row.get("action") or ""),
+                    "result": str(row.get("result") or ""),
+                    "detail_json": row.get("detail_json"),
+                    "created_at": int(row.get("created_at") or 0),
+                }
+            )
+        return normalized, None
+    except Exception as error:
+        return [], str(error)
 
 
 def extract_runtime_metrics(metrics_payload: dict[str, Any] | None) -> dict[str, Any]:

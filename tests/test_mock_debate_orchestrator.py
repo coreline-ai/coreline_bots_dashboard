@@ -156,6 +156,56 @@ async def test_orchestrator_continues_after_timeout_and_error(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_retries_after_active_run_error(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "debate-orchestrator-active-run.db"),
+        data_dir=str(tmp_path / "debate-orchestrator-active-run-data"),
+    )
+    prompt_attempts: dict[str, int] = {}
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.strip() == "/stop":
+            store.store_bot_message(token=token, chat_id=chat_id, text="Stop requested.")
+            return {"ok": True}
+        if text.startswith("/"):
+            return {"ok": True}
+
+        attempts = prompt_attempts.get(token, 0) + 1
+        prompt_attempts[token] = attempts
+        if attempts == 1:
+            store.store_bot_message(token=token, chat_id=chat_id, text="A run is active. Use /stop first.")
+            return {"ok": True}
+
+        store.store_bot_message(
+            token=token,
+            chat_id=chat_id,
+            text="[1][12:00:00][assistant_message] 주장: A\n반박: B\n질문: C",
+        )
+        store.store_bot_message(
+            token=token,
+            chat_id=chat_id,
+            text='[1][12:00:01][turn_completed] {"status":"success"}',
+        )
+        return {"ok": True}
+
+    orchestrator = DebateOrchestrator(store=store, send_user_message=sender, poll_interval_sec=0.02, cool_down_sec=0.0)
+    started = await orchestrator.start_debate(
+        request=_request(topic="active run recovery", rounds=1, max_turn_sec=2),
+        participants=_participants(chat_id=1251),
+    )
+    debate_id = str(started["debate_id"])
+    done = await _wait_terminal(orchestrator, debate_id, timeout_sec=8.0)
+
+    assert done["status"] == "completed"
+    assert len(done["turns"]) == 2
+    assert all(str(turn["status"]) == "success" for turn in done["turns"])
+    assert prompt_attempts == {"token-a": 2, "token-b": 2}
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_stop_requested_stops_debate(tmp_path: Path) -> None:
     store = MockMessengerStore(
         db_path=str(tmp_path / "debate-orchestrator-stop.db"),

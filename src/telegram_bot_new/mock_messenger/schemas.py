@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -14,7 +14,7 @@ class MockSendRequest(BaseModel):
 
 class MockClearMessagesRequest(BaseModel):
     token: str = Field(min_length=1)
-    chat_id: int | None = None
+    chat_id: Optional[int] = None
 
 
 class RateLimitRuleRequest(BaseModel):
@@ -25,9 +25,9 @@ class RateLimitRuleRequest(BaseModel):
 
 
 class BotCatalogAddRequest(BaseModel):
-    bot_id: str | None = None
-    token: str | None = None
-    name: str | None = None
+    bot_id: Optional[str] = None
+    token: Optional[str] = None
+    name: Optional[str] = None
     adapter: Literal["codex", "gemini", "claude", "echo"] = "gemini"
 
 
@@ -67,12 +67,12 @@ class DebateTurnView(BaseModel):
     speaker_bot_id: str
     speaker_label: str
     prompt_text: str
-    response_text: str | None = None
+    response_text: Optional[str] = None
     status: str
-    error_text: str | None = None
+    error_text: Optional[str] = None
     started_at: int
-    finished_at: int | None = None
-    duration_ms: int | None = None
+    finished_at: Optional[int] = None
+    duration_ms: Optional[int] = None
 
 
 class DebateErrorView(BaseModel):
@@ -92,11 +92,12 @@ class DebateParticipantView(BaseModel):
     token: str
     chat_id: int | str
     user_id: int | str
-    adapter: str | None = None
+    adapter: Optional[str] = None
 
 
 class DebateStatusResponse(BaseModel):
     debate_id: str
+    scope_key: Optional[str] = None
     topic: str
     status: Literal["queued", "running", "completed", "stopped", "failed"]
     rounds_total: int
@@ -104,10 +105,10 @@ class DebateStatusResponse(BaseModel):
     fresh_session: bool
     stop_requested: bool
     created_at: int
-    started_at: int | None = None
-    finished_at: int | None = None
-    error_summary: str | None = None
-    current_turn: DebateCurrentTurn | None = None
+    started_at: Optional[int] = None
+    finished_at: Optional[int] = None
+    error_summary: Optional[str] = None
+    current_turn: Optional[DebateCurrentTurn] = None
     turns: list[DebateTurnView] = Field(default_factory=list)
     errors: list[DebateErrorView] = Field(default_factory=list)
     participants: list[DebateParticipantView] = Field(default_factory=list)

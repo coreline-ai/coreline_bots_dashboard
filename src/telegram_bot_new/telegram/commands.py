@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
+from pathlib import Path
 import re
 import shutil
 import time
@@ -260,6 +261,31 @@ class TelegramCommandHandler:
         except Exception:
             LOGGER.exception("failed to increment metric bot=%s metric=%s", self._bot.bot_id, metric_key)
 
+    async def _append_audit_log(
+        self,
+        *,
+        chat_id: int,
+        session_id: str | None,
+        action: str,
+        result: str,
+        detail: str | None,
+        now_ms: int,
+    ) -> None:
+        if self._repository is None or not hasattr(self._repository, "append_audit_log"):
+            return
+        try:
+            await self._repository.append_audit_log(
+                bot_id=self._bot.bot_id,
+                chat_id=str(chat_id),
+                session_id=session_id,
+                action=action,
+                result=result,
+                detail_json=detail,
+                now=now_ms,
+            )
+        except Exception:
+            LOGGER.exception("failed to append audit log bot=%s action=%s", self._bot.bot_id, action)
+
     async def _handle_command(self, *, chat_id: int, text: str, now_ms: int) -> None:
         command, *parts = text.split(maxsplit=1)
         arg = parts[0].strip() if parts else ""
@@ -283,14 +309,25 @@ class TelegramCommandHandler:
             return
 
         if command == "/new":
-            adapter_name = await self._resolve_chat_adapter(chat_id=str(chat_id))
+            existing = await self._session_service.status(bot_id=self._bot.bot_id, chat_id=str(chat_id))
+            adapter_name = existing.adapter_name if existing is not None else await self._resolve_chat_adapter(chat_id=str(chat_id))
             adapter_model = self._provider_default_or_preset_model(adapter_name)
             session = await self._session_service.create_new(
                 bot_id=self._bot.bot_id,
                 chat_id=str(chat_id),
                 adapter_name=adapter_name,
                 adapter_model=adapter_model,
+                project_root=getattr(existing, "project_root", None),
+                unsafe_until=getattr(existing, "unsafe_until", None),
                 now=now_ms,
+            )
+            await self._append_audit_log(
+                chat_id=chat_id,
+                session_id=session.session_id,
+                action="session.new",
+                result="success",
+                detail=f"adapter={adapter_name}",
+                now_ms=now_ms,
             )
             await self._client.send_message(chat_id, f"New session created: {session.session_id} (adapter={adapter_name})")
             return
@@ -312,6 +349,8 @@ class TelegramCommandHandler:
                         f"bot={self._bot.bot_id}",
                         f"adapter={status.adapter_name}",
                         f"model={model or 'default'}",
+                        f"project={getattr(status, 'project_root', None) or 'default'}",
+                        f"unsafe_until={getattr(status, 'unsafe_until', None) or 'off'}",
                         f"session={status.session_id}",
                         f"thread={status.adapter_thread_id or 'none'}",
                         f"summary={status.summary_preview or 'none'}",
@@ -331,7 +370,17 @@ class TelegramCommandHandler:
                 chat_id=str(chat_id),
                 adapter_name=adapter_name,
                 adapter_model=adapter_model,
+                project_root=getattr(existing, "project_root", None),
+                unsafe_until=getattr(existing, "unsafe_until", None),
                 now=now_ms,
+            )
+            await self._append_audit_log(
+                chat_id=chat_id,
+                session_id=new_s.session_id,
+                action="session.reset",
+                result="success",
+                detail=f"adapter={adapter_name}",
+                now_ms=now_ms,
             )
             await self._client.send_message(chat_id, f"Session reset. New session={new_s.session_id} (adapter={adapter_name})")
             return
@@ -352,12 +401,28 @@ class TelegramCommandHandler:
             await self._handle_model_command(chat_id=chat_id, arg=arg, now_ms=now_ms)
             return
 
+        if command == "/project":
+            await self._handle_project_command(chat_id=chat_id, arg=arg, now_ms=now_ms)
+            return
+
+        if command == "/unsafe":
+            await self._handle_unsafe_command(chat_id=chat_id, arg=arg, now_ms=now_ms)
+            return
+
         if command == "/providers":
             await self._handle_providers_command(chat_id=chat_id)
             return
 
         if command == "/stop":
             stopped = await self._run_service.stop_active_turn(bot_id=self._bot.bot_id, chat_id=str(chat_id), now=now_ms)
+            await self._append_audit_log(
+                chat_id=chat_id,
+                session_id=None,
+                action="run.stop",
+                result="success" if stopped else "noop",
+                detail=None,
+                now_ms=now_ms,
+            )
             await self._client.send_message(chat_id, "Stop requested." if stopped else "No active run.")
             return
 
@@ -449,6 +514,14 @@ class TelegramCommandHandler:
             session_id = status.session_id
 
         await self._increment_metric(f"provider_switch_total.{next_adapter}", now_ms=now_ms)
+        await self._append_audit_log(
+            chat_id=chat_id,
+            session_id=session_id,
+            action="session.switch_adapter",
+            result="success",
+            detail=f"{current_adapter}->{next_adapter}",
+            now_ms=now_ms,
+        )
         LOGGER.info(
             "provider switched bot=%s chat_id=%s from=%s to=%s",
             self._bot.bot_id,
@@ -530,6 +603,14 @@ class TelegramCommandHandler:
             adapter_model=next_model,
             now=now_ms,
         )
+        await self._append_audit_log(
+            chat_id=chat_id,
+            session_id=session_id,
+            action="session.set_model",
+            result="success",
+            detail=f"{current_model}->{next_model}",
+            now_ms=now_ms,
+        )
         await self._client.send_message(
             chat_id,
             "\n".join(
@@ -549,6 +630,182 @@ class TelegramCommandHandler:
             model = self._provider_default_model(provider) or "default"
             lines.append(f"- {provider}: installed={installed}, model={model}")
         await self._client.send_message(chat_id, "\n".join(lines))
+
+    async def _handle_project_command(self, *, chat_id: int, arg: str, now_ms: int) -> None:
+        status = await self._session_service.status(bot_id=self._bot.bot_id, chat_id=str(chat_id))
+        current_project = getattr(status, "project_root", None)
+
+        if not arg:
+            await self._client.send_message(
+                chat_id,
+                "\n".join(
+                    [
+                        f"project={current_project or 'default'}",
+                        "usage: /project <directory-path>",
+                        "reset: /project off",
+                    ]
+                ),
+            )
+            return
+
+        arg_value = arg.strip()
+        disable_aliases = {"off", "none", "default", "reset"}
+        next_project: str | None
+        if arg_value.lower() in disable_aliases:
+            next_project = None
+        else:
+            candidate = Path(arg_value).expanduser()
+            if not candidate.is_absolute():
+                candidate = (Path.cwd() / candidate).resolve()
+            else:
+                candidate = candidate.resolve()
+
+            if not candidate.exists():
+                await self._client.send_message(chat_id, f"Directory not found: {candidate}")
+                return
+            if not candidate.is_dir():
+                await self._client.send_message(chat_id, f"Not a directory: {candidate}")
+                return
+            next_project = str(candidate)
+
+        active = await self._run_service.has_active_run(bot_id=self._bot.bot_id, chat_id=str(chat_id))
+        if active:
+            await self._client.send_message(chat_id, "A run is active. Use /stop first, then retry /project.")
+            return
+
+        adapter_name = status.adapter_name if status is not None else self._bot.adapter
+        adapter_model = resolve_selected_model(
+            provider=adapter_name,
+            session_model=getattr(status, "adapter_model", None),
+            default_models=self._bot.default_models,
+        )
+        if status is None:
+            session = await self._session_service.get_or_create(
+                bot_id=self._bot.bot_id,
+                chat_id=str(chat_id),
+                adapter_name=adapter_name,
+                adapter_model=adapter_model,
+                project_root=next_project,
+                now=now_ms,
+            )
+            session_id = session.session_id
+        else:
+            session_id = status.session_id
+            await self._session_service.set_project_root(
+                session_id=session_id,
+                project_root=next_project,
+                now=now_ms,
+            )
+
+        await self._client.send_message(
+            chat_id,
+            "\n".join(
+                [
+                    f"project updated: {current_project or 'default'} -> {next_project or 'default'}",
+                    f"session={session_id}",
+                ]
+            ),
+        )
+        await self._append_audit_log(
+            chat_id=chat_id,
+            session_id=session_id,
+            action="session.set_project",
+            result="success",
+            detail=f"{current_project or 'default'}->{next_project or 'default'}",
+            now_ms=now_ms,
+        )
+
+    async def _handle_unsafe_command(self, *, chat_id: int, arg: str, now_ms: int) -> None:
+        status = await self._session_service.status(bot_id=self._bot.bot_id, chat_id=str(chat_id))
+        current_unsafe_until = getattr(status, "unsafe_until", None)
+
+        if not arg:
+            await self._client.send_message(
+                chat_id,
+                "\n".join(
+                    [
+                        f"unsafe_until={current_unsafe_until or 'off'}",
+                        "usage: /unsafe on [minutes]",
+                        "usage: /unsafe off",
+                    ]
+                ),
+            )
+            return
+
+        parts = [piece for piece in arg.split() if piece.strip()]
+        head = parts[0].lower()
+
+        next_unsafe_until: int | None
+        if head in {"off", "0", "disable"}:
+            next_unsafe_until = None
+        else:
+            minutes = 10
+            if head in {"on", "1", "enable"}:
+                if len(parts) >= 2:
+                    try:
+                        minutes = int(parts[1])
+                    except ValueError:
+                        await self._client.send_message(chat_id, "Invalid minutes. usage: /unsafe on [1-120]")
+                        return
+            else:
+                try:
+                    minutes = int(parts[0])
+                except ValueError:
+                    await self._client.send_message(chat_id, "Invalid argument. usage: /unsafe on [minutes] | /unsafe off")
+                    return
+
+            if minutes < 1 or minutes > 120:
+                await self._client.send_message(chat_id, "Minutes out of range. allowed=1..120")
+                return
+            next_unsafe_until = now_ms + (minutes * 60 * 1000)
+
+        active = await self._run_service.has_active_run(bot_id=self._bot.bot_id, chat_id=str(chat_id))
+        if active:
+            await self._client.send_message(chat_id, "A run is active. Use /stop first, then retry /unsafe.")
+            return
+
+        adapter_name = status.adapter_name if status is not None else self._bot.adapter
+        adapter_model = resolve_selected_model(
+            provider=adapter_name,
+            session_model=getattr(status, "adapter_model", None),
+            default_models=self._bot.default_models,
+        )
+        if status is None:
+            session = await self._session_service.get_or_create(
+                bot_id=self._bot.bot_id,
+                chat_id=str(chat_id),
+                adapter_name=adapter_name,
+                adapter_model=adapter_model,
+                project_root=getattr(status, "project_root", None),
+                unsafe_until=next_unsafe_until,
+                now=now_ms,
+            )
+            session_id = session.session_id
+        else:
+            session_id = status.session_id
+            await self._session_service.set_unsafe_until(
+                session_id=session_id,
+                unsafe_until=next_unsafe_until,
+                now=now_ms,
+            )
+
+        await self._client.send_message(
+            chat_id,
+            "\n".join(
+                [
+                    f"unsafe updated: {current_unsafe_until or 'off'} -> {next_unsafe_until or 'off'}",
+                    f"session={session_id}",
+                ]
+            ),
+        )
+        await self._append_audit_log(
+            chat_id=chat_id,
+            session_id=session_id,
+            action="session.set_unsafe",
+            result="success",
+            detail=f"{current_unsafe_until or 'off'}->{next_unsafe_until or 'off'}",
+            now_ms=now_ms,
+        )
 
     async def _build_prompt_from_action(self, *, payload: ActionTokenPayload) -> str | None:
         if self._repository is None or self._button_prompt_service is None:
@@ -626,7 +883,7 @@ class TelegramCommandHandler:
 
     def _help_text(self) -> str:
         return (
-            "/start /help /new /status /reset /summary /mode /model /providers /stop /youtube\n"
+            "/start /help /new /status /reset /summary /mode /model /project /unsafe /providers /stop /youtube\n"
             "Plain text message => enqueue CLI turn"
         )
 

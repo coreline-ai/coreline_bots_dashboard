@@ -69,7 +69,9 @@ pid_command() {
 
 is_mock_command() {
   local cmd="$1"
-  [[ "$cmd" == *"telegram_bot_new.mock_messenger.main"* ]] && [[ "$cmd" == *"--port $MOCK_PORT"* ]]
+  [[ "$cmd" == *"telegram_bot_new.mock_messenger.main"* ]] \
+    && [[ "$cmd" == *"--port $MOCK_PORT"* ]] \
+    && [[ "$cmd" == *"--bots-config $EFFECTIVE_CONFIG_PATH"* ]]
 }
 
 is_supervisor_command() {
@@ -134,6 +136,7 @@ prepare_effective_config() {
   result="$("$PYTHON_BIN" - "$ROOT_DIR" "$CONFIG_PATH" "$target_path" "$MAX_BOTS" <<'PY'
 import sys
 from pathlib import Path
+import re
 
 import yaml
 
@@ -165,6 +168,18 @@ if max_bots > 0:
     effective_bots = bots[:max_bots]
 else:
     effective_bots = bots
+
+# Local multi-bot runtime: enforce per-bot physical DB isolation by default.
+state_dir = target_path.parent / "state"
+state_dir.mkdir(parents=True, exist_ok=True)
+for idx, bot in enumerate(effective_bots, start=1):
+    if not isinstance(bot, dict):
+        continue
+    raw_bot_id = str(bot.get("bot_id") or f"bot-{idx}").strip() or f"bot-{idx}"
+    safe_bot_id = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_bot_id) or f"bot-{idx}"
+    if not str(bot.get("database_url") or "").strip():
+        db_path = (state_dir / f"{safe_bot_id}.db").resolve()
+        bot["database_url"] = f"sqlite+aiosqlite:///{db_path}"
 
 target_path.parent.mkdir(parents=True, exist_ok=True)
 target_path.write_text(
@@ -288,7 +303,7 @@ start_supervisor() {
   ensure_embedded_ports_free
 
   pid="$(spawn_detached "$SUP_OUT_LOG" "$SUP_ERR_LOG" \
-    env TELEGRAM_API_BASE_URL="http://$MOCK_HOST:$MOCK_PORT" PYTHONUNBUFFERED=1 \
+    env TELEGRAM_API_BASE_URL="http://$MOCK_HOST:$MOCK_PORT" STRICT_BOT_DB_ISOLATION=1 PYTHONUNBUFFERED=1 \
     "$PYTHON_BIN" -m telegram_bot_new.main supervisor \
       --config "$EFFECTIVE_CONFIG_PATH" \
       --embedded-host "$EMBEDDED_HOST" \

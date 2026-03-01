@@ -3,6 +3,7 @@
 const tokenInput = document.getElementById("token-input");
 const chatIdInput = document.getElementById("chat-id-input");
 const userIdInput = document.getElementById("user-id-input");
+const sessionProjectSelect = document.getElementById("session-project-select");
 const botIdInput = document.getElementById("bot-id-input");
 const messageInput = document.getElementById("message-input");
 const webhookUrlInput = document.getElementById("webhook-url-input");
@@ -13,6 +14,8 @@ const agentJson = document.getElementById("agent-json");
 const diagnosticsJson = document.getElementById("diagnostics-json");
 const stateJson = document.getElementById("state-json");
 const threadsJson = document.getElementById("threads-json");
+const auditJson = document.getElementById("audit-json");
+const auditError = document.getElementById("audit-error");
 const workspace = document.querySelector(".workspace");
 const controlsPanel = document.querySelector(".controls");
 const statePanel = document.querySelector(".state");
@@ -89,6 +92,8 @@ const COMMAND_CATALOG = [
   { command: "/summary", usage: "/summary", nameKo: "요약 보기", description: "누적 요약(rolling summary)을 출력합니다." },
   { command: "/mode", usage: "/mode ", nameKo: "에이전트 전환", description: "codex/gemini/claude 모드 조회 또는 전환합니다." },
   { command: "/model", usage: "/model ", nameKo: "모델 전환", description: "현재 provider의 모델 조회 또는 전환합니다." },
+  { command: "/project", usage: "/project ", nameKo: "프로젝트 경로", description: "세션 작업 경로를 조회/변경합니다." },
+  { command: "/unsafe", usage: "/unsafe ", nameKo: "Unsafe 모드", description: "시간 제한 unsafe 모드를 on/off 합니다." },
   { command: "/providers", usage: "/providers", nameKo: "제공자 상태", description: "CLI 제공자 설치 여부와 기본 모델을 확인합니다." },
   { command: "/stop", usage: "/stop", nameKo: "실행 중단", description: "현재 실행 중인 turn을 중단 요청합니다." },
   { command: "/youtube", usage: "/youtube ", nameKo: "유튜브 검색", description: "검색어로 유튜브 영상을 찾아 링크를 보냅니다." },
@@ -126,10 +131,12 @@ let refreshPromise = null;
 let catalog = [];
 let catalogByBotId = new Map();
 let profileDiagnostics = new Map();
+let projectCatalog = [];
 let uiState = {
   selected_profile_id: null,
   profiles: [],
-  active_debate_id: null
+  active_debate_id: null,
+  active_debate_scope_key: null
 };
 let parallelSendBusy = false;
 let debateBusy = false;
@@ -230,6 +237,44 @@ function resolveProfileModel(profile, diagnostics, catalogRow, provider) {
   return models[0];
 }
 
+function normalizeProjectPath(value) {
+  return String(value || "").trim();
+}
+
+function resolveProfileProject(profile, diagnostics) {
+  const diagnosticProject = normalizeProjectPath(diagnostics?.session?.current_project);
+  if (diagnosticProject) {
+    return diagnosticProject;
+  }
+  return normalizeProjectPath(profile?.selected_project);
+}
+
+function parseUnsafeUntil(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  const text = String(value || "").trim();
+  if (/^\d+$/.test(text)) {
+    return Number(text);
+  }
+  return null;
+}
+
+function formatUnsafeRemaining(unsafeUntil) {
+  const ts = parseUnsafeUntil(unsafeUntil);
+  if (!ts) {
+    return "off";
+  }
+  const deltaMs = ts - Date.now();
+  if (deltaMs <= 0) {
+    return "expired";
+  }
+  const totalSec = Math.max(0, Math.floor(deltaMs / 1000));
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
 function updateAddProfileButtonState() {
   if (!addProfileBtn) {
     return;
@@ -271,7 +316,8 @@ function loadState() {
             user_id: numberOrDefault(profile.user_id, 9001),
             selected_for_parallel: profile.selected_for_parallel !== false,
             selected_provider: String(profile.selected_provider || ""),
-            selected_model: String(profile.selected_model || "")
+            selected_model: String(profile.selected_model || ""),
+            selected_project: String(profile.selected_project || "")
           }))
           .filter((profile) => profile.token || profile.bot_id)
       : [];
@@ -279,7 +325,8 @@ function loadState() {
     return {
       selected_profile_id: parsed.selected_profile_id ? String(parsed.selected_profile_id) : null,
       profiles,
-      active_debate_id: parsed.active_debate_id ? String(parsed.active_debate_id) : null
+      active_debate_id: parsed.active_debate_id ? String(parsed.active_debate_id) : null,
+      active_debate_scope_key: parsed.active_debate_scope_key ? String(parsed.active_debate_scope_key) : null
     };
   } catch {
     return null;
@@ -438,6 +485,7 @@ function upsertCurrentProfileFromInputs() {
     profile.bot_id = "";
     profile.selected_provider = "";
     profile.selected_model = "";
+    profile.selected_project = "";
   }
   saveState();
 }
@@ -460,11 +508,15 @@ function buildStatusChips(profile, diagnostics) {
   const health = diagnostics?.health?.bot || {};
   const agent = String(session.current_agent || "unknown").toLowerCase();
   const model = String(session.current_model || "default");
+  const project = String(session.current_project || "default");
+  const unsafe = formatUnsafeRemaining(session.unsafe_until);
   const runStatus = String(session.run_status || "idle").toLowerCase();
   const rows = [
     { key: "bot", value: profile?.bot_id || "none", extraClass: "" },
     { key: "agent", value: agent, extraClass: `status-chip--agent-${agent}` },
     { key: "model", value: model, extraClass: "" },
+    { key: "project", value: project, extraClass: "" },
+    { key: "unsafe", value: unsafe, extraClass: unsafe === "off" ? "" : "status-chip--agent-claude" },
     { key: "thread", value: session.thread_id || "none", extraClass: "" },
     { key: "run", value: runStatus, extraClass: runStatus === "error" ? "status-chip--run-error" : "" },
     { key: "health", value: health.ok ? "ok" : "down", extraClass: health.ok ? "status-chip--health-ok" : "status-chip--health-down" }
@@ -551,11 +603,13 @@ function renderParallelResults(rows) {
 function setParallelSendBusy(busy) {
   parallelSendBusy = Boolean(busy);
   updateParallelSendButtonState();
+  renderSessionProjectControl();
 }
 
 function setDebateBusy(busy) {
   debateBusy = Boolean(busy);
   updateParallelSendButtonState();
+  renderSessionProjectControl();
 }
 
 function updateParallelSendButtonState() {
@@ -687,6 +741,7 @@ function applyProfileToInputs(profile) {
     tokenInput.value = "";
     chatIdInput.value = "1001";
     userIdInput.value = "9001";
+    renderSessionProjectControl();
     return;
   }
   if (botIdInput) {
@@ -696,6 +751,7 @@ function applyProfileToInputs(profile) {
   chatIdInput.value = String(numberOrDefault(profile.chat_id, 1001));
   userIdInput.value = String(numberOrDefault(profile.user_id, 9001));
   syncWebhookFormFromProfile(profile);
+  renderSessionProjectControl();
 }
 
 function selectProfile(profileId) {
@@ -721,6 +777,8 @@ function buildBotListRenderKey() {
       const healthOk = diag?.health?.bot?.ok === true ? "1" : "0";
       const provider = String(session.current_agent || "");
       const model = String(session.current_model || "");
+      const project = String(session.current_project || "");
+      const unsafeUntil = String(session.unsafe_until || "");
       const runStatus = String(session.run_status || "");
       const selected = uiState.selected_profile_id === profile.profile_id ? "1" : "0";
       const checked = profile.selected_for_parallel !== false ? "1" : "0";
@@ -735,8 +793,11 @@ function buildBotListRenderKey() {
         selected,
         profile.selected_provider || "",
         profile.selected_model || "",
+        profile.selected_project || "",
         provider,
         model,
+        project,
+        unsafeUntil,
         runStatus,
         healthOk,
       ].join("|");
@@ -759,6 +820,50 @@ function setProfileModelApplyBusy(profileId, busy) {
     profileModelApplyBusy.delete(key);
   }
   renderBotList(true);
+  renderSessionProjectControl();
+}
+
+function renderSessionProjectControl() {
+  if (!sessionProjectSelect) {
+    return;
+  }
+  const profile = currentProfile();
+  if (!profile) {
+    sessionProjectSelect.innerHTML = '<option value="">default</option>';
+    sessionProjectSelect.disabled = true;
+    return;
+  }
+  const diag = profileDiagnostics.get(profile.profile_id) || null;
+  const selectedProject = resolveProfileProject(profile, diag);
+  const applying = isProfileModelApplyBusy(profile.profile_id);
+  const disabled = applying || parallelSendBusy || debateBusy;
+
+  sessionProjectSelect.innerHTML = "";
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "";
+  defaultOption.textContent = "default";
+  defaultOption.selected = !selectedProject;
+  sessionProjectSelect.appendChild(defaultOption);
+
+  let matched = false;
+  for (const entry of projectCatalog) {
+    const option = document.createElement("option");
+    option.value = String(entry.path || "");
+    option.textContent = String(entry.name || entry.path || "");
+    option.selected = option.value === selectedProject;
+    if (option.selected) {
+      matched = true;
+    }
+    sessionProjectSelect.appendChild(option);
+  }
+  if (selectedProject && !matched) {
+    const customOption = document.createElement("option");
+    customOption.value = selectedProject;
+    customOption.textContent = `${selectedProject} (custom)`;
+    customOption.selected = true;
+    sessionProjectSelect.appendChild(customOption);
+  }
+  sessionProjectSelect.disabled = disabled;
 }
 
 async function applyProfileProviderAndModel(profile, provider, model) {
@@ -843,6 +948,37 @@ async function stopActiveRunBeforeModelApply(profile) {
   }
 }
 
+async function applyProfileProject(profile, projectPath) {
+  const profileId = String(profile?.profile_id || "");
+  if (!profileId || isProfileModelApplyBusy(profileId)) {
+    return false;
+  }
+  const previousProject = String(profile.selected_project || "");
+  setProfileModelApplyBusy(profileId, true);
+  try {
+    await stopActiveRunBeforeModelApply(profile);
+    const baseline = await maxMessageIdForProfile(profile);
+    const command = projectPath ? `/project ${projectPath}` : "/project off";
+    await sendTextToProfile(profile, command);
+    const outcome = await waitForCommandOutcome(profile, baseline, "project", 30);
+    if (outcome.status !== "PASS") {
+      throw new Error(`project change failed: ${outcome.detail}`);
+    }
+    profile.selected_project = String(projectPath || "");
+    saveState();
+    await refresh();
+    return true;
+  } catch (error) {
+    profile.selected_project = previousProject;
+    saveState();
+    appendBubble("meta", `${profile.label}: ${error.message}`);
+    await refresh();
+    return false;
+  } finally {
+    setProfileModelApplyBusy(profileId, false);
+  }
+}
+
 function renderBotList(force = false) {
   if (!botList) {
     return;
@@ -870,10 +1006,12 @@ function renderBotList(force = false) {
     const provider = resolveProfileProvider(profile, diag, catalogRow);
     const modelOptions = availableModelsForProvider(catalogRow, provider);
     const model = resolveProfileModel(profile, diag, catalogRow, provider);
+    const unsafeLabel = formatUnsafeRemaining(session.unsafe_until);
     const applyingModel = isProfileModelApplyBusy(profile.profile_id);
     const controlsDisabled = applyingModel || parallelSendBusy || debateBusy;
     profile.selected_provider = provider;
     profile.selected_model = model;
+    profile.selected_project = resolveProfileProject(profile, diag);
 
     const item = document.createElement("div");
     item.className = "bot-item";
@@ -1003,6 +1141,14 @@ function renderBotList(force = false) {
     modelControl.appendChild(modelLabel);
     meta.appendChild(modelControl);
 
+    const unsafeRow = document.createElement("div");
+    unsafeRow.className = "bot-item-meta-row bot-item-meta-unsafe";
+    unsafeRow.textContent = `unsafe: ${unsafeLabel}`;
+    if (unsafeLabel !== "off" && unsafeLabel !== "expired") {
+      unsafeRow.classList.add("is-active");
+    }
+    meta.appendChild(unsafeRow);
+
     item.appendChild(head);
     item.appendChild(meta);
     item.addEventListener("click", () => {
@@ -1012,6 +1158,7 @@ function renderBotList(force = false) {
     botList.appendChild(item);
   }
   updateAddProfileButtonState();
+  renderSessionProjectControl();
 }
 
 async function requestJson(url, options = {}) {
@@ -1034,6 +1181,22 @@ async function loadCatalog() {
     catalog = [];
   }
   catalogByBotId = new Map(catalog.map((row) => [String(row.bot_id), row]));
+}
+
+async function loadProjectCatalog() {
+  try {
+    const response = await requestJson("/_mock/projects");
+    const rows = Array.isArray(response?.result?.projects) ? response.result.projects : [];
+    projectCatalog = rows
+      .map((row) => ({
+        name: String(row?.name || row?.path || "").trim(),
+        path: String(row?.path || "").trim(),
+      }))
+      .filter((row) => row.path);
+  } catch {
+    projectCatalog = [];
+  }
+  renderSessionProjectControl();
 }
 
 function ensureInitialProfileFromParams() {
@@ -1063,7 +1226,8 @@ function ensureInitialProfileFromParams() {
     user_id: paramUserId,
     selected_for_parallel: true,
     selected_provider: normalizeProvider(defaultBot?.default_adapter || "gemini"),
-    selected_model: ""
+    selected_model: "",
+    selected_project: ""
   });
   uiState.selected_profile_id = uiState.profiles[0].profile_id;
 }
@@ -1123,6 +1287,7 @@ async function hydrateInputs() {
   }
 
   await loadCatalog();
+  await loadProjectCatalog();
   dedupeProfilesByBotId();
   ensureInitialProfileFromParams();
   ensureSelectedProfile();
@@ -1780,6 +1945,8 @@ function inferCurrentAgent(messages) {
   const empty = {
     current_agent: "unknown",
     current_model: null,
+    current_project: null,
+    unsafe_until: null,
     source: null,
     session_id: null,
     message_id: null
@@ -1790,6 +1957,8 @@ function inferCurrentAgent(messages) {
 
   let sessionId = null;
   let currentModel = null;
+  let currentProject = null;
+  let unsafeUntil = null;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
     const text = typeof msg?.text === "string" ? msg.text : "";
@@ -1806,12 +1975,30 @@ function inferCurrentAgent(messages) {
         currentModel = raw.toLowerCase() === "default" ? null : raw;
       }
     }
+    if (!currentProject) {
+      const projectMatch = text.match(/(?:^|\n)project=([^\n]+)/i);
+      if (projectMatch && projectMatch[1]) {
+        const raw = projectMatch[1].trim();
+        currentProject = /^(default|none|off)$/i.test(raw) ? null : raw;
+      }
+    }
+    if (!unsafeUntil) {
+      const unsafeMatch = text.match(/(?:^|\n)unsafe_until=([^\s\n]+)/i);
+      if (unsafeMatch && unsafeMatch[1]) {
+        const raw = unsafeMatch[1].trim();
+        if (/^\d+$/.test(raw)) {
+          unsafeUntil = Number(raw);
+        }
+      }
+    }
 
     const queuedMatch = text.match(/\bagent=(codex|gemini|claude)\b/i);
     if (queuedMatch && queuedMatch[1]) {
       return {
         current_agent: queuedMatch[1].toLowerCase(),
         current_model: currentModel,
+        current_project: currentProject,
+        unsafe_until: unsafeUntil,
         source: "queued_turn",
         session_id: sessionId,
         message_id: msg.message_id ?? null
@@ -1823,6 +2010,8 @@ function inferCurrentAgent(messages) {
       return {
         current_agent: statusMatch[1].toLowerCase(),
         current_model: currentModel,
+        current_project: currentProject,
+        unsafe_until: unsafeUntil,
         source: "status",
         session_id: sessionId,
         message_id: msg.message_id ?? null
@@ -1834,6 +2023,8 @@ function inferCurrentAgent(messages) {
       return {
         current_agent: modeSwitchMatch[1].toLowerCase(),
         current_model: currentModel,
+        current_project: currentProject,
+        unsafe_until: unsafeUntil,
         source: "mode_switch",
         session_id: sessionId,
         message_id: msg.message_id ?? null
@@ -1841,7 +2032,13 @@ function inferCurrentAgent(messages) {
     }
   }
 
-  return { ...empty, session_id: sessionId, current_model: currentModel };
+  return {
+    ...empty,
+    session_id: sessionId,
+    current_model: currentModel,
+    current_project: currentProject,
+    unsafe_until: unsafeUntil,
+  };
 }
 
 function compactThreads(result, selectedChatId) {
@@ -1866,6 +2063,37 @@ function compactThreads(result, selectedChatId) {
   });
 
   return normalized.slice(0, 10);
+}
+
+function formatAuditTimestamp(value) {
+  const ts = Number(value || 0);
+  if (!Number.isFinite(ts) || ts <= 0) {
+    return "n/a";
+  }
+  try {
+    return new Date(ts).toLocaleString();
+  } catch {
+    return String(ts);
+  }
+}
+
+function renderAuditLogs(logRows, embeddedErrorText = "") {
+  if (auditError) {
+    auditError.textContent = embeddedErrorText ? `embedded_error: ${embeddedErrorText}` : "";
+  }
+  if (!auditJson) {
+    return;
+  }
+  const rows = Array.isArray(logRows) ? logRows : [];
+  const compact = rows.slice(0, 120).map((row) => ({
+    at: formatAuditTimestamp(row?.created_at),
+    action: String(row?.action || ""),
+    result: String(row?.result || ""),
+    chat_id: row?.chat_id ?? null,
+    session_id: row?.session_id ?? null,
+    detail: String(row?.detail_json || "").slice(0, 280),
+  }));
+  auditJson.textContent = JSON.stringify(compact, null, 2);
 }
 
 async function sendTextToProfile(profile, text) {
@@ -1893,6 +2121,14 @@ async function maxMessageIdForProfile(profile) {
 
 function classifyOutcomeFromTexts(texts) {
   const joined = (texts || []).join("\n").toLowerCase();
+  if (
+    joined.includes("a run is active") ||
+    joined.includes("run is already active") ||
+    joined.includes("already active in this chat") ||
+    joined.includes("use /stop first")
+  ) {
+    return { done: true, status: "FAIL", detail: "active_run" };
+  }
   if (
     /\bturn_completed\b[\s\S]*?"status"\s*:\s*"error"/i.test(joined) ||
     joined.includes("[error]") ||
@@ -1925,6 +2161,9 @@ function classifyCommandOutcomeFromTexts(texts, commandType) {
     lowered.includes("unsupported model") ||
     lowered.includes("model name is required") ||
     lowered.includes("no selectable model") ||
+    lowered.includes("directory not found") ||
+    lowered.includes("not a directory") ||
+    lowered.includes("invalid argument") ||
     lowered.includes("access denied")
   ) {
     return { done: true, status: "FAIL", detail: "command_rejected" };
@@ -1941,6 +2180,14 @@ function classifyCommandOutcomeFromTexts(texts, commandType) {
   } else if (commandType === "model") {
     if (/\bmodel updated:/i.test(joined)) {
       return { done: true, status: "PASS", detail: "model_applied" };
+    }
+  } else if (commandType === "project") {
+    if (/\bproject updated:/i.test(joined)) {
+      return { done: true, status: "PASS", detail: "project_applied" };
+    }
+  } else if (commandType === "unsafe") {
+    if (/\bunsafe updated:/i.test(joined)) {
+      return { done: true, status: "PASS", detail: "unsafe_applied" };
     }
   }
 
@@ -2085,6 +2332,25 @@ function isDebateTerminalStatus(status) {
   return status === "completed" || status === "stopped" || status === "failed";
 }
 
+function buildDebateScopeKeyFromProfiles(profiles) {
+  const rows = Array.isArray(profiles) ? profiles : [];
+  const keys = rows
+    .map((profile) => {
+      const botId = String(profile?.bot_id || "").trim();
+      const chatId = Number(profile?.chat_id);
+      if (!botId || !Number.isFinite(chatId)) {
+        return "";
+      }
+      return `${botId}:${Math.trunc(chatId)}`;
+    })
+    .filter((value) => value.length > 0)
+    .sort();
+  if (keys.length < 2) {
+    return null;
+  }
+  return keys.join("|");
+}
+
 function stopDebatePolling() {
   if (debatePollingTimer) {
     clearInterval(debatePollingTimer);
@@ -2098,6 +2364,7 @@ async function pollDebateStatus(debateId) {
     stopDebatePolling();
     renderDebatePanel(null);
     uiState.active_debate_id = null;
+    uiState.active_debate_scope_key = null;
     saveState();
     return;
   }
@@ -2120,8 +2387,11 @@ async function pollDebateStatus(debateId) {
     if (isDebateTerminalStatus(status)) {
       stopDebatePolling();
       uiState.active_debate_id = null;
+      uiState.active_debate_scope_key = null;
     } else {
       uiState.active_debate_id = String(snapshot.debate_id || id);
+      const scopeKey = String(snapshot.scope_key || "").trim();
+      uiState.active_debate_scope_key = scopeKey || uiState.active_debate_scope_key || null;
     }
     saveState();
   } catch (error) {
@@ -2129,6 +2399,7 @@ async function pollDebateStatus(debateId) {
       stopDebatePolling();
       renderDebatePanel(null);
       uiState.active_debate_id = null;
+      uiState.active_debate_scope_key = null;
       saveState();
       return;
     }
@@ -2150,15 +2421,25 @@ function startDebatePolling(debateId) {
 
 async function recoverActiveDebate() {
   try {
-    const active = await requestJson("/_mock/debate/active");
+    const selectedScope = buildDebateScopeKeyFromProfiles(
+      uiState.profiles.filter((profile) => profile.selected_for_parallel !== false)
+    );
+    const storedScope = String(uiState.active_debate_scope_key || "").trim();
+    const scopeKey = selectedScope || storedScope || null;
+    const activeUrl = scopeKey
+      ? `/_mock/debate/active?scope_key=${encodeURIComponent(scopeKey)}`
+      : "/_mock/debate/active";
+    const active = await requestJson(activeUrl);
     const snapshot = active?.result || null;
     if (!snapshot || !snapshot.debate_id) {
       uiState.active_debate_id = null;
+      uiState.active_debate_scope_key = scopeKey;
       saveState();
       renderDebatePanel(null);
       return;
     }
     uiState.active_debate_id = String(snapshot.debate_id);
+    uiState.active_debate_scope_key = String(snapshot.scope_key || scopeKey || "").trim() || null;
     saveState();
     renderDebatePanel(snapshot);
     if (isDebateTerminalStatus(String(snapshot.status || ""))) {
@@ -2197,6 +2478,7 @@ async function runDebateFlow(targets, parsedCommand) {
       user_id: Number(profile.user_id)
     }))
   };
+  const scopeKey = buildDebateScopeKeyFromProfiles(payload.profiles);
 
   try {
     const response = await requestJson("/_mock/debate/start", {
@@ -2208,6 +2490,7 @@ async function runDebateFlow(targets, parsedCommand) {
     renderDebatePanel(snapshot);
     const debateId = String(snapshot?.debate_id || "");
     uiState.active_debate_id = debateId || null;
+    uiState.active_debate_scope_key = String(snapshot?.scope_key || scopeKey || "").trim() || null;
     debateLastStatus = String(snapshot?.status || "");
     saveState();
     if (debateId) {
@@ -2272,7 +2555,19 @@ async function runParallelSend() {
         try {
           const baseline = await maxMessageIdForProfile(profile);
           await sendTextToProfile(profile, text);
-          const outcome = await waitForParallelOutcome(profile, baseline, 60);
+          let outcome = await waitForParallelOutcome(profile, baseline, 60);
+          if (outcome.status === "FAIL" && outcome.detail === "active_run") {
+            appendBubble("meta", `${profile.label}: active run 감지, /stop 후 재시도합니다.`);
+            await stopActiveRunBeforeModelApply(profile);
+            const retryBaseline = await maxMessageIdForProfile(profile);
+            await sendTextToProfile(profile, text);
+            const retry = await waitForParallelOutcome(profile, retryBaseline, 60);
+            if (retry.status === "PASS") {
+              outcome = { done: true, status: "PASS", detail: "retry_after_stop" };
+            } else {
+              outcome = retry;
+            }
+          }
           results[index] = {
             label: profile.label,
             status: outcome.status,
@@ -2338,11 +2633,12 @@ async function refreshOnce() {
     if (threadsJson) {
       threadsJson.textContent = JSON.stringify([], null, 2);
     }
+    renderAuditLogs([], "");
     return;
   }
 
   try {
-    const [messagesResp, stateResp, threadsResp, diagnosticsResp] = await Promise.all([
+    const [messagesResp, stateResp, threadsResp, diagnosticsResp, auditResp] = await Promise.all([
       requestJson(`/_mock/messages?token=${encodeURIComponent(profile.token)}&chat_id=${Number(profile.chat_id)}&limit=120`),
       requestJson(`/_mock/state?token=${encodeURIComponent(profile.token)}`),
       requestJson(`/_mock/threads?token=${encodeURIComponent(profile.token)}`),
@@ -2350,7 +2646,10 @@ async function refreshOnce() {
         `/_mock/bot_diagnostics?bot_id=${encodeURIComponent(profile.bot_id)}&token=${encodeURIComponent(
           profile.token
         )}&chat_id=${Number(profile.chat_id)}&limit=120`
-      )
+      ),
+      requestJson(
+        `/_mock/audit_logs?bot_id=${encodeURIComponent(profile.bot_id)}&chat_id=${Number(profile.chat_id)}&limit=120`
+      ),
     ]);
 
     latestMessages = Array.isArray(messagesResp.result.messages) ? messagesResp.result.messages : [];
@@ -2383,6 +2682,7 @@ async function refreshOnce() {
         : compactThreads(threadsResp.result, Number(profile.chat_id));
       threadsJson.textContent = JSON.stringify(top, null, 2);
     }
+    renderAuditLogs(auditResp?.result?.logs || [], String(auditResp?.result?.embedded_error || ""));
 
     buildStatusChips(profile, diagnostics);
     const now = Date.now();
@@ -2481,19 +2781,6 @@ async function clearCurrentTimeline() {
   }
 }
 
-function wireQuickActions() {
-  for (const button of document.querySelectorAll(".quick-action-btn")) {
-    button.addEventListener("click", async () => {
-      const cmd = String(button.dataset.command || "").trim();
-      if (!cmd) {
-        return;
-      }
-      messageInput.value = cmd;
-      await handleSendCurrentMessage();
-    });
-  }
-}
-
 function openProfileDialog() {
   if (!profileDialog) {
     return;
@@ -2534,6 +2821,7 @@ async function addProfileAutomatically() {
     selected_for_parallel: true,
     selected_provider: normalizeProvider(created.default_adapter || "gemini"),
     selected_model: "",
+    selected_project: "",
   };
 
   uiState.profiles.push(profile);
@@ -2598,7 +2886,8 @@ function addProfileFromDialog() {
     user_id: numberOrDefault(profileUserIdInput.value, 9001),
     selected_for_parallel: true,
     selected_provider: normalizeProvider(row?.default_adapter || "gemini"),
-    selected_model: ""
+    selected_model: "",
+    selected_project: ""
   };
   uiState.profiles.push(profile);
   uiState.selected_profile_id = profile.profile_id;
@@ -2805,6 +3094,25 @@ if (profileForm) {
   });
 });
 
+if (sessionProjectSelect) {
+  sessionProjectSelect.addEventListener("change", async () => {
+    const profile = currentProfile();
+    if (!profile) {
+      renderSessionProjectControl();
+      return;
+    }
+    const currentValue = resolveProfileProject(profile, profileDiagnostics.get(profile.profile_id) || null);
+    const nextValue = normalizeProjectPath(sessionProjectSelect.value);
+    if (nextValue === currentValue) {
+      return;
+    }
+    const ok = await applyProfileProject(profile, nextValue);
+    if (!ok) {
+      renderSessionProjectControl();
+    }
+  });
+}
+
 webhookUrlInput.addEventListener("change", saveState);
 webhookSecretInput.addEventListener("change", saveState);
 timelineList.addEventListener("scroll", () => {
@@ -2824,7 +3132,6 @@ initTheme();
 initSectionToggles();
 initDebatePanelToggle();
 hydrateInputs().then(async () => {
-  wireQuickActions();
   updateEssentialToggleButton();
   await recoverActiveDebate();
   await refreshProfileDiagnostics();

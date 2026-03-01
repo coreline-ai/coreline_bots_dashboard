@@ -13,6 +13,7 @@ from pathlib import Path
 from telegram_bot_new.adapters import get_adapter
 from telegram_bot_new.adapters.base import AdapterEvent, AdapterResumeRequest, AdapterRunRequest, utc_now_iso
 from telegram_bot_new.db.repository import LeasedRunJob, Repository
+from telegram_bot_new.model_presets import resolve_selected_model
 from telegram_bot_new.services.summary_service import SummaryInput, SummaryService
 from telegram_bot_new.streaming.telegram_event_streamer import TelegramEventStreamer
 from telegram_bot_new.telegram.client import TelegramApiError, TelegramClient
@@ -30,10 +31,26 @@ SKIP_DIR_NAMES = {
     ".pytest_cache",
     ".mypy_cache",
 }
+RUN_TURN_TIMEOUT_SEC = max(15, int(os.getenv("RUN_TURN_TIMEOUT_SEC", "90")))
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _looks_like_gemini_quota_error(message: str | None, stderr: str | None) -> bool:
+    haystack = " ".join(part for part in [message or "", stderr or ""] if part).lower()
+    if not haystack:
+        return False
+    return any(
+        marker in haystack
+        for marker in (
+            "terminalquotaerror",
+            "exhausted your capacity on this model",
+            "quota will reset after",
+            "api error: you have exhausted your capacity on this model",
+        )
+    )
 
 
 def _looks_like_image_request(prompt: str) -> bool:
@@ -81,14 +98,41 @@ def _looks_like_html_request(prompt: str) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
-def _augment_prompt_for_generation_request(prompt: str) -> str:
+def _safe_path_segment(value: str) -> str:
+    lowered = (value or "").strip().lower()
+    return re.sub(r"[^a-z0-9._-]+", "_", lowered).strip("._-") or "unknown"
+
+
+def _build_turn_artifact_output_dir(*, bot_id: str, chat_id: str, turn_id: str) -> Path:
+    return (
+        Path.cwd()
+        / ".mock_messenger"
+        / "generated"
+        / _safe_path_segment(bot_id)
+        / _safe_path_segment(chat_id)
+        / _safe_path_segment(turn_id)
+    ).resolve()
+
+
+def _display_path_for_prompt(path: Path) -> str:
+    try:
+        relative = path.resolve().relative_to(Path.cwd().resolve())
+        return f"./{relative.as_posix()}"
+    except Exception:
+        return str(path.resolve())
+
+
+def _augment_prompt_for_generation_request(prompt: str, *, artifact_output_dir: Path | None = None) -> str:
     result = prompt
+    output_dir = artifact_output_dir.resolve() if artifact_output_dir is not None else None
+    output_dir_text = _display_path_for_prompt(output_dir) if output_dir is not None else "./.mock_messenger/generated"
     if _looks_like_image_request(prompt):
         result = (
             f"{result}\n\n[Image Delivery Contract]\n"
             "If you generate an image file, save it as a local file and include at least one markdown image path.\n"
+            f"Preferred output directory: {output_dir_text}\n"
             "Preferred format:\n"
-            "![generated](./.mock_messenger/generated/<file>.png)\n"
+            f"![generated]({output_dir_text}/<file>.png)\n"
             "Use a real existing path only."
         )
     if _looks_like_html_request(prompt):
@@ -96,9 +140,10 @@ def _augment_prompt_for_generation_request(prompt: str) -> str:
             f"{result}\n\n[HTML Delivery Contract]\n"
             "If you generate an HTML page, save it as a local file and include a markdown link to that exact file.\n"
             "Also generate one preview image (png) for Telegram chat preview.\n"
+            f"Preferred output directory: {output_dir_text}\n"
             "Preferred formats:\n"
-            "[landing page](./.mock_messenger/generated/<file>.html)\n"
-            "![preview](./.mock_messenger/generated/<file>.png)\n"
+            f"[landing page]({output_dir_text}/<file>.html)\n"
+            f"![preview]({output_dir_text}/<file>.png)\n"
             "Use inline CSS if possible so single-file preview works."
         )
     return result
@@ -153,7 +198,21 @@ def _extract_local_paths(text: str, *, suffixes: set[str]) -> list[Path]:
 
 
 def _find_recent_files(*, since_epoch: float, suffixes: set[str], limit: int = 3) -> list[Path]:
-    scan_roots = [Path.cwd(), Path(tempfile.gettempdir())]
+    return _find_recent_files_in_roots(
+        since_epoch=since_epoch,
+        suffixes=suffixes,
+        scan_roots=[Path.cwd(), Path(tempfile.gettempdir())],
+        limit=limit,
+    )
+
+
+def _find_recent_files_in_roots(
+    *,
+    since_epoch: float,
+    suffixes: set[str],
+    scan_roots: list[Path],
+    limit: int = 3,
+) -> list[Path]:
     discovered: list[tuple[float, Path]] = []
     seen: set[str] = set()
     cutoff = since_epoch - 2.0
@@ -198,6 +257,33 @@ def _artifact_dedupe_key(path: Path) -> str:
         return str(resolved).lower()
 
 
+async def _append_audit_log(
+    *,
+    repository: Repository,
+    bot_id: str,
+    chat_id: str | None,
+    session_id: str | None,
+    action: str,
+    result: str,
+    detail: str | None,
+    now: int,
+) -> None:
+    if not hasattr(repository, "append_audit_log"):
+        return
+    try:
+        await repository.append_audit_log(
+            bot_id=bot_id,
+            chat_id=chat_id,
+            session_id=session_id,
+            action=action,
+            result=result,
+            detail_json=detail,
+            now=now,
+        )
+    except Exception:
+        LOGGER.exception("failed to append run audit log bot=%s action=%s", bot_id, action)
+
+
 async def _deliver_generated_artifacts(
     *,
     bot_id: str,
@@ -206,6 +292,7 @@ async def _deliver_generated_artifacts(
     user_text: str,
     assistant_text: str,
     run_started_epoch: float,
+    artifact_output_dir: Path | None = None,
     telegram_client: TelegramClient,
     streamer: TelegramEventStreamer,
     sent_registry: dict[str, set[str]],
@@ -214,9 +301,25 @@ async def _deliver_generated_artifacts(
     html_paths = _extract_local_paths(assistant_text, suffixes=HTML_SUFFIXES)
 
     if not image_paths and _looks_like_image_request(user_text):
-        image_paths = _find_recent_files(since_epoch=run_started_epoch, suffixes=IMAGE_SUFFIXES, limit=3)
+        if artifact_output_dir is None:
+            image_paths = _find_recent_files(since_epoch=run_started_epoch, suffixes=IMAGE_SUFFIXES, limit=3)
+        else:
+            image_paths = _find_recent_files_in_roots(
+                since_epoch=run_started_epoch,
+                suffixes=IMAGE_SUFFIXES,
+                scan_roots=[artifact_output_dir],
+                limit=3,
+            )
     if not html_paths and _looks_like_html_request(user_text):
-        html_paths = _find_recent_files(since_epoch=run_started_epoch, suffixes=HTML_SUFFIXES, limit=2)
+        if artifact_output_dir is None:
+            html_paths = _find_recent_files(since_epoch=run_started_epoch, suffixes=HTML_SUFFIXES, limit=2)
+        else:
+            html_paths = _find_recent_files_in_roots(
+                since_epoch=run_started_epoch,
+                suffixes=HTML_SUFFIXES,
+                scan_roots=[artifact_output_dir],
+                limit=2,
+            )
 
     unique_files: list[tuple[Path, str]] = []
     sent_for_chat = sent_registry.setdefault(f"{bot_id}:{chat_id}", set())
@@ -358,12 +461,53 @@ async def _process_run_job(
         adapter = get_adapter(provider)
         preamble = summary_service.build_recovery_preamble(session.rolling_summary_md)
         run_started_epoch = time.time()
-        execution_prompt = _augment_prompt_for_generation_request(turn.user_text)
-        selected_model = getattr(session, "adapter_model", None) or default_models_by_provider.get(provider)
+        artifact_output_dir = _build_turn_artifact_output_dir(
+            bot_id=bot_id,
+            chat_id=str(turn.chat_id),
+            turn_id=turn.turn_id,
+        )
+        artifact_output_dir.mkdir(parents=True, exist_ok=True)
+        execution_prompt = _augment_prompt_for_generation_request(
+            turn.user_text,
+            artifact_output_dir=artifact_output_dir,
+        )
+        selected_model = resolve_selected_model(
+            provider=provider,
+            session_model=getattr(session, "adapter_model", None),
+            default_models=default_models_by_provider,
+        )
         selected_sandbox = default_sandbox if provider == "codex" else ""
+        selected_workdir = getattr(session, "project_root", None)
+        session_unsafe_until = getattr(session, "unsafe_until", None)
+        if provider == "codex" and isinstance(session_unsafe_until, int):
+            now_ms = _now_ms()
+            if session_unsafe_until > now_ms:
+                selected_sandbox = "danger-full-access"
+            else:
+                try:
+                    await repository.set_session_unsafe_until(
+                        session_id=session.session_id,
+                        unsafe_until=None,
+                        now=now_ms,
+                    )
+                except Exception:
+                    LOGGER.exception("failed to clear expired unsafe mode session=%s", session.session_id)
+        if selected_workdir:
+            project_dir = Path(selected_workdir).expanduser()
+            if not project_dir.exists() or not project_dir.is_dir():
+                selected_workdir = None
+
+        deadline = time.monotonic() + RUN_TURN_TIMEOUT_SEC
+        timed_out = False
 
         async def should_cancel() -> bool:
-            return await repository.is_turn_cancelled(turn_id=turn.turn_id)
+            nonlocal timed_out
+            if await repository.is_turn_cancelled(turn_id=turn.turn_id):
+                return True
+            if time.monotonic() >= deadline:
+                timed_out = True
+                return True
+            return False
 
         if session.adapter_thread_id:
             stream = adapter.run_resume_turn(
@@ -372,6 +516,7 @@ async def _process_run_job(
                     prompt=execution_prompt,
                     model=selected_model,
                     sandbox=selected_sandbox,
+                    workdir=selected_workdir,
                     preamble=preamble,
                     should_cancel=should_cancel,
                 )
@@ -382,6 +527,7 @@ async def _process_run_job(
                     prompt=execution_prompt,
                     model=selected_model,
                     sandbox=selected_sandbox,
+                    workdir=selected_workdir,
                     preamble=preamble,
                     should_cancel=should_cancel,
                 )
@@ -395,6 +541,7 @@ async def _process_run_job(
         thread_id: str | None = None
         completion_status = "success"
         error_text: str | None = None
+        error_stderr: str | None = None
 
         async def _persist_and_stream_event(event: AdapterEvent) -> None:
             nonlocal seq
@@ -448,6 +595,9 @@ async def _process_run_job(
                     msg = event.payload.get("message")
                     if isinstance(msg, str):
                         error_text = msg
+                    stderr = event.payload.get("stderr")
+                    if isinstance(stderr, str) and stderr.strip():
+                        error_stderr = stderr
 
                 seq += 1
         except FileNotFoundError:
@@ -493,9 +643,24 @@ async def _process_run_job(
             )
             seq += 1
 
+        if timed_out:
+            completion_status = "error"
+            if not error_text:
+                error_text = f"turn timed out after {RUN_TURN_TIMEOUT_SEC}s"
+
         cancelled = await repository.is_turn_cancelled(turn_id=turn.turn_id)
-        if cancelled or completion_status == "cancelled":
+        if (cancelled or completion_status == "cancelled") and not timed_out:
             await repository.mark_run_job_cancelled(job_id=job.id, turn_id=turn.turn_id, now=_now_ms())
+            await _append_audit_log(
+                repository=repository,
+                bot_id=bot_id,
+                chat_id=str(turn.chat_id),
+                session_id=turn.session_id,
+                action="run.turn",
+                result="cancelled",
+                detail=f"provider={provider}",
+                now=_now_ms(),
+            )
             await streamer.close_turn(turn_id=turn.turn_id)
             return
 
@@ -504,11 +669,50 @@ async def _process_run_job(
 
         assistant_text = "\n".join(part.strip() for part in assistant_parts if part.strip()).strip()
         failed = completion_status == "error" or (error_text and not assistant_text)
+        if failed and provider == "gemini" and _looks_like_gemini_quota_error(error_text, error_stderr):
+            fallback_model = "gemini-2.5-flash"
+            if selected_model != fallback_model:
+                try:
+                    await repository.set_session_model(
+                        session_id=session.session_id,
+                        adapter_model=fallback_model,
+                        now=_now_ms(),
+                    )
+                    await _append_audit_log(
+                        repository=repository,
+                        bot_id=bot_id,
+                        chat_id=str(turn.chat_id),
+                        session_id=turn.session_id,
+                        action="session.auto_fallback_model",
+                        result="success",
+                        detail=f"{selected_model or 'default'}->{fallback_model}",
+                        now=_now_ms(),
+                    )
+                    error_text = (
+                        f"{(error_text or 'gemini quota exceeded').strip()} "
+                        f"(auto-switched model to {fallback_model}; retry the request)"
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "failed to auto-switch gemini model after quota failure bot=%s session=%s",
+                        bot_id,
+                        session.session_id,
+                    )
         if failed:
             await repository.fail_run_job_and_turn(
                 job_id=job.id,
                 turn_id=turn.turn_id,
                 error_text=error_text or "adapter execution failed",
+                now=_now_ms(),
+            )
+            await _append_audit_log(
+                repository=repository,
+                bot_id=bot_id,
+                chat_id=str(turn.chat_id),
+                session_id=turn.session_id,
+                action="run.turn",
+                result="failed",
+                detail=(error_text or "adapter execution failed")[:400],
                 now=_now_ms(),
             )
             if hasattr(repository, "increment_runtime_metric"):
@@ -527,6 +731,16 @@ async def _process_run_job(
                 assistant_text=assistant_text,
                 now=_now_ms(),
             )
+            await _append_audit_log(
+                repository=repository,
+                bot_id=bot_id,
+                chat_id=str(turn.chat_id),
+                session_id=turn.session_id,
+                action="run.turn",
+                result="success",
+                detail=f"provider={provider}",
+                now=_now_ms(),
+            )
             should_deliver_artifacts = (
                 bool(assistant_text)
                 or _looks_like_image_request(turn.user_text)
@@ -540,6 +754,7 @@ async def _process_run_job(
                     user_text=turn.user_text,
                     assistant_text=assistant_text,
                     run_started_epoch=run_started_epoch,
+                    artifact_output_dir=artifact_output_dir,
                     telegram_client=telegram_client,
                     streamer=streamer,
                     sent_registry=sent_artifacts_by_chat,

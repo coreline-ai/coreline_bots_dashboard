@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
@@ -191,6 +192,15 @@ async def run_embedded_bot(bot: BotConfig, global_settings: GlobalSettings, host
     @app.get("/metrics")
     async def metrics() -> dict:
         return await repository.get_metrics(bot_id=str(bot.bot_id))
+
+    @app.get("/audit_logs")
+    async def audit_logs(chat_id: str | None = None, limit: int = 100) -> dict[str, Any]:
+        logs = await repository.list_audit_logs(
+            bot_id=str(bot.bot_id),
+            chat_id=chat_id.strip() if isinstance(chat_id, str) and chat_id.strip() else None,
+            limit=limit,
+        )
+        return {"ok": True, "result": {"logs": logs}}
 
     @app.post("/telegram/webhook/{bot_id}/{path_secret}")
     async def telegram_webhook(

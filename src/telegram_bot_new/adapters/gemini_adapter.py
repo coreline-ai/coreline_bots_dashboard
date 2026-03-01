@@ -19,9 +19,9 @@ class GeminiAdapter(CliAdapter):
         args = [self._gemini_bin, "--approval-mode", "yolo", "-o", "stream-json"]
         if request.model:
             args.extend(["--model", request.model])
-        args.append(prompt)
+        args.extend(["-p", prompt])
 
-        async for event in self._run_process(args, request.should_cancel):
+        async for event in self._run_process(args, request.should_cancel, request.workdir):
             yield event
 
     async def run_resume_turn(self, request: AdapterResumeRequest) -> AsyncIterator[AdapterEvent]:
@@ -30,9 +30,9 @@ class GeminiAdapter(CliAdapter):
         args = [self._gemini_bin, "--resume", request.thread_id, "--approval-mode", "yolo", "-o", "stream-json"]
         if request.model:
             args.extend(["--model", request.model])
-        args.append(prompt)
+        args.extend(["-p", prompt])
 
-        async for event in self._run_process(args, request.should_cancel):
+        async for event in self._run_process(args, request.should_cancel, request.workdir):
             yield event
 
     def normalize_event(self, raw_line: str, seq_start: int = 1) -> list[AdapterEvent]:
@@ -122,12 +122,14 @@ class GeminiAdapter(CliAdapter):
         self,
         args: list[str],
         should_cancel: Any,
+        workdir: str | None = None,
     ) -> AsyncIterator[AdapterEvent]:
         process = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=workdir or None,
         )
 
         seq = 1

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from telegram_bot_new.db.repository import Repository
 
 
@@ -24,7 +26,7 @@ class RunService:
             available_at=now,
         )
 
-    async def stop_active_turn(self, *, bot_id: str, chat_id: str, now: int) -> str | None:
+    async def stop_active_turn(self, *, bot_id: str, chat_id: str, now: int) -> Optional[str]:
         return await self._repository.cancel_active_turn(bot_id=bot_id, chat_id=chat_id, now=now)
 
     async def has_active_run(self, *, bot_id: str, chat_id: str) -> bool:
@@ -70,7 +72,7 @@ class RunService:
             now=now,
         )
 
-    async def promote_next_deferred_action(self, *, bot_id: str, chat_id: str, now: int) -> str | None:
+    async def promote_next_deferred_action(self, *, bot_id: str, chat_id: str, now: int) -> Optional[str]:
         promoted = await self._repository.promote_next_deferred_action(
             bot_id=bot_id,
             chat_id=chat_id,

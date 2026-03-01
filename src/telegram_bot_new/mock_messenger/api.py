@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Union
 
 import httpx
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
@@ -16,6 +16,7 @@ from telegram_bot_new.mock_messenger.bot_catalog import (
     create_dynamic_embedded_bot,
     delete_bot_from_catalog,
     extract_runtime_metrics,
+    fetch_embedded_audit_logs,
     fetch_embedded_runtime,
     infer_session_view_from_messages,
 )
@@ -41,7 +42,7 @@ def create_app(
     *,
     store: MockMessengerStore,
     allow_get_updates_with_webhook: bool = False,
-    bots_config_path: str | Path = "config/bots.yaml",
+    bots_config_path: Union[str, Path] = "config/bots.yaml",
     embedded_host: str = "127.0.0.1",
     embedded_base_port: int = 8600,
 ) -> FastAPI:
@@ -56,7 +57,7 @@ def create_app(
             text=text,
         )
 
-        webhook_error: str | None = None
+        webhook_error: Optional[str] = None
         delivered_via_webhook = False
         if queued["delivery_mode"] == "webhook" and isinstance(queued["webhook_url"], str):
             delivered_via_webhook, webhook_error = await _post_webhook_update(
@@ -104,7 +105,7 @@ def create_app(
         return FileResponse(_web_file("favicon.svg"), media_type="image/svg+xml")
 
     @app.get("/_mock/threads")
-    async def get_threads(token: str | None = None) -> dict[str, Any]:
+    async def get_threads(token: Optional[str] = None) -> dict[str, Any]:
         return {"ok": True, "result": store.list_threads(token=token)}
 
     @app.post("/_mock/send")
@@ -152,16 +153,26 @@ def create_app(
                     "adapter": str(row.get("default_adapter") or ""),
                 }
             )
+        scope_parts = sorted(
+            f"{str(item.get('bot_id') or '')}:{int(item.get('chat_id') or 0)}"
+            for item in participants
+        )
+        scope_key = "|".join(scope_parts)
 
         try:
-            result = await debate_orchestrator.start_debate(request=request, participants=participants)
+            result = await debate_orchestrator.start_debate(
+                request=request,
+                participants=participants,
+                scope_key=scope_key,
+            )
         except ActiveDebateExistsError as error:
             raise HTTPException(status_code=409, detail=f"active debate already exists: {error}") from error
         return {"ok": True, "result": result}
 
     @app.get("/_mock/debate/active")
-    async def get_active_debate() -> dict[str, Any]:
-        return {"ok": True, "result": debate_orchestrator.get_active_debate_snapshot()}
+    async def get_active_debate(scope_key: Optional[str] = None) -> dict[str, Any]:
+        normalized_scope = scope_key.strip() if isinstance(scope_key, str) and scope_key.strip() else None
+        return {"ok": True, "result": debate_orchestrator.get_active_debate_snapshot(scope_key=normalized_scope)}
 
     @app.get("/_mock/debate/{debate_id}")
     async def get_debate(debate_id: str) -> dict[str, Any]:
@@ -179,7 +190,7 @@ def create_app(
         return {"ok": True, "result": result}
 
     @app.get("/_mock/messages")
-    async def get_messages(token: str, chat_id: int | None = None, limit: int = 200) -> dict[str, Any]:
+    async def get_messages(token: str, chat_id: Optional[int] = None, limit: int = 200) -> dict[str, Any]:
         messages = store.get_messages(token=token, chat_id=chat_id, limit=max(1, min(limit, 1000)))
         for message in messages:
             document = message.get("document")
@@ -214,7 +225,7 @@ def create_app(
         )
 
     @app.get("/_mock/state")
-    async def get_state(token: str | None = None) -> dict[str, Any]:
+    async def get_state(token: Optional[str] = None) -> dict[str, Any]:
         return {
             "ok": True,
             "result": {
@@ -231,6 +242,39 @@ def create_app(
             embedded_base_port=embedded_base_port,
         )
         return {"ok": True, "result": {"bots": bots}}
+
+    @app.get("/_mock/projects")
+    async def get_projects() -> dict[str, Any]:
+        projects = _discover_projects(base_dir=Path.cwd())
+        return {"ok": True, "result": {"projects": projects}}
+
+    @app.get("/_mock/audit_logs")
+    async def get_audit_logs(
+        bot_id: str,
+        chat_id: Optional[int] = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        catalog = build_bot_catalog(
+            bots_config_path=bots_config_path,
+            embedded_host=embedded_host,
+            embedded_base_port=embedded_base_port,
+        )
+        selected = next((row for row in catalog if row.get("bot_id") == bot_id), None)
+        if selected is None:
+            raise HTTPException(status_code=404, detail=f"unknown bot_id: {bot_id}")
+
+        logs, embedded_error = await fetch_embedded_audit_logs(
+            selected.get("embedded_url"),
+            chat_id=chat_id,
+            limit=max(1, min(int(limit), 500)),
+        )
+        return {
+            "ok": True,
+            "result": {
+                "logs": logs,
+                "embedded_error": embedded_error,
+            },
+        }
 
     @app.post("/_mock/bot_catalog/add")
     async def add_bot_catalog_entry(request: BotCatalogAddRequest = Body(default_factory=BotCatalogAddRequest)) -> dict[str, Any]:
@@ -281,7 +325,7 @@ def create_app(
     async def get_bot_diagnostics(
         bot_id: str,
         token: str,
-        chat_id: int | None = None,
+        chat_id: Optional[int] = None,
         limit: int = 120,
     ) -> dict[str, Any]:
         resolved_limit = max(1, min(int(limit), 300))
@@ -426,7 +470,7 @@ def create_app(
     async def bot_send_document(
         token: str,
         chat_id: str = Form(...),
-        caption: str | None = Form(default=None),
+        caption: Optional[str] = Form(default=None),
         document: UploadFile = File(...),
     ) -> Any:
         if (response := _try_rate_limit(store=store, token=token, method="sendDocument")) is not None:
@@ -451,7 +495,7 @@ def create_app(
     async def bot_send_photo(
         token: str,
         chat_id: str = Form(...),
-        caption: str | None = Form(default=None),
+        caption: Optional[str] = Form(default=None),
         photo: UploadFile = File(...),
     ) -> Any:
         if (response := _try_rate_limit(store=store, token=token, method="sendPhoto")) is not None:
@@ -479,7 +523,7 @@ def create_app(
     return app
 
 
-def _try_rate_limit(*, store: MockMessengerStore, token: str, method: str) -> JSONResponse | None:
+def _try_rate_limit(*, store: MockMessengerStore, token: str, method: str) -> Optional[JSONResponse]:
     retry_after = store.consume_rate_limit(token=token, method=method)
     if retry_after is None:
         return None
@@ -501,7 +545,7 @@ def _telegram_error(*, status_code: int, description: str) -> JSONResponse:
     )
 
 
-def _parse_chat_id(value: Any) -> int | None:
+def _parse_chat_id(value: Any) -> Optional[int]:
     if isinstance(value, int):
         return value
     if isinstance(value, str):
@@ -518,12 +562,56 @@ def _web_file(name: str) -> str:
     return str(path)
 
 
+def _discover_projects(*, base_dir: Path) -> list[dict[str, str]]:
+    markers = {
+        ".git",
+        "pyproject.toml",
+        "package.json",
+        "requirements.txt",
+        "go.mod",
+        "Cargo.toml",
+        "README.md",
+    }
+    resolved_base = base_dir.expanduser().resolve()
+    candidates: list[Path] = [resolved_base]
+    try:
+        for child in sorted(resolved_base.iterdir(), key=lambda p: p.name.lower()):
+            if not child.is_dir():
+                continue
+            if child.name.startswith("."):
+                continue
+            has_marker = any((child / marker).exists() for marker in markers)
+            if has_marker:
+                candidates.append(child.resolve())
+    except Exception:
+        pass
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+
+    projects: list[dict[str, str]] = []
+    for path in deduped:
+        projects.append(
+            {
+                "name": path.name if path != resolved_base else f"{path.name} (workspace)",
+                "path": str(path),
+            }
+        )
+    return projects
+
+
 async def _post_webhook_update(
     *,
     url: str,
-    secret_token: str | None,
+    secret_token: Optional[str],
     payload: dict[str, Any],
-) -> tuple[bool, str | None]:
+) -> tuple[bool, Optional[str]]:
     headers: dict[str, str] = {}
     if secret_token:
         headers["X-Telegram-Bot-Api-Secret-Token"] = secret_token

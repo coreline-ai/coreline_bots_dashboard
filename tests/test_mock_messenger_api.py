@@ -323,6 +323,62 @@ def test_mock_bot_diagnostics_endpoint_with_bot_down(tmp_path: Path) -> None:
     store.close()
 
 
+def test_mock_projects_endpoint_lists_workspace_candidates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "projects.db"),
+        data_dir=str(tmp_path / "projects-data"),
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    project_a = workspace / "project-a"
+    project_a.mkdir(parents=True, exist_ok=True)
+    (project_a / "package.json").write_text('{"name":"project-a"}', encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    app = create_app(store=store, allow_get_updates_with_webhook=False)
+    with TestClient(app) as client:
+        response = client.get("/_mock/projects")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        projects = payload["result"]["projects"]
+        paths = [row["path"] for row in projects]
+        assert str(workspace.resolve()) in paths
+        assert str(project_a.resolve()) in paths
+    store.close()
+
+
+def test_mock_audit_logs_endpoint_with_bot_down(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "audit-down.db"),
+        data_dir=str(tmp_path / "audit-down-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=65430,
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/_mock/audit_logs",
+            params={"bot_id": "bot-a", "chat_id": 1001, "limit": 30},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        result = payload["result"]
+        assert isinstance(result["logs"], list)
+        assert result["logs"] == []
+        assert isinstance(result["embedded_error"], str)
+        assert result["embedded_error"]
+    store.close()
+
+
 def test_mock_bot_catalog_add_endpoint(tmp_path: Path) -> None:
     store = MockMessengerStore(
         db_path=str(tmp_path / "catalog-add.db"),

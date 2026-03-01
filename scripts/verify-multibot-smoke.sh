@@ -6,8 +6,9 @@ cd "$ROOT_DIR"
 
 MOCK_BASE_URL="${MOCK_BASE_URL:-http://127.0.0.1:9082}"
 RUNNER="${RUNNER:-./scripts/run-local-multibot.sh}"
-CHAT_A="${CHAT_A:-1001}"
-CHAT_B="${CHAT_B:-1002}"
+# Use dedicated smoke chats by default to avoid mutating user's primary sessions.
+CHAT_A="${CHAT_A:-91001}"
+CHAT_B="${CHAT_B:-91002}"
 USER_ID="${USER_ID:-9001}"
 
 step() {
@@ -187,6 +188,21 @@ wait_for_text_since "$TOKEN_A" "$CHAT_A" "$status_base_a" "adapter=$target_adapt
 }
 wait_for_text_since "$TOKEN_B" "$CHAT_B" "$status_base_b" "adapter=$target_adapter_b" 20 || {
   echo "smoke failed: adapter status $target_adapter_b missing for $BOT_B" >&2
+  exit 1
+}
+
+# restore providers to original adapter to keep smoke idempotent
+restore_base_a="$(max_message_id "$TOKEN_A" "$CHAT_A")"
+restore_base_b="$(max_message_id "$TOKEN_B" "$CHAT_B")"
+send_message "$TOKEN_A" "$CHAT_A" "/mode $current_adapter_a"
+send_message "$TOKEN_B" "$CHAT_B" "/mode $current_adapter_b"
+
+wait_for_text_since "$TOKEN_A" "$CHAT_A" "$restore_base_a" "mode switched: .*-> $current_adapter_a|mode unchanged: adapter=$current_adapter_a" 20 || {
+  echo "smoke failed: provider restore $current_adapter_a missing for $BOT_A" >&2
+  exit 1
+}
+wait_for_text_since "$TOKEN_B" "$CHAT_B" "$restore_base_b" "mode switched: .*-> $current_adapter_b|mode unchanged: adapter=$current_adapter_b" 20 || {
+  echo "smoke failed: provider restore $current_adapter_b missing for $BOT_B" >&2
   exit 1
 }
 

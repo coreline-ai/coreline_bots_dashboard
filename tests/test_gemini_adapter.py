@@ -6,10 +6,11 @@ from telegram_bot_new.adapters.gemini_adapter import GeminiAdapter
 
 @pytest.mark.asyncio
 async def test_run_new_turn_builds_expected_gemini_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, list[str]] = {}
+    captured: dict[str, object] = {}
 
-    async def fake_run_process(self: GeminiAdapter, args: list[str], should_cancel):
+    async def fake_run_process(self: GeminiAdapter, args: list[str], should_cancel, workdir=None):
         captured["args"] = args
+        captured["workdir"] = workdir
         if False:
             yield
 
@@ -33,16 +34,19 @@ async def test_run_new_turn_builds_expected_gemini_command(monkeypatch: pytest.M
         "stream-json",
         "--model",
         "gemini-2.5-pro",
+        "-p",
         "memory\n\n[User Message]\nhello",
     ]
+    assert captured["workdir"] is None
 
 
 @pytest.mark.asyncio
 async def test_run_resume_turn_builds_expected_gemini_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, list[str]] = {}
+    captured: dict[str, object] = {}
 
-    async def fake_run_process(self: GeminiAdapter, args: list[str], should_cancel):
+    async def fake_run_process(self: GeminiAdapter, args: list[str], should_cancel, workdir=None):
         captured["args"] = args
+        captured["workdir"] = workdir
         if False:
             yield
 
@@ -69,8 +73,10 @@ async def test_run_resume_turn_builds_expected_gemini_command(monkeypatch: pytes
         "stream-json",
         "--model",
         "gemini-2.5-flash",
+        "-p",
         "memory\n\n[User Message]\ncontinue",
     ]
+    assert captured["workdir"] is None
 
 
 def test_normalize_gemini_events() -> None:

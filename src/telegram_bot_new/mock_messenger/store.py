@@ -98,6 +98,7 @@ class MockMessengerStore:
 
                 CREATE TABLE IF NOT EXISTS debates (
                   debate_id TEXT PRIMARY KEY,
+                  scope_key TEXT,
                   topic TEXT NOT NULL,
                   status TEXT NOT NULL,
                   rounds_total INTEGER NOT NULL,
@@ -141,7 +142,21 @@ class MockMessengerStore:
                 );
                 """
             )
+            self._ensure_column_locked(table="debates", column="scope_key", definition="scope_key TEXT")
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS ix_debates_scope_status_created
+                ON debates(scope_key, status, created_at DESC)
+                """
+            )
             self._conn.commit()
+
+    def _ensure_column_locked(self, *, table: str, column: str, definition: str) -> None:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {str(row["name"]) for row in rows}
+        if column in existing:
+            return
+        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
     def ensure_bot(self, token: str) -> None:
         now = _now_ms()
@@ -693,6 +708,7 @@ class MockMessengerStore:
         max_turn_sec: int,
         fresh_session: bool,
         participants: list[dict[str, Any]],
+        scope_key: str | None = None,
     ) -> str:
         debate_id = uuid.uuid4().hex
         now_ms = _now_ms()
@@ -700,12 +716,12 @@ class MockMessengerStore:
             self._conn.execute(
                 """
                 INSERT INTO debates(
-                  debate_id, topic, status, rounds_total, max_turn_sec, fresh_session,
+                  debate_id, scope_key, topic, status, rounds_total, max_turn_sec, fresh_session,
                   stop_requested, created_at, started_at, finished_at, error_summary
                 )
-                VALUES (?, ?, 'queued', ?, ?, ?, 0, ?, NULL, NULL, NULL)
+                VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, NULL, NULL, NULL)
                 """,
-                (debate_id, topic, rounds_total, max_turn_sec, 1 if fresh_session else 0, now_ms),
+                (debate_id, scope_key, topic, rounds_total, max_turn_sec, 1 if fresh_session else 0, now_ms),
             )
             for index, participant in enumerate(participants, start=1):
                 self._conn.execute(
@@ -757,7 +773,7 @@ class MockMessengerStore:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT debate_id, topic, status, rounds_total, max_turn_sec, fresh_session, stop_requested,
+                SELECT debate_id, scope_key, topic, status, rounds_total, max_turn_sec, fresh_session, stop_requested,
                        created_at, started_at, finished_at, error_summary
                 FROM debates
                 WHERE debate_id = ?
@@ -768,18 +784,32 @@ class MockMessengerStore:
             return None
         return self._row_to_debate(row)
 
-    def get_active_debate(self) -> dict[str, Any] | None:
+    def get_active_debate(self, *, scope_key: str | None = None) -> dict[str, Any] | None:
         with self._lock:
-            row = self._conn.execute(
-                """
-                SELECT debate_id, topic, status, rounds_total, max_turn_sec, fresh_session, stop_requested,
-                       created_at, started_at, finished_at, error_summary
-                FROM debates
-                WHERE status IN ('queued', 'running')
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
+            if scope_key is None:
+                row = self._conn.execute(
+                    """
+                    SELECT debate_id, scope_key, topic, status, rounds_total, max_turn_sec, fresh_session, stop_requested,
+                           created_at, started_at, finished_at, error_summary
+                    FROM debates
+                    WHERE status IN ('queued', 'running')
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """
+                    SELECT debate_id, scope_key, topic, status, rounds_total, max_turn_sec, fresh_session, stop_requested,
+                           created_at, started_at, finished_at, error_summary
+                    FROM debates
+                    WHERE status IN ('queued', 'running')
+                      AND COALESCE(scope_key, '') = COALESCE(?, '')
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (scope_key,),
+                ).fetchone()
         if row is None:
             return None
         return self._row_to_debate(row)
@@ -944,6 +974,7 @@ class MockMessengerStore:
     def _row_to_debate(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "debate_id": row["debate_id"],
+            "scope_key": row["scope_key"],
             "topic": row["topic"],
             "status": row["status"],
             "rounds_total": int(row["rounds_total"]),

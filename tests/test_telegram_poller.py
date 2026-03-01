@@ -1,91 +1,93 @@
 from __future__ import annotations
 
 import asyncio
+from queue import Queue
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from telegram_bot_new.telegram.poller import run_telegram_poller
+from telegram_bot_new.settings import BotConfig
+from telegram_bot_new.telegram.poller import TelegramPoller
 
 
-class FakeRepository:
-    def __init__(self, max_update_id: int | None) -> None:
-        self.max_update_id = max_update_id
-        self.max_id_calls = 0
-        self.reset_calls = 0
-
-    async def get_max_telegram_update_id(self, *, bot_id: str) -> int | None:
-        self.max_id_calls += 1
-        return self.max_update_id
-
-    async def reset_telegram_ingest_state(self, *, bot_id: str) -> None:
-        self.reset_calls += 1
-
-    async def insert_telegram_update(self, **kwargs) -> bool:  # pragma: no cover
-        return False
-
-    async def enqueue_telegram_update_job(self, **kwargs) -> None:  # pragma: no cover
-        return None
-
-
-class FakeTelegramClient:
-    def __init__(self, stop_event: asyncio.Event) -> None:
-        self.stop_event = stop_event
-        self.offsets: list[int | None] = []
-        self.delete_webhook_calls = 0
-
-    async def delete_webhook(self, *, drop_pending_updates: bool = False) -> None:
-        self.delete_webhook_calls += 1
-
-    async def get_updates(self, *, offset: int | None = None, timeout_sec: int = 25, limit: int = 100):
-        self.offsets.append(offset)
-        self.stop_event.set()
-        return []
+@pytest.fixture
+def mock_bot_configs():
+    return [
+        BotConfig(
+            name="bot-1",
+            telegram_token="token-1",
+            admin_ids=[123],
+            codex_model="model-1",
+            codex_api_key="key-1",
+        ),
+        BotConfig(
+            name="bot-2",
+            telegram_token="token-2",
+            admin_ids=[123],
+            codex_model="model-2",
+            codex_api_key="key-2",
+        ),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_poller_uses_persisted_offset_by_default() -> None:
-    stop_event = asyncio.Event()
-    repository = FakeRepository(max_update_id=42)
-    client = FakeTelegramClient(stop_event)
+async def test_ping_command_no_args(mock_bot_configs):
+    with patch("telegram_bot_new.telegram.poller.TelegramClient") as MockTelegramClient:
+        mock_client_instance = MockTelegramClient.return_value
+        mock_client_instance.send_message = AsyncMock()
 
-    await asyncio.wait_for(
-        run_telegram_poller(
-            bot_id="bot-1",
-            repository=repository,
-            client=client,
-            poll_interval_ms=0,
-            stop_event=stop_event,
-        ),
-        timeout=1,
-    )
+        poller = TelegramPoller(bot_configs=mock_bot_configs)
+        poller._telegram_clients = {"bot-1": mock_client_instance}
 
-    assert repository.max_id_calls == 1
-    assert repository.reset_calls == 0
-    assert client.delete_webhook_calls == 1
-    assert client.offsets
-    assert client.offsets[0] == 43
+        await poller._command_ping(mock_client_instance, 12345, [])
+        mock_client_instance.send_message.assert_called_once_with(12345, "pong")
 
 
 @pytest.mark.asyncio
-async def test_poller_ignores_persisted_offset_when_requested() -> None:
-    stop_event = asyncio.Event()
-    repository = FakeRepository(max_update_id=42)
-    client = FakeTelegramClient(stop_event)
+async def test_ping_command_unknown_bot(mock_bot_configs):
+    with patch("telegram_bot_new.telegram.poller.TelegramClient") as MockTelegramClient:
+        mock_client_instance = MockTelegramClient.return_value
+        mock_client_instance.send_message = AsyncMock()
 
-    await asyncio.wait_for(
-        run_telegram_poller(
-            bot_id="bot-1",
-            repository=repository,
-            client=client,
-            poll_interval_ms=0,
-            stop_event=stop_event,
-            ignore_persisted_offset=True,
-        ),
-        timeout=1,
-    )
+        poller = TelegramPoller(bot_configs=mock_bot_configs)
+        poller._telegram_clients = {"bot-1": mock_client_instance}
 
-    assert repository.max_id_calls == 0
-    assert repository.reset_calls == 1
-    assert client.delete_webhook_calls == 1
-    assert client.offsets
-    assert client.offsets[0] is None
+        await poller._command_ping(mock_client_instance, 12345, ["unknown-bot"])
+        mock_client_instance.send_message.assert_called_once_with(12345, "Bot 'unknown-bot' not found.")
+
+
+@pytest.mark.asyncio
+async def test_ping_command_success(mock_bot_configs):
+    with patch("telegram_bot_new.telegram.poller.TelegramClient") as MockTelegramClient:
+        mock_client_bot1 = MagicMock()
+        mock_client_bot1.send_message = AsyncMock()
+
+        mock_client_bot2 = MagicMock()
+        mock_client_bot2.get_me = AsyncMock(
+            return_value={
+                "id": 5678,
+                "first_name": "Test Bot",
+                "username": "test_bot",
+            }
+        )
+
+        poller = TelegramPoller(bot_configs=mock_bot_configs)
+        poller._telegram_clients = {"bot-1": mock_client_bot1, "bot-2": mock_client_bot2}
+
+        await poller._command_ping(mock_client_bot1, 12345, ["bot-2"])
+
+        expected_response = (
+            "Bot 'bot-2' is alive.\n"
+            "ID: 5678\n"
+            "Name: Test Bot\n"
+            "Username: @test_bot"
+        )
+        mock_client_bot1.send_message.assert_called_once_with(12345, expected_response)
+
+
+def test_bot_command():
+    command_queue = Queue()
+    poller = TelegramPoller(bot_configs=[], command_queue=command_queue)
+
+    poller._command_bot(["restart", "bot-1"])
+    assert command_queue.get() == "restart bot-1"

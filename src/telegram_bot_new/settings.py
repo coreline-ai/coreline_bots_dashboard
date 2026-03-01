@@ -39,6 +39,7 @@ class GlobalSettings(BaseSettings):
     telegram_webhook_public_url: str | None = Field(default=None, alias="TELEGRAM_WEBHOOK_PUBLIC_URL")
     telegram_webhook_path_secret: str | None = Field(default=None, alias="TELEGRAM_WEBHOOK_PATH_SECRET")
     telegram_webhook_secret_token: str | None = Field(default=None, alias="TELEGRAM_WEBHOOK_SECRET_TOKEN")
+    strict_bot_db_isolation: bool = Field(default=False, alias="STRICT_BOT_DB_ISOLATION")
 
 
 class WebhookConfig(BaseModel):
@@ -122,6 +123,16 @@ def load_bots_config(
     bot_ids = [b.bot_id for b in normalized]
     if len(bot_ids) != len(set(bot_ids)):
         raise ValueError("bots config contains duplicate bot_id values")
+    tokens = [b.telegram_token for b in normalized]
+    if len(tokens) != len(set(tokens)):
+        raise ValueError("bots config contains duplicate telegram_token values")
+    if resolved_settings.strict_bot_db_isolation and len(normalized) > 1:
+        missing = [str(bot.bot_id) for bot in normalized if not str(bot.database_url or "").strip()]
+        if missing:
+            raise ValueError(
+                "strict bot db isolation enabled but database_url missing for bots: "
+                + ", ".join(missing)
+            )
 
     return normalized
 

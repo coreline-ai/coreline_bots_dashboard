@@ -35,7 +35,7 @@ class CodexAdapter(CliAdapter):
             args.extend(["-s", request.sandbox])
         args.append(prompt)
 
-        async for event in self._run_process(args, request.should_cancel):
+        async for event in self._run_process(args, request.should_cancel, request.workdir):
             yield event
 
     async def run_resume_turn(self, request: AdapterResumeRequest) -> AsyncIterator[AdapterEvent]:
@@ -47,7 +47,7 @@ class CodexAdapter(CliAdapter):
             args.extend(["-s", request.sandbox])
         args.extend(["resume", request.thread_id, prompt])
 
-        async for event in self._run_process(args, request.should_cancel):
+        async for event in self._run_process(args, request.should_cancel, request.workdir):
             yield event
 
     def normalize_event(self, raw_line: str, seq_start: int = 1) -> list[AdapterEvent]:
@@ -149,12 +149,14 @@ class CodexAdapter(CliAdapter):
         self,
         args: list[str],
         should_cancel: Any,
+        workdir: str | None = None,
     ) -> AsyncIterator[AdapterEvent]:
         process = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=workdir or None,
         )
 
         seq = 1

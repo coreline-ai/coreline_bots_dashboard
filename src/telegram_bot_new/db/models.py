@@ -58,6 +58,8 @@ class Session(Base):
     chat_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     adapter_name: Mapped[str] = mapped_column(String(32), nullable=False)
     adapter_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    project_root: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    unsafe_until: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     adapter_thread_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     rolling_summary_md: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -173,6 +175,19 @@ class RuntimeMetricCounter(Base):
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    bot_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    chat_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    detail_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 Index("ix_sessions_bot_chat_updated", Session.bot_id, Session.chat_id, Session.updated_at.desc())
 Index(
     "ix_deferred_button_actions_bot_chat_status_created",
@@ -182,3 +197,4 @@ Index(
     DeferredButtonAction.created_at,
 )
 Index("ix_runtime_metric_counters_bot_key", RuntimeMetricCounter.bot_id, RuntimeMetricCounter.metric_key)
+Index("ix_audit_logs_bot_chat_created", AuditLog.bot_id, AuditLog.chat_id, AuditLog.created_at.desc())

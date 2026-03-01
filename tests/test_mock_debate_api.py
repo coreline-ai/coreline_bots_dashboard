@@ -203,13 +203,26 @@ def test_debate_start_rejects_duplicate_active_debate(tmp_path: Path) -> None:
             "/_mock/debate/start",
             json={
                 "topic": "second debate",
-                "profiles": _profiles_payload(chat_id=3002),
+                "profiles": _profiles_payload(chat_id=3001),
                 "rounds": 1,
                 "max_turn_sec": 10,
                 "fresh_session": True,
             },
         )
         assert second.status_code == 409
+
+        # Different scope (different chat_id participants) can run in parallel.
+        third = client.post(
+            "/_mock/debate/start",
+            json={
+                "topic": "third debate",
+                "profiles": _profiles_payload(chat_id=3002),
+                "rounds": 1,
+                "max_turn_sec": 10,
+                "fresh_session": True,
+            },
+        )
+        assert third.status_code == 200
 
         stop = client.post(f"/_mock/debate/{first_id}/stop")
         assert stop.status_code == 200

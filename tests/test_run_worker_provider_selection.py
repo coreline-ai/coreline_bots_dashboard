@@ -75,14 +75,24 @@ class _TelegramClientNoop:
 
 
 class _Repository:
-    def __init__(self, *, adapter_name: str, adapter_model: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        adapter_name: str,
+        adapter_model: str | None = None,
+        project_root: str | None = None,
+        unsafe_until: int | None = None,
+    ) -> None:
         self.adapter_name = adapter_name
         self.adapter_model = adapter_model
+        self.project_root = project_root
+        self.unsafe_until = unsafe_until
         self.completed = False
         self.failed = False
         self.failed_error = ""
         self.appended_events: list[tuple[str, str]] = []
         self.metrics: list[str] = []
+        self.last_set_unsafe_until: int | None | object = object()
 
     async def get_turn(self, *, turn_id: str):
         return SimpleNamespace(turn_id=turn_id, session_id="session-1", user_text="hello", chat_id="1001")
@@ -92,6 +102,8 @@ class _Repository:
             session_id=session_id,
             adapter_name=self.adapter_name,
             adapter_model=self.adapter_model,
+            project_root=self.project_root,
+            unsafe_until=self.unsafe_until,
             rolling_summary_md="",
             adapter_thread_id=None,
         )
@@ -119,6 +131,10 @@ class _Repository:
 
     async def set_session_thread_id(self, *, session_id: str, thread_id: str | None, now: int) -> None:
         return None
+
+    async def set_session_unsafe_until(self, *, session_id: str, unsafe_until: int | None, now: int) -> None:
+        self.last_set_unsafe_until = unsafe_until
+        self.unsafe_until = unsafe_until
 
     async def complete_run_job_and_turn(self, *, job_id: str, turn_id: str, assistant_text: str, now: int) -> None:
         self.completed = True
@@ -229,3 +245,76 @@ async def test_process_run_job_prefers_session_model_over_default(monkeypatch: p
 
     assert adapter.last_request is not None
     assert adapter.last_request.model == "gemini-2.5-flash"
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_uses_session_project_root_as_workdir(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    adapter = _CaptureAdapter()
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: adapter)
+    repo = _Repository(adapter_name="gemini", adapter_model="gemini-2.5-flash", project_root=str(tmp_path.resolve()))
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-4", turn_id="turn-4", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert adapter.last_request is not None
+    assert adapter.last_request.workdir == str(tmp_path.resolve())
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_enables_dangerous_sandbox_when_unsafe_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _CaptureAdapter()
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: adapter)
+    repo = _Repository(adapter_name="codex", adapter_model="gpt-5", unsafe_until=9_999_999_999_999)
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-5", turn_id="turn-5", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert adapter.last_request is not None
+    assert adapter.last_request.sandbox == "danger-full-access"
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_clears_expired_unsafe_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _CaptureAdapter()
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: adapter)
+    repo = _Repository(adapter_name="codex", adapter_model="gpt-5", unsafe_until=1)
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-6", turn_id="turn-6", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert adapter.last_request is not None
+    assert adapter.last_request.sandbox == "workspace-write"
+    assert repo.last_set_unsafe_until is None

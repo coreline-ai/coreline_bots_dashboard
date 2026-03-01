@@ -316,7 +316,7 @@ test('parallel send succeeds across at least three selected bots', async ({ page
 });
 
 test('/debate command shows debate panel and completes', async ({ page }) => {
-  await page.route('**/_mock/debate/active', async (route) => {
+  await page.route('**/_mock/debate/active*', async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, result: null }) });
   });
 
@@ -409,7 +409,7 @@ test('/debate command shows debate panel and completes', async ({ page }) => {
 });
 
 test('debate stop button requests stop and updates status', async ({ page }) => {
-  await page.route('**/_mock/debate/active', async (route) => {
+  await page.route('**/_mock/debate/active*', async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, result: null }) });
   });
 

@@ -33,6 +33,9 @@ class TelegramClient:
         self._base = f"{base_url.rstrip('/')}/bot{token}"
         self._on_rate_limit = on_rate_limit
 
+    async def get_me(self) -> dict[str, Any]:
+        return await self._request_json("getMe", {})
+
     async def send_message(
         self,
         chat_id: int,

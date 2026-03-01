@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from telegram_bot_new.db.repository import SessionView
 from telegram_bot_new.db.models import Turn
 
 
 class ButtonPromptService:
-    def build_summary_prompt(self, *, session: SessionView, origin_turn: Turn, latest_turn: Turn | None) -> str:
+    def build_summary_prompt(self, *, session: SessionView, origin_turn: Turn, latest_turn: Optional[Turn]) -> str:
         recent_user = (origin_turn.user_text or "").strip()
         recent_assistant = (origin_turn.assistant_text or "").strip()
         latest_assistant = (latest_turn.assistant_text or "").strip() if latest_turn else ""

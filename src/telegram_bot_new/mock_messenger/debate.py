@@ -21,6 +21,12 @@ ERROR_HINTS = (
     "send error",
     "failed to send telegram message",
 )
+ACTIVE_RUN_HINTS = (
+    "a run is active",
+    "run is already active",
+    "already active in this chat",
+    "use /stop first",
+)
 
 DEFAULT_TURN_SECTIONS: tuple[str, ...] = ("주장", "반박", "질문")
 FINAL_ROUND_SECTIONS: tuple[str, ...] = ("요약", "결론")
@@ -60,8 +66,7 @@ class DebateOrchestrator:
         self._cool_down_sec = max(0.0, float(cool_down_sec))
 
         self._lock = asyncio.Lock()
-        self._active_debate_id: str | None = None
-        self._active_task: asyncio.Task[None] | None = None
+        self._active_tasks: dict[str, asyncio.Task[None]] = {}
 
     def set_send_message_handler(self, handler: DebateSendFn) -> None:
         self._send_user_message = handler
@@ -71,9 +76,10 @@ class DebateOrchestrator:
         *,
         request: DebateStartRequest,
         participants: list[dict[str, Any]],
+        scope_key: str | None = None,
     ) -> dict[str, Any]:
         async with self._lock:
-            active = self._store.get_active_debate()
+            active = self._store.get_active_debate(scope_key=scope_key)
             if active is not None:
                 raise ActiveDebateExistsError(active.get("debate_id"))
 
@@ -83,9 +89,9 @@ class DebateOrchestrator:
                 max_turn_sec=int(request.max_turn_sec),
                 fresh_session=bool(request.fresh_session),
                 participants=participants,
+                scope_key=scope_key,
             )
-            self._active_debate_id = debate_id
-            self._active_task = asyncio.create_task(self._run_debate(debate_id), name=f"debate:{debate_id}")
+            self._active_tasks[debate_id] = asyncio.create_task(self._run_debate(debate_id), name=f"debate:{debate_id}")
 
         snapshot = self.get_debate_snapshot(debate_id)
         assert snapshot is not None
@@ -130,8 +136,8 @@ class DebateOrchestrator:
         }
         return DebateStatusResponse.model_validate(payload).model_dump()
 
-    def get_active_debate_snapshot(self) -> dict[str, Any] | None:
-        active = self._store.get_active_debate()
+    def get_active_debate_snapshot(self, *, scope_key: str | None = None) -> dict[str, Any] | None:
+        active = self._store.get_active_debate(scope_key=scope_key)
         if active is None:
             return None
         debate_id = str(active.get("debate_id") or "")
@@ -149,8 +155,12 @@ class DebateOrchestrator:
         return updated
 
     async def shutdown(self) -> None:
-        task = self._active_task
-        if task is not None and not task.done():
+        async with self._lock:
+            tasks = list(self._active_tasks.values())
+            self._active_tasks.clear()
+        for task in tasks:
+            if task.done():
+                continue
             task.cancel()
             try:
                 await task
@@ -222,6 +232,15 @@ class DebateOrchestrator:
                             detail="send_error",
                             error_text=str(error),
                         )
+                    if self._looks_like_active_run_outcome(outcome):
+                        recovered = await self._retry_turn_after_stop(
+                            debate_id=debate_id,
+                            participant=participant,
+                            prompt_text=prompt_text,
+                            max_turn_sec=max_turn_sec,
+                        )
+                        if recovered is not None:
+                            outcome = recovered
 
                     final_status = outcome.status
                     final_error = outcome.error_text
@@ -291,9 +310,7 @@ class DebateOrchestrator:
             self._store.finish_debate(debate_id=debate_id, status="failed", error_summary=str(error))
         finally:
             async with self._lock:
-                if self._active_debate_id == debate_id:
-                    self._active_debate_id = None
-                    self._active_task = None
+                self._active_tasks.pop(debate_id, None)
 
     async def _broadcast_control_command(self, participants: list[dict[str, Any]], command: str) -> None:
         for participant in participants:
@@ -379,6 +396,57 @@ class DebateOrchestrator:
         except Exception:
             return None
 
+    async def _retry_turn_after_stop(
+        self,
+        *,
+        debate_id: str,
+        participant: dict[str, Any],
+        prompt_text: str,
+        max_turn_sec: int,
+    ) -> TurnOutcome | None:
+        try:
+            stop_baseline = self._max_message_id(participant)
+            await self._send_participant_message(participant, "/stop")
+            await self._wait_for_stop_ack(participant=participant, baseline_message_id=stop_baseline, timeout_sec=6)
+            baseline = self._max_message_id(participant)
+            await self._send_participant_message(participant, prompt_text)
+            return await self._wait_for_turn_result(
+                debate_id=debate_id,
+                participant=participant,
+                baseline_message_id=baseline,
+                max_turn_sec=max_turn_sec,
+            )
+        except Exception:
+            return None
+
+    async def _wait_for_stop_ack(self, *, participant: dict[str, Any], baseline_message_id: int, timeout_sec: int) -> None:
+        token = str(participant.get("token") or "")
+        chat_id = int(participant.get("chat_id") or 0)
+        deadline = time.monotonic() + max(1, int(timeout_sec))
+        while time.monotonic() < deadline:
+            messages = self._store.get_messages(token=token, chat_id=chat_id, limit=120)
+            for message in messages:
+                if message.get("direction") != "bot":
+                    continue
+                if int(message.get("message_id") or 0) <= baseline_message_id:
+                    continue
+                text = str(message.get("text") or "").lower()
+                if "stop requested." in text or "no active run." in text or "stopping..." in text:
+                    return
+            await asyncio.sleep(self._poll_interval_sec)
+
+    def _looks_like_active_run_outcome(self, outcome: TurnOutcome) -> bool:
+        if outcome.status != "error":
+            return False
+        if str(outcome.detail).strip().lower() == "active_run":
+            return True
+        return self._contains_active_run_hint(str(outcome.error_text or "").lower())
+
+    @staticmethod
+    def _contains_active_run_hint(text: str) -> bool:
+        lowered = str(text or "").lower()
+        return any(hint in lowered for hint in ACTIVE_RUN_HINTS)
+
     def _classify_turn_outcome(self, *, token: str, chat_id: int, baseline_message_id: int) -> TurnOutcome:
         messages = self._store.get_messages(token=token, chat_id=chat_id, limit=200)
         bot_messages = [
@@ -419,6 +487,8 @@ class DebateOrchestrator:
                 saw_turn_completed = True
 
             lowered = text.lower()
+            if self._contains_active_run_hint(lowered):
+                return TurnOutcome(done=True, status="error", detail="active_run", error_text=text)
             if any(token in lowered for token in ERROR_HINTS):
                 return TurnOutcome(done=True, status="error", detail="error_hint", error_text=text)
 

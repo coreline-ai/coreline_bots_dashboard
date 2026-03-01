@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
@@ -97,7 +98,7 @@ async def run_gateway_server(bots: list[BotConfig], global_settings: GlobalSetti
         bot_id: str,
         path_secret: str,
         payload: dict,
-        x_telegram_bot_api_secret_token: str | None = Header(default=None),
+        x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
     ) -> dict[str, bool]:
         bot = bot_map.get(bot_id)
         if bot is None:

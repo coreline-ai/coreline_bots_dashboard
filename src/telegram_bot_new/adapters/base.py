@@ -18,7 +18,7 @@ AdapterEventType = Literal[
 ]
 
 
-@dataclass(slots=True)
+@dataclass
 class AdapterEvent:
     seq: int
     ts: str
@@ -26,16 +26,17 @@ class AdapterEvent:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(slots=True)
+@dataclass
 class AdapterRunRequest:
     prompt: str
     model: str | None = None
     sandbox: str = "workspace-write"
+    workdir: str | None = None
     preamble: str | None = None
     should_cancel: Callable[[], Awaitable[bool]] | None = None
 
 
-@dataclass(slots=True)
+@dataclass
 class AdapterResumeRequest(AdapterRunRequest):
     thread_id: str = ""
 

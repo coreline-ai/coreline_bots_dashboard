@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Optional
 from urllib.parse import quote_plus
 
 import httpx
@@ -23,12 +24,12 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
     return result
 
 
-@dataclass(slots=True)
+@dataclass
 class YoutubeSearchResult:
     video_id: str
     url: str
-    title: str | None = None
-    author_name: str | None = None
+    title: Optional[str] = None
+    author_name: Optional[str] = None
 
 
 class YoutubeSearchService:
@@ -42,7 +43,7 @@ class YoutubeSearchService:
             )
         }
 
-    async def search_first_video(self, query: str) -> YoutubeSearchResult | None:
+    async def search_first_video(self, query: str) -> Optional[YoutubeSearchResult]:
         normalized = " ".join(query.split())
         if not normalized:
             return None
@@ -60,7 +61,7 @@ class YoutubeSearchService:
             author_name=author_name,
         )
 
-    async def _resolve_video_id(self, query: str) -> str | None:
+    async def _resolve_video_id(self, query: str) -> Optional[str]:
         for resolver in (self._search_from_youtube_results, self._search_from_duckduckgo):
             try:
                 video_id = await resolver(query)
@@ -70,7 +71,7 @@ class YoutubeSearchService:
                 return video_id
         return None
 
-    async def _search_from_youtube_results(self, query: str) -> str | None:
+    async def _search_from_youtube_results(self, query: str) -> Optional[str]:
         url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
         async with httpx.AsyncClient(
             timeout=self._timeout_sec,
@@ -85,7 +86,7 @@ class YoutubeSearchService:
             return None
         return video_ids[0]
 
-    async def _search_from_duckduckgo(self, query: str) -> str | None:
+    async def _search_from_duckduckgo(self, query: str) -> Optional[str]:
         q = f"site:youtube.com/watch {query}"
         url = f"https://duckduckgo.com/html/?q={quote_plus(q)}"
         async with httpx.AsyncClient(
@@ -103,7 +104,7 @@ class YoutubeSearchService:
             return None
         return video_ids[0]
 
-    async def _fetch_oembed(self, url: str) -> tuple[str | None, str | None]:
+    async def _fetch_oembed(self, url: str) -> tuple[Optional[str], Optional[str]]:
         endpoint = f"https://www.youtube.com/oembed?url={quote_plus(url)}&format=json"
         try:
             async with httpx.AsyncClient(timeout=self._timeout_sec, headers=self._headers) as client:

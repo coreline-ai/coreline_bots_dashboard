@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
-  <link rel="stylesheet" href="/_mock/ui/styles.css?v=44">
+  <link rel="stylesheet" href="/_mock/ui/styles.css?v=46">
 </head>
 <body>
   <header class="topbar">
@@ -103,13 +103,11 @@
               <input id="user-id-input" type="number" value="9001">
             </label>
           </div>
-
-          <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">bolt</span>Quick Actions</h3>
-          <div class="quick-actions">
-            <button type="button" class="quick-action-btn" data-command="/start">/start</button>
-            <button type="button" class="quick-action-btn" data-command="/reset">/reset</button>
-            <button type="button" class="quick-action-btn" data-command="/stop">/stop</button>
-          </div>
+          <label>Project
+            <select id="session-project-select">
+              <option value="">default</option>
+            </select>
+          </label>
 
           <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">webhook</span>Webhook</h3>
           <label>Webhook URL
@@ -196,6 +194,10 @@
 
         <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">forum</span>Threads (Top 10)</h3>
         <pre id="threads-json"></pre>
+
+        <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">history</span>Audit Logs</h3>
+        <div id="audit-error" class="audit-error"></div>
+        <pre id="audit-json"></pre>
       </section>
     </section>
   </main>
@@ -222,6 +224,6 @@
     </form>
   </dialog>
 
-  <script src="/_mock/ui/app.js?v=37"></script>
+  <script src="/_mock/ui/app.js?v=40"></script>
 </body>
 </html>

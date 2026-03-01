@@ -3,6 +3,7 @@ from sqlalchemy.exc import IntegrityError
 from telegram_bot_new.db.repository import (
     _is_active_run_unique_conflict,
     _is_active_session_unique_conflict,
+    _parse_sqlite_add_column_if_not_exists,
     _split_sql_statements,
 )
 
@@ -45,3 +46,15 @@ def test_is_active_session_unique_conflict_detects_partial_index_name() -> None:
 def test_is_active_session_unique_conflict_ignores_other_constraint() -> None:
     error = _mk_integrity_error("insert or update on table \"sessions\" violates foreign key constraint \"sessions_bot_id_fkey\"")
     assert _is_active_session_unique_conflict(error) is False
+
+
+def test_parse_sqlite_add_column_if_not_exists_matches_expected_shape() -> None:
+    parsed = _parse_sqlite_add_column_if_not_exists(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS adapter_model VARCHAR(128)"
+    )
+    assert parsed == ("sessions", "adapter_model", "VARCHAR(128)")
+
+
+def test_parse_sqlite_add_column_if_not_exists_ignores_other_statements() -> None:
+    parsed = _parse_sqlite_add_column_if_not_exists("CREATE INDEX idx ON sessions (chat_id)")
+    assert parsed is None

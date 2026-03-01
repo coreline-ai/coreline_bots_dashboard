@@ -170,6 +170,41 @@ async def test_deliver_generated_artifacts_uses_recent_file_fallback_for_korean_
     assert streamer.delivery_errors == []
 
 
+@pytest.mark.asyncio
+async def test_deliver_generated_artifacts_scopes_fallback_to_artifact_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scoped_dir = tmp_path / ".mock_messenger" / "generated" / "bot-1" / "1001" / "turn-1"
+    scoped_dir.mkdir(parents=True, exist_ok=True)
+    scoped_file = scoped_dir / "scoped.png"
+    scoped_file.write_bytes(b"\x89PNG\r\n\x1a\nscoped")
+
+    outside_file = tmp_path / "outside.png"
+    outside_file.write_bytes(b"\x89PNG\r\n\x1a\noutside")
+    monkeypatch.chdir(tmp_path)
+
+    client = FakeTelegramClient()
+    streamer = FakeStreamer()
+
+    await _deliver_generated_artifacts(
+        bot_id="bot-1",
+        chat_id=1001,
+        turn_id="turn-1",
+        user_text="\uc0c8 \uc774\ubbf8\uc9c0 \ub9cc\ub4e4\uc5b4\uc918",
+        assistant_text="",
+        run_started_epoch=time.time(),
+        artifact_output_dir=scoped_dir,
+        telegram_client=client,
+        streamer=streamer,
+        sent_registry={},
+    )
+
+    assert len(client.photos) == 1
+    assert Path(client.photos[0][1]).resolve() == scoped_file.resolve()
+    assert streamer.delivery_errors == []
+
+
 def test_generation_request_detection_and_prompt_contract() -> None:
     image_text = "\uaf43 \uc774\ubbf8\uc9c0 \ub9cc\ub4e4\uc5b4\uc918"
     html_text = "\ub79c\ub529 \ud398\uc774\uc9c0 html css\ub85c \ub9cc\ub4e4\uc5b4\uc918"

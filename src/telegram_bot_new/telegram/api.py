@@ -1,7 +1,72 @@
 from __future__ import annotations
 
+import httpx
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramApi:
+    def __init__(self, timeout: int = 10):
+        self._timeout = timeout
+
+    def get_me(self, token: str) -> dict[str, Any]:
+        url = f"https://api.telegram.org/bot{token}/getMe"
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Telegram API error: {e.response.status_code} {e.response.text}")
+            return {"ok": False, "description": str(e)}
+        except Exception as e:
+            logger.error(f"Error calling getMe: {e}")
+            return {"ok": False, "description": "An unexpected error occurred."}
+
+    def get_updates(self, token: str, offset: int, timeout: int) -> dict[str, Any]:
+        url = f"https://api.telegram.org/bot{token}/getUpdates"
+        params = {"offset": offset, "timeout": timeout, "allowed_updates": ["message", "callback_query"]}
+        try:
+            with httpx.Client(timeout=self._timeout + timeout) as client:
+                response = client.get(url, params=params)
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Telegram API error: {e.response.status_code} {e.response.text}")
+            return {"ok": False, "result": []}
+        except Exception as e:
+            logger.error(f"Error getting updates: {e}")
+            return {"ok": False, "result": []}
+
+    def send_message(
+        self,
+        token: str,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+        parse_mode: str | None = None,
+    ) -> dict[str, Any]:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Telegram API error: {e.response.status_code} {e.response.text}")
+            return {"ok": False, "description": str(e)}
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return {"ok": False, "description": "An unexpected error occurred."}
 
 
 @dataclass(slots=True)

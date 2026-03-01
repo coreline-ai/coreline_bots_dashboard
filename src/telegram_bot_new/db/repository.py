@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, delete, func, select, text, update
+from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from .models import (
     ActionToken,
+    AuditLog,
     Base,
     Bot,
     CliEvent,
@@ -74,6 +77,8 @@ class SessionView:
     chat_id: str
     adapter_name: str
     adapter_model: str | None
+    project_root: str | None
+    unsafe_until: int | None
     adapter_thread_id: str | None
     status: str
     rolling_summary_md: str
@@ -91,16 +96,18 @@ class Repository:
             use_advisory_lock = conn.dialect.name == "postgresql"
             if use_advisory_lock:
                 await conn.execute(text("SELECT pg_advisory_lock(:lock_key)"), {"lock_key": lock_key})
-            try:
-                await conn.run_sync(Base.metadata.create_all)
-                migrations_dir = Path(__file__).resolve().parent / "migrations"
-                if migrations_dir.exists() and migrations_dir.is_dir():
-                    for sql_path in sorted(migrations_dir.glob("*.sql")):
-                        sql_text = sql_path.read_text(encoding="utf-8")
-                        for statement in _split_sql_statements(sql_text):
-                            await conn.execute(text(statement))
-            finally:
-                if use_advisory_lock:
+            await conn.run_sync(Base.metadata.create_all)
+            migrations_dir = Path(__file__).resolve().parent / "migrations"
+            if migrations_dir.exists() and migrations_dir.is_dir():
+                for sql_path in sorted(migrations_dir.glob("*.sql")):
+                    sql_text = sql_path.read_text(encoding="utf-8")
+                    for statement in _split_sql_statements(sql_text):
+                        await _execute_migration_statement(conn=conn, statement=statement)
+            if use_advisory_lock:
+                # If a migration statement fails, this unlock call can fail due to
+                # transaction abort state. In that case, connection close will release
+                # the advisory lock; suppress unlock errors to preserve root cause.
+                with suppress(Exception):
                     await conn.execute(text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": lock_key})
 
     async def dispose(self) -> None:
@@ -186,36 +193,64 @@ class Repository:
         now: int,
         lease_duration_ms: int,
     ) -> LeasedTelegramUpdateJob | None:
+        is_postgres = self._engine.dialect.name == "postgresql"
         async with self._session_factory() as session:
             async with session.begin():
-                row = (
-                    await session.execute(
-                        text(
-                            """
-                            SELECT id, update_id
-                            FROM telegram_update_jobs
-                            WHERE bot_id = :bot_id
-                              AND available_at <= :now
-                              AND (
-                                status = 'queued'
-                                OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at < :now)
-                              )
-                            ORDER BY available_at ASC, created_at ASC
-                            FOR UPDATE SKIP LOCKED
-                            LIMIT 1
-                            """
+                claimable = and_(
+                    TelegramUpdateJob.bot_id == bot_id,
+                    TelegramUpdateJob.available_at <= now,
+                    or_(
+                        TelegramUpdateJob.status == "queued",
+                        and_(
+                            TelegramUpdateJob.status == "leased",
+                            TelegramUpdateJob.lease_expires_at.is_not(None),
+                            TelegramUpdateJob.lease_expires_at < now,
                         ),
-                        {"bot_id": bot_id, "now": now},
-                    )
-                ).first()
+                    ),
+                )
+                if is_postgres:
+                    row = (
+                        await session.execute(
+                            text(
+                                """
+                                SELECT id, update_id
+                                FROM telegram_update_jobs
+                                WHERE bot_id = :bot_id
+                                  AND available_at <= :now
+                                  AND (
+                                    status = 'queued'
+                                    OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at < :now)
+                                  )
+                                ORDER BY available_at ASC, created_at ASC
+                                FOR UPDATE SKIP LOCKED
+                                LIMIT 1
+                                """
+                            ),
+                            {"bot_id": bot_id, "now": now},
+                        )
+                    ).first()
+                else:
+                    row = (
+                        await session.execute(
+                            select(TelegramUpdateJob.id, TelegramUpdateJob.update_id)
+                            .where(claimable)
+                            .order_by(TelegramUpdateJob.available_at.asc(), TelegramUpdateJob.created_at.asc())
+                            .limit(1)
+                        )
+                    ).first()
 
                 if row is None:
                     return None
 
                 lease_until = now + lease_duration_ms
-                await session.execute(
+                claimed = await session.execute(
                     update(TelegramUpdateJob)
-                    .where(TelegramUpdateJob.id == row.id)
+                    .where(
+                        and_(
+                            TelegramUpdateJob.id == row.id,
+                            claimable if not is_postgres else text("1=1"),
+                        )
+                    )
                     .values(
                         status="leased",
                         lease_owner=owner,
@@ -224,6 +259,8 @@ class Repository:
                         updated_at=now,
                     )
                 )
+                if not is_postgres and int(claimed.rowcount or 0) <= 0:
+                    return None
 
                 return LeasedTelegramUpdateJob(id=str(row.id), update_id=int(row.update_id))
 
@@ -287,7 +324,22 @@ class Repository:
             result = await session.execute(
                 select(Session)
                 .where(and_(Session.bot_id == bot_id, Session.chat_id == chat_id))
-                .order_by(Session.updated_at.desc())
+                .order_by(
+                    case((Session.status == "active", 0), else_=1),
+                    Session.updated_at.desc(),
+                    Session.created_at.desc(),
+                    Session.session_id.desc(),
+                )
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_active_session(self, *, bot_id: str, chat_id: str) -> Session | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Session)
+                .where(and_(Session.bot_id == bot_id, Session.chat_id == chat_id, Session.status == "active"))
+                .order_by(Session.updated_at.desc(), Session.created_at.desc(), Session.session_id.desc())
                 .limit(1)
             )
             return result.scalar_one_or_none()
@@ -299,6 +351,8 @@ class Repository:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        project_root: str | None = None,
+        unsafe_until: int | None = None,
         now: int,
     ) -> SessionView:
         async with self._session_factory() as session:
@@ -316,6 +370,8 @@ class Repository:
                     chat_id=chat_id,
                     adapter_name=adapter_name,
                     adapter_model=adapter_model,
+                    project_root=project_root,
+                    unsafe_until=unsafe_until,
                     adapter_thread_id=None,
                     status="active",
                     rolling_summary_md="",
@@ -346,6 +402,8 @@ class Repository:
                 chat_id=found.chat_id,
                 adapter_name=found.adapter_name,
                 adapter_model=found.adapter_model,
+                project_root=found.project_root,
+                unsafe_until=found.unsafe_until,
                 adapter_thread_id=found.adapter_thread_id,
                 status=found.status,
                 rolling_summary_md=found.rolling_summary_md,
@@ -368,6 +426,8 @@ class Repository:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        project_root: str | None = None,
+        unsafe_until: int | None = None,
         now: int,
     ) -> SessionView:
         async with self._session_factory() as session:
@@ -377,6 +437,8 @@ class Repository:
                 chat_id=chat_id,
                 adapter_name=adapter_name,
                 adapter_model=adapter_model,
+                project_root=project_root,
+                unsafe_until=unsafe_until,
                 adapter_thread_id=None,
                 status="active",
                 rolling_summary_md="",
@@ -398,6 +460,8 @@ class Repository:
                 chat_id=entity.chat_id,
                 adapter_name=entity.adapter_name,
                 adapter_model=entity.adapter_model,
+                project_root=entity.project_root,
+                unsafe_until=entity.unsafe_until,
                 adapter_thread_id=entity.adapter_thread_id,
                 status=entity.status,
                 rolling_summary_md=entity.rolling_summary_md,
@@ -415,6 +479,8 @@ class Repository:
                 chat_id=found.chat_id,
                 adapter_name=found.adapter_name,
                 adapter_model=found.adapter_model,
+                project_root=found.project_root,
+                unsafe_until=found.unsafe_until,
                 adapter_thread_id=found.adapter_thread_id,
                 status=found.status,
                 rolling_summary_md=found.rolling_summary_md,
@@ -439,32 +505,118 @@ class Repository:
         now: int,
     ) -> None:
         async with self._session_factory() as session:
-            await session.execute(
-                update(Session)
-                .where(Session.session_id == session_id)
-                .values(
-                    adapter_name=adapter_name,
-                    adapter_model=adapter_model,
-                    adapter_thread_id=None,
-                    status="active",
-                    updated_at=now,
+            async with session.begin():
+                target = await session.get(Session, session_id)
+                if target is None:
+                    return
+                await session.execute(
+                    update(Session)
+                    .where(
+                        and_(
+                            Session.bot_id == target.bot_id,
+                            Session.chat_id == target.chat_id,
+                            Session.status == "active",
+                            Session.session_id != session_id,
+                        )
+                    )
+                    .values(status="reset", adapter_thread_id=None, updated_at=now)
                 )
-            )
-            await session.commit()
+                await session.execute(
+                    update(Session)
+                    .where(Session.session_id == session_id)
+                    .values(
+                        adapter_name=adapter_name,
+                        adapter_model=adapter_model,
+                        adapter_thread_id=None,
+                        status="active",
+                        updated_at=now,
+                    )
+                )
 
     async def set_session_model(self, *, session_id: str, adapter_model: str | None, now: int) -> None:
         async with self._session_factory() as session:
-            await session.execute(
-                update(Session)
-                .where(Session.session_id == session_id)
-                .values(
-                    adapter_model=adapter_model,
-                    adapter_thread_id=None,
-                    status="active",
-                    updated_at=now,
+            async with session.begin():
+                target = await session.get(Session, session_id)
+                if target is None:
+                    return
+                await session.execute(
+                    update(Session)
+                    .where(
+                        and_(
+                            Session.bot_id == target.bot_id,
+                            Session.chat_id == target.chat_id,
+                            Session.status == "active",
+                            Session.session_id != session_id,
+                        )
+                    )
+                    .values(status="reset", adapter_thread_id=None, updated_at=now)
                 )
-            )
-            await session.commit()
+                await session.execute(
+                    update(Session)
+                    .where(Session.session_id == session_id)
+                    .values(
+                        adapter_model=adapter_model,
+                        adapter_thread_id=None,
+                        status="active",
+                        updated_at=now,
+                    )
+                )
+
+    async def set_session_project_root(self, *, session_id: str, project_root: str | None, now: int) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                target = await session.get(Session, session_id)
+                if target is None:
+                    return
+                await session.execute(
+                    update(Session)
+                    .where(
+                        and_(
+                            Session.bot_id == target.bot_id,
+                            Session.chat_id == target.chat_id,
+                            Session.status == "active",
+                            Session.session_id != session_id,
+                        )
+                    )
+                    .values(status="reset", adapter_thread_id=None, updated_at=now)
+                )
+                await session.execute(
+                    update(Session)
+                    .where(Session.session_id == session_id)
+                    .values(
+                        project_root=project_root,
+                        status="active",
+                        updated_at=now,
+                    )
+                )
+
+    async def set_session_unsafe_until(self, *, session_id: str, unsafe_until: int | None, now: int) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                target = await session.get(Session, session_id)
+                if target is None:
+                    return
+                await session.execute(
+                    update(Session)
+                    .where(
+                        and_(
+                            Session.bot_id == target.bot_id,
+                            Session.chat_id == target.chat_id,
+                            Session.status == "active",
+                            Session.session_id != session_id,
+                        )
+                    )
+                    .values(status="reset", adapter_thread_id=None, updated_at=now)
+                )
+                await session.execute(
+                    update(Session)
+                    .where(Session.session_id == session_id)
+                    .values(
+                        unsafe_until=unsafe_until,
+                        status="active",
+                        updated_at=now,
+                    )
+                )
 
     async def upsert_session_summary(self, *, session_id: str, bot_id: str, turn_id: str, summary_md: str, now: int) -> None:
         async with self._session_factory() as session:
@@ -541,40 +693,68 @@ class Repository:
         return turn_id
 
     async def lease_next_run_job(self, *, bot_id: str, owner: str, now: int, lease_duration_ms: int) -> LeasedRunJob | None:
+        is_postgres = self._engine.dialect.name == "postgresql"
         async with self._session_factory() as session:
             async with session.begin():
-                row = (
-                    await session.execute(
-                        text(
-                            """
-                            SELECT id, turn_id, chat_id
-                            FROM cli_run_jobs
-                            WHERE bot_id = :bot_id
-                              AND available_at <= :now
-                              AND (
-                                status = 'queued'
-                                OR (
-                                  status IN ('leased', 'in_flight')
-                                  AND lease_expires_at IS NOT NULL
-                                  AND lease_expires_at < :now
-                                )
-                              )
-                            ORDER BY available_at ASC, created_at ASC
-                            FOR UPDATE SKIP LOCKED
-                            LIMIT 1
-                            """
+                claimable = and_(
+                    CliRunJob.bot_id == bot_id,
+                    CliRunJob.available_at <= now,
+                    or_(
+                        CliRunJob.status == "queued",
+                        and_(
+                            CliRunJob.status.in_(["leased", "in_flight"]),
+                            CliRunJob.lease_expires_at.is_not(None),
+                            CliRunJob.lease_expires_at < now,
                         ),
-                        {"bot_id": bot_id, "now": now},
-                    )
-                ).first()
+                    ),
+                )
+                if is_postgres:
+                    row = (
+                        await session.execute(
+                            text(
+                                """
+                                SELECT id, turn_id, chat_id
+                                FROM cli_run_jobs
+                                WHERE bot_id = :bot_id
+                                  AND available_at <= :now
+                                  AND (
+                                    status = 'queued'
+                                    OR (
+                                      status IN ('leased', 'in_flight')
+                                      AND lease_expires_at IS NOT NULL
+                                      AND lease_expires_at < :now
+                                    )
+                                  )
+                                ORDER BY available_at ASC, created_at ASC
+                                FOR UPDATE SKIP LOCKED
+                                LIMIT 1
+                                """
+                            ),
+                            {"bot_id": bot_id, "now": now},
+                        )
+                    ).first()
+                else:
+                    row = (
+                        await session.execute(
+                            select(CliRunJob.id, CliRunJob.turn_id, CliRunJob.chat_id)
+                            .where(claimable)
+                            .order_by(CliRunJob.available_at.asc(), CliRunJob.created_at.asc())
+                            .limit(1)
+                        )
+                    ).first()
 
                 if row is None:
                     return None
 
                 lease_until = now + lease_duration_ms
-                await session.execute(
+                claimed = await session.execute(
                     update(CliRunJob)
-                    .where(CliRunJob.id == row.id)
+                    .where(
+                        and_(
+                            CliRunJob.id == row.id,
+                            claimable if not is_postgres else text("1=1"),
+                        )
+                    )
                     .values(
                         status="leased",
                         lease_owner=owner,
@@ -583,6 +763,8 @@ class Repository:
                         updated_at=now,
                     )
                 )
+                if not is_postgres and int(claimed.rowcount or 0) <= 0:
+                    return None
                 await session.execute(
                     update(Turn)
                     .where(Turn.turn_id == row.turn_id)
@@ -699,6 +881,37 @@ class Repository:
 
     async def append_cli_event(self, *, turn_id: str, bot_id: str, seq: int, event_type: str, payload_json: str, now: int) -> None:
         async with self._session_factory() as session:
+            # SQLite may carry legacy cli_events schemas where `id` is not an
+            # auto-incrementing INTEGER PRIMARY KEY. In that case, assign id
+            # explicitly to keep event ingestion stable.
+            if self._engine.dialect.name == "sqlite":
+                for _ in range(3):
+                    next_id = int(
+                        (
+                            await session.execute(
+                                select(func.coalesce(func.max(CliEvent.id), 0) + 1)
+                            )
+                        ).scalar_one()
+                    )
+                    session.add(
+                        CliEvent(
+                            id=next_id,
+                            turn_id=turn_id,
+                            bot_id=bot_id,
+                            seq=seq,
+                            event_type=event_type,
+                            payload_json=payload_json,
+                            created_at=now,
+                        )
+                    )
+                    try:
+                        await session.commit()
+                        return
+                    except IntegrityError:
+                        await session.rollback()
+                        continue
+                raise RuntimeError("failed to append cli event after retries")
+
             session.add(
                 CliEvent(
                     turn_id=turn_id,
@@ -884,17 +1097,32 @@ class Repository:
 
                 row = (
                     await session.execute(
-                        select(DeferredButtonAction)
-                        .where(
-                            and_(
-                                DeferredButtonAction.bot_id == bot_id,
-                                DeferredButtonAction.chat_id == chat_id,
-                                DeferredButtonAction.status == "queued",
+                        (
+                            select(DeferredButtonAction)
+                            .where(
+                                and_(
+                                    DeferredButtonAction.bot_id == bot_id,
+                                    DeferredButtonAction.chat_id == chat_id,
+                                    DeferredButtonAction.status == "queued",
+                                )
                             )
+                            .order_by(DeferredButtonAction.created_at.asc())
+                            .with_for_update(skip_locked=True)
+                            .limit(1)
                         )
-                        .order_by(DeferredButtonAction.created_at.asc())
-                        .with_for_update(skip_locked=True)
-                        .limit(1)
+                        if self._engine.dialect.name == "postgresql"
+                        else (
+                            select(DeferredButtonAction)
+                            .where(
+                                and_(
+                                    DeferredButtonAction.bot_id == bot_id,
+                                    DeferredButtonAction.chat_id == chat_id,
+                                    DeferredButtonAction.status == "queued",
+                                )
+                            )
+                            .order_by(DeferredButtonAction.created_at.asc())
+                            .limit(1)
+                        )
                     )
                 ).scalar_one_or_none()
 
@@ -1029,6 +1257,60 @@ class Repository:
                 },
             }
 
+    async def list_audit_logs(
+        self,
+        *,
+        bot_id: str,
+        chat_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        resolved_limit = max(1, min(int(limit), 500))
+        async with self._session_factory() as session:
+            query = select(AuditLog).where(AuditLog.bot_id == bot_id)
+            if chat_id is not None:
+                query = query.where(AuditLog.chat_id == chat_id)
+            query = query.order_by(AuditLog.created_at.desc()).limit(resolved_limit)
+            rows = (await session.execute(query)).scalars().all()
+        return [
+            {
+                "id": str(row.id),
+                "bot_id": str(row.bot_id),
+                "chat_id": str(row.chat_id) if row.chat_id is not None else None,
+                "session_id": str(row.session_id) if row.session_id is not None else None,
+                "action": str(row.action),
+                "result": str(row.result),
+                "detail_json": row.detail_json,
+                "created_at": int(row.created_at),
+            }
+            for row in rows
+        ]
+
+    async def append_audit_log(
+        self,
+        *,
+        bot_id: str,
+        chat_id: str | None,
+        session_id: str | None,
+        action: str,
+        result: str,
+        detail_json: str | None,
+        now: int,
+    ) -> None:
+        async with self._session_factory() as session:
+            session.add(
+                AuditLog(
+                    id=str(uuid4()),
+                    bot_id=bot_id,
+                    chat_id=chat_id,
+                    session_id=session_id,
+                    action=action[:64],
+                    result=result[:32],
+                    detail_json=detail_json[:4000] if isinstance(detail_json, str) else None,
+                    created_at=now,
+                )
+            )
+            await session.commit()
+
 
 def create_repository(database_url: str) -> Repository:
     engine = create_async_engine(database_url, pool_pre_ping=True)
@@ -1059,3 +1341,43 @@ def _split_sql_statements(sql_text: str) -> list[str]:
             statements.append(statement)
 
     return statements
+
+
+_SQLITE_ADD_COLUMN_IF_NOT_EXISTS_RE = re.compile(
+    r"^\s*ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.+?)\s*$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parse_sqlite_add_column_if_not_exists(statement: str) -> tuple[str, str, str] | None:
+    match = _SQLITE_ADD_COLUMN_IF_NOT_EXISTS_RE.match(statement.strip())
+    if match is None:
+        return None
+    table_name = match.group(1)
+    column_name = match.group(2)
+    column_def = match.group(3).strip()
+    if not column_def:
+        return None
+    return table_name, column_name, column_def
+
+
+async def _execute_migration_statement(*, conn: Any, statement: str) -> None:
+    sqlite_add_column = None
+    if conn.dialect.name == "sqlite":
+        sqlite_add_column = _parse_sqlite_add_column_if_not_exists(statement)
+
+    if sqlite_add_column is None:
+        await conn.execute(text(statement))
+        return
+
+    table_name, column_name, column_def = sqlite_add_column
+    pragma_result = await conn.execute(text(f"PRAGMA table_info({table_name})"))
+    rows = pragma_result.fetchall()
+    existing_columns = {
+        str(getattr(row, "_mapping", {}).get("name", row[1] if len(row) > 1 else "")).strip().lower()
+        for row in rows
+    }
+    if column_name.lower() in existing_columns:
+        return
+
+    await conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"))

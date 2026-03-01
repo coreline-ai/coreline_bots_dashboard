@@ -109,3 +109,61 @@ def test_load_bots_config_parses_provider_models(tmp_path: Path) -> None:
     assert bots[0].gemini.model == "gemini-2.5-pro"
     assert bots[0].claude.model == "claude-sonnet-4-5"
     assert bots[0].codex.model is None
+
+
+def test_load_bots_config_rejects_duplicate_tokens(tmp_path: Path) -> None:
+    config = tmp_path / "bots.yaml"
+    config.write_text(
+        "bots:\n"
+        "  - bot_id: bot-a\n"
+        "    telegram_token: 'dup-token'\n"
+        "  - bot_id: bot-b\n"
+        "    telegram_token: 'dup-token'\n",
+        encoding="utf-8",
+    )
+    settings = GlobalSettings(_env_file=None, DATABASE_URL="postgresql+asyncpg://u:p@127.0.0.1:5432/db")
+
+    with pytest.raises(ValueError, match="duplicate telegram_token"):
+        load_bots_config(config, settings)
+
+
+def test_strict_bot_db_isolation_rejects_missing_database_url(tmp_path: Path) -> None:
+    config = tmp_path / "bots.yaml"
+    config.write_text(
+        "bots:\n"
+        "  - bot_id: bot-a\n"
+        "    telegram_token: 'token-a'\n"
+        "  - bot_id: bot-b\n"
+        "    telegram_token: 'token-b'\n",
+        encoding="utf-8",
+    )
+    settings = GlobalSettings(
+        _env_file=None,
+        DATABASE_URL="postgresql+asyncpg://u:p@127.0.0.1:5432/db",
+        STRICT_BOT_DB_ISOLATION=True,
+    )
+
+    with pytest.raises(ValueError, match="strict bot db isolation"):
+        load_bots_config(config, settings)
+
+
+def test_strict_bot_db_isolation_allows_explicit_database_urls(tmp_path: Path) -> None:
+    config = tmp_path / "bots.yaml"
+    config.write_text(
+        "bots:\n"
+        "  - bot_id: bot-a\n"
+        "    telegram_token: 'token-a'\n"
+        "    database_url: 'sqlite+aiosqlite:////tmp/bot-a.db'\n"
+        "  - bot_id: bot-b\n"
+        "    telegram_token: 'token-b'\n"
+        "    database_url: 'sqlite+aiosqlite:////tmp/bot-b.db'\n",
+        encoding="utf-8",
+    )
+    settings = GlobalSettings(
+        _env_file=None,
+        DATABASE_URL="postgresql+asyncpg://u:p@127.0.0.1:5432/db",
+        STRICT_BOT_DB_ISOLATION=True,
+    )
+
+    bots = load_bots_config(config, settings)
+    assert len(bots) == 2

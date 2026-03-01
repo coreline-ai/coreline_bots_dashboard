@@ -6,10 +6,11 @@ from telegram_bot_new.adapters.codex_adapter import CodexAdapter
 
 @pytest.mark.asyncio
 async def test_run_new_turn_builds_expected_codex_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, list[str]] = {}
+    captured: dict[str, object] = {}
 
-    async def fake_run_process(self: CodexAdapter, args: list[str], should_cancel):
+    async def fake_run_process(self: CodexAdapter, args: list[str], should_cancel, workdir=None):
         captured["args"] = args
+        captured["workdir"] = workdir
         if False:
             yield
 
@@ -31,20 +32,24 @@ async def test_run_new_turn_builds_expected_codex_command(monkeypatch: pytest.Mo
         "exec",
         "--json",
         "--skip-git-repo-check",
+        "-c",
+        'model_reasoning_effort="high"',
         "-m",
         "gpt-5",
         "-s",
         "danger-full-access",
         "memory\n\n[User Message]\nhello",
     ]
+    assert captured["workdir"] is None
 
 
 @pytest.mark.asyncio
 async def test_run_resume_turn_builds_expected_codex_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, list[str]] = {}
+    captured: dict[str, object] = {}
 
-    async def fake_run_process(self: CodexAdapter, args: list[str], should_cancel):
+    async def fake_run_process(self: CodexAdapter, args: list[str], should_cancel, workdir=None):
         captured["args"] = args
+        captured["workdir"] = workdir
         if False:
             yield
 
@@ -67,6 +72,8 @@ async def test_run_resume_turn_builds_expected_codex_command(monkeypatch: pytest
         "exec",
         "--json",
         "--skip-git-repo-check",
+        "-c",
+        'model_reasoning_effort="high"',
         "-m",
         "gpt-5",
         "-s",
@@ -75,6 +82,7 @@ async def test_run_resume_turn_builds_expected_codex_command(monkeypatch: pytest
         "thread-1",
         "memory\n\n[User Message]\ncontinue",
     ]
+    assert captured["workdir"] is None
 
 
 def test_normalize_codex_events() -> None:

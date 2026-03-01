@@ -46,6 +46,8 @@ class FakeSessionService:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        project_root: str | None = None,
+        unsafe_until: int | None = None,
         now: int,
     ) -> FakeSession:
         return FakeSession(session_id="session-1")
@@ -57,6 +59,8 @@ class FakeSessionService:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        project_root: str | None = None,
+        unsafe_until: int | None = None,
         now: int,
     ) -> FakeSession:
         return FakeSession(session_id="session-new")
@@ -76,6 +80,8 @@ class FakeSessionServiceForMode:
         self.session_id = "session-1"
         self.adapter_name = adapter_name
         self.adapter_model = "gpt-5" if adapter_name == "codex" else None
+        self.project_root: str | None = None
+        self.unsafe_until: int | None = None
         self.summary_preview = "summary"
         self.last_create_new_adapter: str | None = None
         self.last_create_new_model: str | None = None
@@ -87,10 +93,14 @@ class FakeSessionServiceForMode:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        project_root: str | None = None,
+        unsafe_until: int | None = None,
         now: int,
     ):
         self.adapter_name = adapter_name
         self.adapter_model = adapter_model
+        self.project_root = project_root
+        self.unsafe_until = unsafe_until
         return SimpleNamespace(session_id=self.session_id)
 
     async def create_new(
@@ -100,12 +110,16 @@ class FakeSessionServiceForMode:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        project_root: str | None = None,
+        unsafe_until: int | None = None,
         now: int,
     ):
         self.last_create_new_adapter = adapter_name
         self.last_create_new_model = adapter_model
         self.adapter_name = adapter_name
         self.adapter_model = adapter_model
+        self.project_root = project_root
+        self.unsafe_until = unsafe_until
         self.session_id = "session-new"
         return SimpleNamespace(session_id=self.session_id)
 
@@ -114,6 +128,8 @@ class FakeSessionServiceForMode:
             session_id=self.session_id,
             adapter_name=self.adapter_name,
             adapter_model=self.adapter_model,
+            project_root=self.project_root,
+            unsafe_until=self.unsafe_until,
             adapter_thread_id=None,
             summary_preview=self.summary_preview,
         )
@@ -134,6 +150,12 @@ class FakeSessionServiceForMode:
 
     async def set_model(self, *, session_id: str, adapter_model: str | None, now: int) -> None:
         self.adapter_model = adapter_model
+
+    async def set_project_root(self, *, session_id: str, project_root: str | None, now: int) -> None:
+        self.project_root = project_root
+
+    async def set_unsafe_until(self, *, session_id: str, unsafe_until: int | None, now: int) -> None:
+        self.unsafe_until = unsafe_until
 
     async def get_summary(self, *, bot_id: str, chat_id: str) -> str:
         return "summary"
@@ -238,6 +260,7 @@ class FakeRepoSession:
 class FakeRepo:
     def __init__(self) -> None:
         self.metrics: list[tuple[str, str]] = []
+        self.audit_logs: list[dict] = []
 
     async def get_session_view(self, *, session_id: str):
         return FakeRepoSession(session_id=session_id)
@@ -250,6 +273,29 @@ class FakeRepo:
 
     async def increment_runtime_metric(self, *, bot_id: str, metric_key: str, now: int, delta: int = 1) -> None:
         self.metrics.append((bot_id, metric_key))
+
+    async def append_audit_log(
+        self,
+        *,
+        bot_id: str,
+        chat_id: str | None,
+        session_id: str | None,
+        action: str,
+        result: str,
+        detail_json: str | None,
+        now: int,
+    ) -> None:
+        self.audit_logs.append(
+            {
+                "bot_id": bot_id,
+                "chat_id": chat_id,
+                "session_id": session_id,
+                "action": action,
+                "result": result,
+                "detail_json": detail_json,
+                "now": now,
+            }
+        )
 
 
 @pytest.mark.asyncio
@@ -801,6 +847,179 @@ async def test_status_uses_session_model_when_present() -> None:
     text = client.messages[-1][1]
     assert "adapter=gemini" in text
     assert "model=gemini-2.5-flash" in text
+    assert "project=default" in text
+    assert "unsafe_until=off" in text
+
+
+@pytest.mark.asyncio
+async def test_project_without_argument_shows_current_and_usage() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="gemini")
+    session_service.project_root = "/tmp/project-a"
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="gemini", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 171,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 171, "text": "/project"},
+    }
+    await handler.handle_update_payload(payload, now_ms=171)
+
+    text = client.messages[-1][1]
+    assert "project=/tmp/project-a" in text
+    assert "usage: /project" in text
+
+
+@pytest.mark.asyncio
+async def test_project_updates_session_workdir(tmp_path) -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="codex", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 172,
+        "message": {
+            "chat": {"id": 100},
+            "from": {"id": 999},
+            "message_id": 172,
+            "text": f"/project {tmp_path}",
+        },
+    }
+    await handler.handle_update_payload(payload, now_ms=172)
+
+    assert session_service.project_root == str(tmp_path.resolve())
+    assert "project updated: default ->" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_project_switch_is_blocked_when_run_is_active(tmp_path) -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    run_service = FakeRunService()
+    run_service.has_active = True
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="codex", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=run_service,
+    )
+
+    payload = {
+        "update_id": 173,
+        "message": {
+            "chat": {"id": 100},
+            "from": {"id": 999},
+            "message_id": 173,
+            "text": f"/project {tmp_path}",
+        },
+    }
+    await handler.handle_update_payload(payload, now_ms=173)
+
+    assert "Use /stop first" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_unsafe_without_argument_shows_current_and_usage() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    session_service.unsafe_until = 12345
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="codex", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 174,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 174, "text": "/unsafe"},
+    }
+    await handler.handle_update_payload(payload, now_ms=174)
+
+    text = client.messages[-1][1]
+    assert "unsafe_until=12345" in text
+    assert "usage: /unsafe on" in text
+
+
+@pytest.mark.asyncio
+async def test_unsafe_updates_session_with_ttl() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="codex", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 175,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 175, "text": "/unsafe on 15"},
+    }
+    await handler.handle_update_payload(payload, now_ms=1_000)
+
+    assert session_service.unsafe_until == 1_000 + (15 * 60 * 1000)
+    assert "unsafe updated: off ->" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_unsafe_switch_is_blocked_when_run_is_active() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    run_service = FakeRunService()
+    run_service.has_active = True
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="codex", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=run_service,
+    )
+
+    payload = {
+        "update_id": 176,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 176, "text": "/unsafe on"},
+    }
+    await handler.handle_update_payload(payload, now_ms=176)
+
+    assert "Use /stop first" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_project_command_appends_audit_log(tmp_path) -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    repo = FakeRepo()
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="codex", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+        repository=repo,
+    )
+
+    payload = {
+        "update_id": 177,
+        "message": {
+            "chat": {"id": 100},
+            "from": {"id": 999},
+            "message_id": 177,
+            "text": f"/project {tmp_path}",
+        },
+    }
+    await handler.handle_update_payload(payload, now_ms=177)
+
+    assert repo.audit_logs
+    assert repo.audit_logs[-1]["action"] == "session.set_project"
+    assert repo.audit_logs[-1]["result"] == "success"
 
 
 @pytest.mark.asyncio

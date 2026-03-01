@@ -1,15 +1,16 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
-@dataclass(slots=True)
+@dataclass
 class SummaryInput:
     previous_summary: str
     user_text: str
     assistant_text: str
     command_notes: list[str]
-    error_text: str | None
+    error_text: Optional[str]
 
 
 class SummaryService:

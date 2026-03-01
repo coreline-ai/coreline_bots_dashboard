@@ -620,6 +620,15 @@ button:disabled {
   font-family: "Fira Code", "SFMono-Regular", Menlo, monospace;
 }
 
+.bot-item-meta-unsafe {
+  margin-top: 2px;
+  font-weight: 700;
+}
+
+.bot-item-meta-unsafe.is-active {
+  color: #b45309;
+}
+
 .bot-item-empty {
   padding: 10px;
   border: 1px dashed var(--line-strong);
@@ -1290,8 +1299,18 @@ pre {
 
 #diagnostics-json,
 #state-json,
-#threads-json {
+#threads-json,
+#audit-json {
   max-height: 24vh;
+}
+
+.audit-error {
+  min-height: 16px;
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: #b91c1c;
+  font-family: "Fira Code", "SFMono-Regular", Menlo, monospace;
+  word-break: break-word;
 }
 
 dialog {
