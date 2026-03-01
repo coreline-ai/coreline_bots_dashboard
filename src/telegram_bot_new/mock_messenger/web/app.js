@@ -40,6 +40,10 @@ const debateTurns = document.getElementById("debate-turns");
 const debateErrors = document.getElementById("debate-errors");
 const debateStopBtn = document.getElementById("debate-stop-btn");
 const toggleDebatePanelBtn = document.getElementById("toggle-debate-panel-btn");
+const towerMeta = document.getElementById("tower-meta");
+const towerList = document.getElementById("tower-list");
+const towerRefreshBtn = document.getElementById("tower-refresh-btn");
+const runtimeProfileMeta = document.getElementById("runtime-profile-meta");
 const profileDialog = document.getElementById("profile-dialog");
 const profileForm = document.getElementById("profile-form");
 const profileLabelInput = document.getElementById("profile-label-input");
@@ -92,6 +96,8 @@ const COMMAND_CATALOG = [
   { command: "/summary", usage: "/summary", nameKo: "요약 보기", description: "누적 요약(rolling summary)을 출력합니다." },
   { command: "/mode", usage: "/mode ", nameKo: "에이전트 전환", description: "codex/gemini/claude 모드 조회 또는 전환합니다." },
   { command: "/model", usage: "/model ", nameKo: "모델 전환", description: "현재 provider의 모델 조회 또는 전환합니다." },
+  { command: "/skills", usage: "/skills", nameKo: "스킬 목록", description: "설치된 스킬 목록을 확인합니다." },
+  { command: "/skill", usage: "/skill ", nameKo: "스킬 적용", description: "현재 세션에 스킬을 적용/해제합니다." },
   { command: "/project", usage: "/project ", nameKo: "프로젝트 경로", description: "세션 작업 경로를 조회/변경합니다." },
   { command: "/unsafe", usage: "/unsafe ", nameKo: "Unsafe 모드", description: "시간 제한 unsafe 모드를 on/off 합니다." },
   { command: "/providers", usage: "/providers", nameKo: "제공자 상태", description: "CLI 제공자 설치 여부와 기본 모델을 확인합니다." },
@@ -132,6 +138,7 @@ let catalog = [];
 let catalogByBotId = new Map();
 let profileDiagnostics = new Map();
 let projectCatalog = [];
+let skillCatalog = [];
 let uiState = {
   selected_profile_id: null,
   profiles: [],
@@ -142,6 +149,7 @@ let parallelSendBusy = false;
 let debateBusy = false;
 let debatePollingTimer = null;
 let debateLastStatus = "";
+let towerRecoverBusy = false;
 const profileModelApplyBusy = new Set();
 
 function makeProfileId() {
@@ -241,6 +249,18 @@ function normalizeProjectPath(value) {
   return String(value || "").trim();
 }
 
+function normalizeSkillId(value) {
+  return String(value || "").trim();
+}
+
+function resolveProfileSkill(profile, diagnostics) {
+  const diagnosticSkill = normalizeSkillId(diagnostics?.session?.current_skill);
+  if (diagnosticSkill) {
+    return diagnosticSkill;
+  }
+  return normalizeSkillId(profile?.selected_skill);
+}
+
 function resolveProfileProject(profile, diagnostics) {
   const diagnosticProject = normalizeProjectPath(diagnostics?.session?.current_project);
   if (diagnosticProject) {
@@ -317,6 +337,7 @@ function loadState() {
             selected_for_parallel: profile.selected_for_parallel !== false,
             selected_provider: String(profile.selected_provider || ""),
             selected_model: String(profile.selected_model || ""),
+            selected_skill: String(profile.selected_skill || ""),
             selected_project: String(profile.selected_project || "")
           }))
           .filter((profile) => profile.token || profile.bot_id)
@@ -485,6 +506,7 @@ function upsertCurrentProfileFromInputs() {
     profile.bot_id = "";
     profile.selected_provider = "";
     profile.selected_model = "";
+    profile.selected_skill = "";
     profile.selected_project = "";
   }
   saveState();
@@ -509,12 +531,14 @@ function buildStatusChips(profile, diagnostics) {
   const agent = String(session.current_agent || "unknown").toLowerCase();
   const model = String(session.current_model || "default");
   const project = String(session.current_project || "default");
+  const skill = String(session.current_skill || "off");
   const unsafe = formatUnsafeRemaining(session.unsafe_until);
   const runStatus = String(session.run_status || "idle").toLowerCase();
   const rows = [
     { key: "bot", value: profile?.bot_id || "none", extraClass: "" },
     { key: "agent", value: agent, extraClass: `status-chip--agent-${agent}` },
     { key: "model", value: model, extraClass: "" },
+    { key: "skill", value: skill, extraClass: "" },
     { key: "project", value: project, extraClass: "" },
     { key: "unsafe", value: unsafe, extraClass: unsafe === "off" ? "" : "status-chip--agent-claude" },
     { key: "thread", value: session.thread_id || "none", extraClass: "" },
@@ -716,6 +740,142 @@ function renderDebatePanel(snapshot) {
   setDebateBusy(isActive);
 }
 
+function renderControlTowerPanel(payload) {
+  if (!towerMeta || !towerList) {
+    return;
+  }
+  const summary = payload && typeof payload === "object" ? payload.summary : null;
+  const rows = payload && typeof payload === "object" && Array.isArray(payload.rows) ? payload.rows : [];
+  if (!summary) {
+    towerMeta.textContent = "집계 대기 중";
+  } else {
+    towerMeta.textContent = `healthy=${Number(summary.healthy || 0)} · degraded=${Number(summary.degraded || 0)} · failing=${Number(summary.failing || 0)} · total=${Number(summary.total || rows.length)}`;
+  }
+  towerList.innerHTML = "";
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "tower-row";
+    empty.textContent = "집계된 봇이 없습니다.";
+    towerList.appendChild(empty);
+    return;
+  }
+  for (const row of rows) {
+    const botId = String(row.bot_id || "");
+    const state = String(row.state || "healthy").toLowerCase();
+    const reason = String(row.reason || "steady");
+    const action = String(row.recommended_action || "none");
+    const runStatus = String(row.run_status || "idle");
+    const turnTotalRecent = Number(row.turn_total_recent || 0);
+    const turnSuccessRateRecent = row.turn_success_rate_recent;
+    const item = document.createElement("div");
+    item.className = "tower-row";
+
+    const head = document.createElement("div");
+    head.className = "tower-row-head";
+    const label = document.createElement("span");
+    label.textContent = `${String(row.name || botId)} (${botId})`;
+    const badge = document.createElement("span");
+    badge.className = `tower-row-state state-${state}`;
+    badge.textContent = state;
+    head.appendChild(label);
+    head.appendChild(badge);
+
+    const detail = document.createElement("div");
+    detail.className = "tower-row-detail";
+    const detailParts = [`reason=${reason}`, `run=${runStatus}`, `action=${action}`];
+    if (turnTotalRecent > 0 && Number.isFinite(Number(turnSuccessRateRecent))) {
+      detailParts.push(`turns=${turnTotalRecent}`);
+      detailParts.push(`success=${Number(turnSuccessRateRecent).toFixed(1)}%`);
+    }
+    detail.textContent = detailParts.join(" · ");
+
+    item.appendChild(head);
+    item.appendChild(detail);
+
+    if (action === "stop_run" || action === "restart_session") {
+      const actions = document.createElement("div");
+      actions.className = "tower-row-actions";
+      const recoverBtn = document.createElement("button");
+      recoverBtn.type = "button";
+      recoverBtn.className = "tower-recover-btn";
+      recoverBtn.textContent = action === "restart_session" ? "복구(/stop+/new)" : "복구(/stop)";
+      recoverBtn.dataset.botId = botId;
+      recoverBtn.dataset.strategy = action;
+      recoverBtn.disabled = towerRecoverBusy;
+      actions.appendChild(recoverBtn);
+      item.appendChild(actions);
+    }
+
+    towerList.appendChild(item);
+  }
+}
+
+async function refreshControlTower() {
+  if (!towerMeta || !towerList) {
+    return;
+  }
+  try {
+    const response = await requestJson("/_mock/control_tower");
+    renderControlTowerPanel(response?.result || null);
+  } catch (error) {
+    towerMeta.textContent = `control tower error: ${error.message}`;
+  }
+}
+
+async function refreshRuntimeProfile() {
+  if (!runtimeProfileMeta) {
+    return;
+  }
+  try {
+    const response = await requestJson("/_mock/runtime_profile");
+    const result = response?.result || {};
+    const effective = Number(result.effective_bots || 0);
+    const source = Number(result.source_bots || effective);
+    const maxBots = result.max_bots == null ? "none" : String(result.max_bots);
+    const capped = Boolean(result.is_capped);
+    runtimeProfileMeta.textContent = `runtime: effective=${effective}/${source} · max_bots=${maxBots} · capped=${capped ? "yes" : "no"}`;
+  } catch (error) {
+    runtimeProfileMeta.textContent = `runtime profile error: ${error.message}`;
+  }
+}
+
+async function recoverControlTowerBot(botId, strategy) {
+  if (!botId || towerRecoverBusy) {
+    return;
+  }
+  const profile = uiState.profiles.find((item) => String(item.bot_id || "") === String(botId));
+  const fallbackProfile = currentProfile();
+  const chatId = profile ? Number(profile.chat_id) : Number(fallbackProfile?.chat_id || chatIdInput.value || 1001);
+  const userId = profile ? Number(profile.user_id) : Number(fallbackProfile?.user_id || userIdInput.value || 9001);
+  const body = {
+    bot_id: String(botId),
+    chat_id: Number.isFinite(chatId) ? chatId : 1001,
+    user_id: Number.isFinite(userId) ? userId : 9001,
+    strategy: String(strategy || "stop_run"),
+  };
+  if (profile && profile.token) {
+    body.token = String(profile.token);
+  }
+  towerRecoverBusy = true;
+  try {
+    const response = await requestJson("/_mock/control_tower/recover", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const result = response?.result || {};
+    appendBubble(
+      "meta",
+      `control recover: bot=${result.bot_id || botId} strategy=${result.strategy || strategy} state=${result.state || "unknown"}`
+    );
+  } catch (error) {
+    appendBubble("meta", `control recover error: ${error.message}`);
+  } finally {
+    towerRecoverBusy = false;
+    await refreshControlTower();
+    await refresh();
+  }
+}
+
 function syncWebhookFormFromProfile(profile) {
   if (!profile) {
     return;
@@ -793,9 +953,11 @@ function buildBotListRenderKey() {
         selected,
         profile.selected_provider || "",
         profile.selected_model || "",
+        profile.selected_skill || "",
         profile.selected_project || "",
         provider,
         model,
+        String(session.current_skill || ""),
         project,
         unsafeUntil,
         runStatus,
@@ -939,6 +1101,37 @@ async function applyProfileModelOnly(profile, model) {
   }
 }
 
+async function applyProfileSkill(profile, skillId) {
+  const profileId = String(profile?.profile_id || "");
+  if (!profileId || isProfileModelApplyBusy(profileId)) {
+    return false;
+  }
+  const previousSkill = String(profile.selected_skill || "");
+  setProfileModelApplyBusy(profileId, true);
+  try {
+    await stopActiveRunBeforeModelApply(profile);
+    const baseline = await maxMessageIdForProfile(profile);
+    const command = skillId ? `/skill ${skillId}` : "/skill off";
+    await sendTextToProfile(profile, command);
+    const outcome = await waitForCommandOutcome(profile, baseline, "skill", 30);
+    if (outcome.status !== "PASS") {
+      throw new Error(`skill change failed: ${outcome.detail}`);
+    }
+    profile.selected_skill = String(skillId || "");
+    saveState();
+    await refresh();
+    return true;
+  } catch (error) {
+    profile.selected_skill = previousSkill;
+    saveState();
+    appendBubble("meta", `${profile.label}: ${error.message}`);
+    await refresh();
+    return false;
+  } finally {
+    setProfileModelApplyBusy(profileId, false);
+  }
+}
+
 async function stopActiveRunBeforeModelApply(profile) {
   const stopBaseline = await maxMessageIdForProfile(profile);
   await sendTextToProfile(profile, "/stop");
@@ -1006,11 +1199,13 @@ function renderBotList(force = false) {
     const provider = resolveProfileProvider(profile, diag, catalogRow);
     const modelOptions = availableModelsForProvider(catalogRow, provider);
     const model = resolveProfileModel(profile, diag, catalogRow, provider);
+    const currentSkill = resolveProfileSkill(profile, diag);
     const unsafeLabel = formatUnsafeRemaining(session.unsafe_until);
     const applyingModel = isProfileModelApplyBusy(profile.profile_id);
     const controlsDisabled = applyingModel || parallelSendBusy || debateBusy;
     profile.selected_provider = provider;
     profile.selected_model = model;
+    profile.selected_skill = currentSkill;
     profile.selected_project = resolveProfileProject(profile, diag);
 
     const item = document.createElement("div");
@@ -1139,6 +1334,57 @@ function renderBotList(force = false) {
     modelLabel.appendChild(modelSelect);
     modelControl.appendChild(providerLabel);
     modelControl.appendChild(modelLabel);
+
+    const skillLabel = document.createElement("label");
+    skillLabel.className = "bot-item-model-label";
+    skillLabel.textContent = "Skill";
+    const skillSelect = document.createElement("select");
+    skillSelect.className = "bot-item-model-select";
+    skillSelect.disabled = controlsDisabled;
+    skillSelect.addEventListener("click", (event) => event.stopPropagation());
+
+    const offOption = document.createElement("option");
+    offOption.value = "";
+    offOption.textContent = "off";
+    offOption.selected = !currentSkill;
+    skillSelect.appendChild(offOption);
+
+    let matchedSkill = !currentSkill;
+    for (const entry of skillCatalog) {
+      const skillId = String(entry?.skill_id || "").trim();
+      if (!skillId) {
+        continue;
+      }
+      const option = document.createElement("option");
+      option.value = skillId;
+      option.textContent = skillId;
+      option.selected = skillId === currentSkill;
+      if (option.selected) {
+        matchedSkill = true;
+      }
+      skillSelect.appendChild(option);
+    }
+    if (currentSkill && !matchedSkill) {
+      const custom = document.createElement("option");
+      custom.value = currentSkill;
+      custom.textContent = `${currentSkill} (custom)`;
+      custom.selected = true;
+      skillSelect.appendChild(custom);
+    }
+    skillSelect.addEventListener("change", async (event) => {
+      event.stopPropagation();
+      const nextSkill = String(skillSelect.value || "").trim();
+      if (nextSkill === currentSkill) {
+        skillSelect.value = currentSkill;
+        return;
+      }
+      const ok = await applyProfileSkill(profile, nextSkill);
+      if (!ok) {
+        skillSelect.value = currentSkill;
+      }
+    });
+    skillLabel.appendChild(skillSelect);
+    modelControl.appendChild(skillLabel);
     meta.appendChild(modelControl);
 
     const unsafeRow = document.createElement("div");
@@ -1199,6 +1445,21 @@ async function loadProjectCatalog() {
   renderSessionProjectControl();
 }
 
+async function loadSkillCatalog() {
+  try {
+    const response = await requestJson("/_mock/skills");
+    const rows = Array.isArray(response?.result?.skills) ? response.result.skills : [];
+    skillCatalog = rows
+      .map((row) => ({
+        skill_id: String(row?.skill_id || "").trim(),
+        name: String(row?.name || row?.skill_id || "").trim(),
+      }))
+      .filter((row) => row.skill_id);
+  } catch {
+    skillCatalog = [];
+  }
+}
+
 function ensureInitialProfileFromParams() {
   const params = new URLSearchParams(window.location.search);
   const paramToken = (params.get("token") || "").trim();
@@ -1227,6 +1488,7 @@ function ensureInitialProfileFromParams() {
     selected_for_parallel: true,
     selected_provider: normalizeProvider(defaultBot?.default_adapter || "gemini"),
     selected_model: "",
+    selected_skill: "",
     selected_project: ""
   });
   uiState.selected_profile_id = uiState.profiles[0].profile_id;
@@ -1288,6 +1550,7 @@ async function hydrateInputs() {
 
   await loadCatalog();
   await loadProjectCatalog();
+  await loadSkillCatalog();
   dedupeProfilesByBotId();
   ensureInitialProfileFromParams();
   ensureSelectedProfile();
@@ -1298,6 +1561,7 @@ async function hydrateInputs() {
   renderBotList();
   renderParallelResults([]);
   renderDebatePanel(null);
+  renderControlTowerPanel(null);
   updateParallelSendButtonState();
   saveState();
 }
@@ -2159,6 +2423,8 @@ function classifyCommandOutcomeFromTexts(texts, commandType) {
     lowered.includes("use /stop first") ||
     lowered.includes("unsupported provider") ||
     lowered.includes("unsupported model") ||
+    lowered.includes("unknown skill") ||
+    lowered.includes("no local skills found") ||
     lowered.includes("model name is required") ||
     lowered.includes("no selectable model") ||
     lowered.includes("directory not found") ||
@@ -2174,7 +2440,12 @@ function classifyCommandOutcomeFromTexts(texts, commandType) {
       return { done: true, status: "PASS", detail: "mode_applied" };
     }
   } else if (commandType === "stop") {
-    if (/\bstop requested\./i.test(joined) || /\bno active run\./i.test(joined) || /\bstopping\.\.\./i.test(joined)) {
+    if (
+      /\bstop requested\./i.test(joined) ||
+      /\bno active run\./i.test(joined) ||
+      /\bstopping\.\.\./i.test(joined) ||
+      /\bno session yet\./i.test(joined)
+    ) {
       return { done: true, status: "PASS", detail: "stop_applied" };
     }
   } else if (commandType === "model") {
@@ -2184,6 +2455,10 @@ function classifyCommandOutcomeFromTexts(texts, commandType) {
   } else if (commandType === "project") {
     if (/\bproject updated:/i.test(joined)) {
       return { done: true, status: "PASS", detail: "project_applied" };
+    }
+  } else if (commandType === "skill") {
+    if (/\bskill updated:/i.test(joined) || /(?:^|\n)skill=([^\s\n]+)/i.test(joined)) {
+      return { done: true, status: "PASS", detail: "skill_applied" };
     }
   } else if (commandType === "unsafe") {
     if (/\bunsafe updated:/i.test(joined)) {
@@ -2614,6 +2889,7 @@ async function refreshProfileDiagnostics() {
   });
   await Promise.all(jobs);
   renderBotList();
+  await refreshControlTower();
 }
 
 async function refreshOnce() {
@@ -2821,6 +3097,7 @@ async function addProfileAutomatically() {
     selected_for_parallel: true,
     selected_provider: normalizeProvider(created.default_adapter || "gemini"),
     selected_model: "",
+    selected_skill: "",
     selected_project: "",
   };
 
@@ -2887,6 +3164,7 @@ function addProfileFromDialog() {
     selected_for_parallel: true,
     selected_provider: normalizeProvider(row?.default_adapter || "gemini"),
     selected_model: "",
+    selected_skill: "",
     selected_project: ""
   };
   uiState.profiles.push(profile);
@@ -3073,6 +3351,24 @@ if (debateStopBtn) {
   });
 }
 
+if (towerRefreshBtn) {
+  towerRefreshBtn.addEventListener("click", () => {
+    void refreshControlTower();
+  });
+}
+
+if (towerList) {
+  towerList.addEventListener("click", (event) => {
+    const target = event.target.closest("button[data-bot-id][data-strategy]");
+    if (!target) {
+      return;
+    }
+    const botId = String(target.dataset.botId || "");
+    const strategy = String(target.dataset.strategy || "stop_run");
+    void recoverControlTowerBot(botId, strategy);
+  });
+}
+
 if (profileCancelBtn) {
   profileCancelBtn.addEventListener("click", closeProfileDialog);
 }
@@ -3134,6 +3430,8 @@ initDebatePanelToggle();
 hydrateInputs().then(async () => {
   updateEssentialToggleButton();
   await recoverActiveDebate();
+  await refreshRuntimeProfile();
+  await refreshControlTower();
   await refreshProfileDiagnostics();
   await refresh();
 });

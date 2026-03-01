@@ -99,6 +99,8 @@ async def test_orchestrator_round_robin_order(tmp_path: Path) -> None:
     assert len(done["turns"]) == 3
     assert "요약:" in str(done["turns"][-1]["prompt_text"])
     assert "결론:" in str(done["turns"][-1]["prompt_text"])
+    assert isinstance(done.get("decision_summary"), dict)
+    assert done["decision_summary"].get("conclusion")
     await orchestrator.shutdown()
     store.close()
 

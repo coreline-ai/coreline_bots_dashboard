@@ -58,6 +58,12 @@ class MockMessengerStore:
                   UNIQUE(token, update_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS update_counters (
+                  token TEXT PRIMARY KEY,
+                  last_update_id INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS messages (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   token TEXT NOT NULL,
@@ -946,11 +952,33 @@ class MockMessengerStore:
         ]
 
     def _next_update_id_locked(self, *, token: str) -> int:
-        row = self._conn.execute(
-            "SELECT COALESCE(MAX(update_id), 0) AS max_update_id FROM updates WHERE token = ?",
+        now_ms = _now_ms()
+        counter_row = self._conn.execute(
+            "SELECT last_update_id FROM update_counters WHERE token = ?",
             (token,),
         ).fetchone()
-        return int(row["max_update_id"]) + 1
+        if counter_row is None:
+            max_row = self._conn.execute(
+                "SELECT COALESCE(MAX(update_id), 0) AS max_update_id FROM updates WHERE token = ?",
+                (token,),
+            ).fetchone()
+            # Keep update_id monotonic even if timeline rows were deleted.
+            seed = max(int(max_row["max_update_id"]), now_ms)
+        else:
+            seed = int(counter_row["last_update_id"])
+
+        next_id = seed + 1
+        self._conn.execute(
+            """
+            INSERT INTO update_counters(token, last_update_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(token) DO UPDATE
+            SET last_update_id = excluded.last_update_id,
+                updated_at = excluded.updated_at
+            """,
+            (token, next_id, now_ms),
+        )
+        return next_id
 
     def _next_message_id_locked(self, *, token: str, chat_id: str) -> int:
         row = self._conn.execute(

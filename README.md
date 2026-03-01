@@ -323,6 +323,10 @@ CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
 | `/mode <codex\|gemini\|claude>` | provider 전환 (활성 run 중이면 차단) |
 | `/model` | 현재 provider의 model/허용 목록 조회 |
 | `/model <name>` | 현재 provider model 변경 (활성 run 중이면 차단) |
+| `/skills` | 로컬 설치된 skill 프로필 목록 조회 |
+| `/skill` | 현재 세션 skill 조회 + 사용법 안내 |
+| `/skill <skill-id>` | 현재 세션 skill 적용 (활성 run 중이면 차단) |
+| `/skill off` | 현재 세션 skill 해제 |
 | `/providers` | provider binary 설치여부 + 기본 model 표시 |
 | `/stop` | 활성 run 취소 요청 |
 | `/youtube <query>` / `/yt <query>` | YouTube 검색 후 watch URL 전송 |
@@ -335,6 +339,12 @@ CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
 - 인라인 callback 버튼(`요약`, `다시생성`, `다음추천`, `중단`)
 - action token TTL 기본 24시간
 - YouTube 자연어 의도(한/영, 오타 변형 일부) 처리
+
+Skill 관리:
+
+- 외부 스킬은 프로젝트 루트 `skills/<skill-id>/SKILL.md` 구조로 관리
+- `remotion-dev/skills` 동기화: `./scripts/sync-remotion-skill.sh`
+- 런타임은 세션의 `active_skill`을 읽어 실행 프롬프트 preamble에 자동 주입
 
 ---
 

@@ -80,13 +80,17 @@ class _Repository:
         *,
         adapter_name: str,
         adapter_model: str | None = None,
+        active_skill: str | None = None,
         project_root: str | None = None,
         unsafe_until: int | None = None,
+        user_text: str = "hello",
     ) -> None:
         self.adapter_name = adapter_name
         self.adapter_model = adapter_model
+        self.active_skill = active_skill
         self.project_root = project_root
         self.unsafe_until = unsafe_until
+        self.user_text = user_text
         self.completed = False
         self.failed = False
         self.failed_error = ""
@@ -95,13 +99,14 @@ class _Repository:
         self.last_set_unsafe_until: int | None | object = object()
 
     async def get_turn(self, *, turn_id: str):
-        return SimpleNamespace(turn_id=turn_id, session_id="session-1", user_text="hello", chat_id="1001")
+        return SimpleNamespace(turn_id=turn_id, session_id="session-1", user_text=self.user_text, chat_id="1001")
 
     async def get_session_view(self, *, session_id: str):
         return SimpleNamespace(
             session_id=session_id,
             adapter_name=self.adapter_name,
             adapter_model=self.adapter_model,
+            active_skill=self.active_skill,
             project_root=self.project_root,
             unsafe_until=self.unsafe_until,
             rolling_summary_md="",
@@ -318,3 +323,68 @@ async def test_process_run_job_clears_expired_unsafe_mode(monkeypatch: pytest.Mo
     assert adapter.last_request is not None
     assert adapter.last_request.sandbox == "workspace-write"
     assert repo.last_set_unsafe_until is None
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_applies_auto_route_prefix_and_switches_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    gemini_adapter = _CaptureAdapter()
+    codex_adapter = _CaptureAdapter()
+    requested: list[str] = []
+
+    def _adapter_factory(name: str):
+        requested.append(name)
+        if name == "codex":
+            return codex_adapter
+        return gemini_adapter
+
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", _adapter_factory)
+    repo = _Repository(adapter_name="gemini", adapter_model=None, user_text="@auto fix bug in code path")
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-7", turn_id="turn-7", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert repo.completed is True
+    assert requested[0] == "codex"
+    assert codex_adapter.last_request is not None
+    assert codex_adapter.last_request.model == "gpt-5.3-codex"
+    assert codex_adapter.last_request.prompt.startswith("fix bug in code path")
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_injects_active_skill_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _CaptureAdapter()
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: adapter)
+    monkeypatch.setattr(
+        "telegram_bot_new.workers.run_worker.build_skill_instruction",
+        lambda *, skill_id, prompt: "[skill] demo guidance" if skill_id == "demo-skill" else None,
+    )
+    repo = _Repository(adapter_name="gemini", active_skill="demo-skill", user_text="animate intro")
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-8", turn_id="turn-8", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert adapter.last_request is not None
+    assert "[Skill Guidance]" in (adapter.last_request.preamble or "")
+    assert "demo guidance" in (adapter.last_request.preamble or "")

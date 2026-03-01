@@ -35,6 +35,14 @@ class BotCatalogDeleteRequest(BaseModel):
     bot_id: str = Field(min_length=1)
 
 
+class ControlTowerRecoverRequest(BaseModel):
+    bot_id: str = Field(min_length=1)
+    token: Optional[str] = None
+    chat_id: Optional[int] = None
+    user_id: int = 9001
+    strategy: Literal["stop_run", "restart_session"] = "stop_run"
+
+
 class DebateProfileRef(BaseModel):
     profile_id: str = Field(min_length=1)
     label: str = Field(min_length=1)
@@ -95,6 +103,13 @@ class DebateParticipantView(BaseModel):
     adapter: Optional[str] = None
 
 
+class DebateDecisionSummary(BaseModel):
+    summary: Optional[str] = None
+    conclusion: Optional[str] = None
+    action: Optional[str] = None
+    confidence_score: int = Field(ge=0, le=100, default=0)
+
+
 class DebateStatusResponse(BaseModel):
     debate_id: str
     scope_key: Optional[str] = None
@@ -112,3 +127,4 @@ class DebateStatusResponse(BaseModel):
     turns: list[DebateTurnView] = Field(default_factory=list)
     errors: list[DebateErrorView] = Field(default_factory=list)
     participants: list[DebateParticipantView] = Field(default_factory=list)
+    decision_summary: Optional[DebateDecisionSummary] = None

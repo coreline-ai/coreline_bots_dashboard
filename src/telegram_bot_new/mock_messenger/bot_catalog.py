@@ -209,6 +209,7 @@ def infer_session_view_from_messages(messages: list[dict[str, Any]]) -> dict[str
     result: dict[str, Any] = {
         "current_agent": "unknown",
         "current_model": None,
+        "current_skill": None,
         "current_project": None,
         "unsafe_until": None,
         "session_id": None,
@@ -254,6 +255,18 @@ def infer_session_view_from_messages(messages: list[dict[str, Any]]) -> dict[str
             if match:
                 raw = match.group(1).strip()
                 result["current_model"] = None if raw.lower() == "default" else raw
+
+        if result["current_skill"] is None:
+            match = re.search(r"(?:^|\n)skill=([^\s\n]+)", text, flags=re.IGNORECASE)
+            if match:
+                raw = match.group(1).strip()
+                result["current_skill"] = None if raw.lower() in {"off", "none", "default"} else raw
+            else:
+                updated = re.search(r"skill updated:\s*([^\s\n]+)\s*->\s*([^\s\n]+)", text, flags=re.IGNORECASE)
+                if updated:
+                    raw_next = updated.group(2).strip()
+                    lowered_next = raw_next.lower()
+                    result["current_skill"] = None if lowered_next in {"off", "none", "default"} else raw_next
 
         if result["current_project"] is None:
             match = re.search(r"(?:^|\n)project=([^\n]+)", text, flags=re.IGNORECASE)

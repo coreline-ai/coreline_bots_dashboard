@@ -16,6 +16,7 @@ from telegram_bot_new.model_presets import (
     resolve_provider_default_model,
     resolve_selected_model,
 )
+from telegram_bot_new.skill_library import list_installed_skills, resolve_skill_id
 from telegram_bot_new.services.action_token_service import ActionTokenPayload, ActionTokenService
 from telegram_bot_new.services.button_prompt_service import ButtonPromptService
 from telegram_bot_new.services.run_service import RunService
@@ -317,6 +318,7 @@ class TelegramCommandHandler:
                 chat_id=str(chat_id),
                 adapter_name=adapter_name,
                 adapter_model=adapter_model,
+                active_skill=getattr(existing, "active_skill", None),
                 project_root=getattr(existing, "project_root", None),
                 unsafe_until=getattr(existing, "unsafe_until", None),
                 now=now_ms,
@@ -349,6 +351,7 @@ class TelegramCommandHandler:
                         f"bot={self._bot.bot_id}",
                         f"adapter={status.adapter_name}",
                         f"model={model or 'default'}",
+                        f"skill={getattr(status, 'active_skill', None) or 'off'}",
                         f"project={getattr(status, 'project_root', None) or 'default'}",
                         f"unsafe_until={getattr(status, 'unsafe_until', None) or 'off'}",
                         f"session={status.session_id}",
@@ -370,6 +373,7 @@ class TelegramCommandHandler:
                 chat_id=str(chat_id),
                 adapter_name=adapter_name,
                 adapter_model=adapter_model,
+                active_skill=getattr(existing, "active_skill", None),
                 project_root=getattr(existing, "project_root", None),
                 unsafe_until=getattr(existing, "unsafe_until", None),
                 now=now_ms,
@@ -403,6 +407,14 @@ class TelegramCommandHandler:
 
         if command == "/project":
             await self._handle_project_command(chat_id=chat_id, arg=arg, now_ms=now_ms)
+            return
+
+        if command == "/skills":
+            await self._handle_skills_command(chat_id=chat_id)
+            return
+
+        if command == "/skill":
+            await self._handle_skill_command(chat_id=chat_id, arg=arg, now_ms=now_ms)
             return
 
         if command == "/unsafe":
@@ -685,6 +697,7 @@ class TelegramCommandHandler:
                 chat_id=str(chat_id),
                 adapter_name=adapter_name,
                 adapter_model=adapter_model,
+                active_skill=getattr(status, "active_skill", None),
                 project_root=next_project,
                 now=now_ms,
             )
@@ -712,6 +725,96 @@ class TelegramCommandHandler:
             action="session.set_project",
             result="success",
             detail=f"{current_project or 'default'}->{next_project or 'default'}",
+            now_ms=now_ms,
+        )
+
+    async def _handle_skills_command(self, *, chat_id: int) -> None:
+        installed = list_installed_skills()
+        if not installed:
+            await self._client.send_message(chat_id, "No local skills found. Put skills under ./skills/<name>/SKILL.md")
+            return
+        lines = ["Installed skills:"]
+        for skill in installed:
+            summary = skill.description or "no description"
+            lines.append(f"- {skill.skill_id}: {summary}")
+        await self._client.send_message(chat_id, "\n".join(lines))
+
+    async def _handle_skill_command(self, *, chat_id: int, arg: str, now_ms: int) -> None:
+        status = await self._session_service.status(bot_id=self._bot.bot_id, chat_id=str(chat_id))
+        current_skill = getattr(status, "active_skill", None)
+
+        if not arg:
+            await self._client.send_message(
+                chat_id,
+                "\n".join(
+                    [
+                        f"skill={current_skill or 'off'}",
+                        "usage: /skill <skill-id>",
+                        "disable: /skill off",
+                        "list: /skills",
+                    ]
+                ),
+            )
+            return
+
+        next_raw = arg.strip()
+        disable_aliases = {"off", "none", "default", "reset"}
+        if next_raw.lower() in disable_aliases:
+            next_skill = None
+        else:
+            resolved = resolve_skill_id(next_raw)
+            if resolved is None:
+                available = ", ".join(skill.skill_id for skill in list_installed_skills()) or "none"
+                await self._client.send_message(chat_id, f"Unknown skill: {next_raw}\navailable={available}")
+                return
+            next_skill = resolved
+
+        active = await self._run_service.has_active_run(bot_id=self._bot.bot_id, chat_id=str(chat_id))
+        if active:
+            await self._client.send_message(chat_id, "A run is active. Use /stop first, then retry /skill.")
+            return
+
+        adapter_name = status.adapter_name if status is not None else self._bot.adapter
+        adapter_model = resolve_selected_model(
+            provider=adapter_name,
+            session_model=getattr(status, "adapter_model", None),
+            default_models=self._bot.default_models,
+        )
+        if status is None:
+            session = await self._session_service.get_or_create(
+                bot_id=self._bot.bot_id,
+                chat_id=str(chat_id),
+                adapter_name=adapter_name,
+                adapter_model=adapter_model,
+                active_skill=next_skill,
+                project_root=getattr(status, "project_root", None),
+                unsafe_until=getattr(status, "unsafe_until", None),
+                now=now_ms,
+            )
+            session_id = session.session_id
+        else:
+            session_id = status.session_id
+            await self._session_service.set_skill(
+                session_id=session_id,
+                active_skill=next_skill,
+                now=now_ms,
+            )
+
+        await self._client.send_message(
+            chat_id,
+            "\n".join(
+                [
+                    f"skill updated: {current_skill or 'off'} -> {next_skill or 'off'}",
+                    f"session={session_id}",
+                ]
+            ),
+        )
+        await self._append_audit_log(
+            chat_id=chat_id,
+            session_id=session_id,
+            action="session.set_skill",
+            result="success",
+            detail=f"{current_skill or 'off'}->{next_skill or 'off'}",
             now_ms=now_ms,
         )
 
@@ -776,6 +879,7 @@ class TelegramCommandHandler:
                 chat_id=str(chat_id),
                 adapter_name=adapter_name,
                 adapter_model=adapter_model,
+                active_skill=getattr(status, "active_skill", None),
                 project_root=getattr(status, "project_root", None),
                 unsafe_until=next_unsafe_until,
                 now=now_ms,
@@ -883,7 +987,7 @@ class TelegramCommandHandler:
 
     def _help_text(self) -> str:
         return (
-            "/start /help /new /status /reset /summary /mode /model /project /unsafe /providers /stop /youtube\n"
+            "/start /help /new /status /reset /summary /mode /model /skills /skill /project /unsafe /providers /stop /youtube\n"
             "Plain text message => enqueue CLI turn"
         )
 

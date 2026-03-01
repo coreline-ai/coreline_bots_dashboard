@@ -13,13 +13,14 @@ def test_infer_session_view_from_messages() -> None:
         {
             "message_id": 2,
             "direction": "bot",
-            "text": "bot=bot-a\nadapter=gemini\nmodel=default\nproject=/tmp/myproj\nunsafe_until=1712345678901\nsession=s-1\nthread=t-1\nsummary=hello world",
+            "text": "bot=bot-a\nadapter=gemini\nmodel=default\nskill=remotion-best-practices\nproject=/tmp/myproj\nunsafe_until=1712345678901\nsession=s-1\nthread=t-1\nsummary=hello world",
         },
         {"message_id": 3, "direction": "bot", "text": "[1][12:00:00][turn_completed] {\"status\":\"ok\"}"},
     ]
     inferred = infer_session_view_from_messages(messages)
     assert inferred["current_agent"] == "gemini"
     assert inferred["current_model"] is None
+    assert inferred["current_skill"] == "remotion-best-practices"
     assert inferred["current_project"] == "/tmp/myproj"
     assert inferred["unsafe_until"] == 1712345678901
     assert inferred["session_id"] == "s-1"

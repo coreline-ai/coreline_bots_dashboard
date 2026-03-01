@@ -58,6 +58,7 @@ class Session(Base):
     chat_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     adapter_name: Mapped[str] = mapped_column(String(32), nullable=False)
     adapter_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    active_skill: Mapped[str | None] = mapped_column(String(128), nullable=True)
     project_root: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     unsafe_until: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     adapter_thread_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

@@ -11,6 +11,7 @@ class SessionStatus:
     session_id: str
     adapter_name: str
     adapter_model: Optional[str]
+    active_skill: Optional[str]
     project_root: Optional[str]
     unsafe_until: Optional[int]
     adapter_thread_id: Optional[str]
@@ -28,6 +29,7 @@ class SessionService:
         chat_id: str,
         adapter_name: str,
         adapter_model: Optional[str],
+        active_skill: Optional[str] = None,
         project_root: Optional[str] = None,
         unsafe_until: Optional[int] = None,
         now: int,
@@ -37,6 +39,7 @@ class SessionService:
             chat_id=chat_id,
             adapter_name=adapter_name,
             adapter_model=adapter_model,
+            active_skill=active_skill,
             project_root=project_root,
             unsafe_until=unsafe_until,
             now=now,
@@ -49,6 +52,7 @@ class SessionService:
         chat_id: str,
         adapter_name: str,
         adapter_model: Optional[str],
+        active_skill: Optional[str] = None,
         project_root: Optional[str] = None,
         unsafe_until: Optional[int] = None,
         now: int,
@@ -58,6 +62,7 @@ class SessionService:
             chat_id=chat_id,
             adapter_name=adapter_name,
             adapter_model=adapter_model,
+            active_skill=active_skill,
             project_root=project_root,
             unsafe_until=unsafe_until,
             now=now,
@@ -88,6 +93,13 @@ class SessionService:
             now=now,
         )
 
+    async def set_skill(self, *, session_id: str, active_skill: Optional[str], now: int) -> None:
+        await self._repository.set_session_skill(
+            session_id=session_id,
+            active_skill=active_skill,
+            now=now,
+        )
+
     async def set_project_root(self, *, session_id: str, project_root: Optional[str], now: int) -> None:
         await self._repository.set_session_project_root(
             session_id=session_id,
@@ -115,6 +127,7 @@ class SessionService:
             session_id=session.session_id,
             adapter_name=session.adapter_name,
             adapter_model=session.adapter_model,
+            active_skill=session.active_skill,
             project_root=session.project_root,
             unsafe_until=session.unsafe_until,
             adapter_thread_id=session.adapter_thread_id,

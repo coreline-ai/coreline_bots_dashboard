@@ -133,6 +133,7 @@ class DebateOrchestrator:
             "turns": turns,
             "errors": errors,
             "participants": participants,
+            "decision_summary": self._build_decision_summary(turns),
         }
         return DebateStatusResponse.model_validate(payload).model_dump()
 
@@ -578,6 +579,8 @@ class DebateOrchestrator:
                 "반드시 아래 형식을 정확히 지켜서 답하세요.\n"
                 "요약: (핵심 논점 3~5개를 통합 정리)\n"
                 "결론: (최종 판단 1개 + 이유)\n"
+                "액션: (사용자가 바로 실행할 다음 단계 1~2개)\n"
+                "신뢰도: (0~100 정수)\n"
                 "전체 길이는 900자 이내로 작성하세요."
             )
 
@@ -647,3 +650,58 @@ class DebateOrchestrator:
         if missing:
             return False, f"missing sections: {', '.join(missing)}", missing
         return True, None, []
+
+    def _build_decision_summary(self, turns: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not turns:
+            return None
+        final_turn = turns[-1]
+        response = str(final_turn.get("response_text") or "").strip()
+        if not response:
+            return None
+        summary = self._extract_labeled_line(response, "요약")
+        conclusion = self._extract_labeled_line(response, "결론")
+        action = self._extract_labeled_line(response, "액션")
+        if not summary:
+            summary = response.splitlines()[0].strip()[:240] if response else None
+        if not conclusion:
+            conclusion = summary
+        if not action:
+            action = "핵심 결론을 기준으로 추가 검증을 진행하세요."
+        confidence_raw = self._extract_labeled_line(response, "신뢰도")
+        confidence_score = self._score_confidence(response=response, confidence_raw=confidence_raw)
+        return {
+            "summary": summary,
+            "conclusion": conclusion,
+            "action": action,
+            "confidence_score": confidence_score,
+        }
+
+    @staticmethod
+    def _extract_labeled_line(text: str, label: str) -> str | None:
+        normalized_label = label.strip().lower()
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if ":" in line:
+                left, right = line.split(":", 1)
+            elif "：" in line:
+                left, right = line.split("：", 1)
+            else:
+                continue
+            if left.strip().lower() != normalized_label:
+                continue
+            value = right.strip()
+            return value or None
+        return None
+
+    def _score_confidence(self, *, response: str, confidence_raw: str | None) -> int:
+        if confidence_raw:
+            digits = re.search(r"(\d{1,3})", confidence_raw)
+            if digits:
+                return max(0, min(100, int(digits.group(1))))
+        score = 50
+        for key in ("요약:", "결론:", "액션:"):
+            if key in response:
+                score += 15
+        return max(0, min(100, score))

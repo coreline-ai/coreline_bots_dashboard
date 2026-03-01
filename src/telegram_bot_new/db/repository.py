@@ -77,6 +77,7 @@ class SessionView:
     chat_id: str
     adapter_name: str
     adapter_model: str | None
+    active_skill: str | None
     project_root: str | None
     unsafe_until: int | None
     adapter_thread_id: str | None
@@ -351,6 +352,7 @@ class Repository:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        active_skill: str | None = None,
         project_root: str | None = None,
         unsafe_until: int | None = None,
         now: int,
@@ -370,6 +372,7 @@ class Repository:
                     chat_id=chat_id,
                     adapter_name=adapter_name,
                     adapter_model=adapter_model,
+                    active_skill=active_skill,
                     project_root=project_root,
                     unsafe_until=unsafe_until,
                     adapter_thread_id=None,
@@ -402,6 +405,7 @@ class Repository:
                 chat_id=found.chat_id,
                 adapter_name=found.adapter_name,
                 adapter_model=found.adapter_model,
+                active_skill=found.active_skill,
                 project_root=found.project_root,
                 unsafe_until=found.unsafe_until,
                 adapter_thread_id=found.adapter_thread_id,
@@ -426,6 +430,7 @@ class Repository:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        active_skill: str | None = None,
         project_root: str | None = None,
         unsafe_until: int | None = None,
         now: int,
@@ -437,6 +442,7 @@ class Repository:
                 chat_id=chat_id,
                 adapter_name=adapter_name,
                 adapter_model=adapter_model,
+                active_skill=active_skill,
                 project_root=project_root,
                 unsafe_until=unsafe_until,
                 adapter_thread_id=None,
@@ -460,6 +466,7 @@ class Repository:
                 chat_id=entity.chat_id,
                 adapter_name=entity.adapter_name,
                 adapter_model=entity.adapter_model,
+                active_skill=entity.active_skill,
                 project_root=entity.project_root,
                 unsafe_until=entity.unsafe_until,
                 adapter_thread_id=entity.adapter_thread_id,
@@ -479,6 +486,7 @@ class Repository:
                 chat_id=found.chat_id,
                 adapter_name=found.adapter_name,
                 adapter_model=found.adapter_model,
+                active_skill=found.active_skill,
                 project_root=found.project_root,
                 unsafe_until=found.unsafe_until,
                 adapter_thread_id=found.adapter_thread_id,
@@ -528,6 +536,34 @@ class Repository:
                         adapter_name=adapter_name,
                         adapter_model=adapter_model,
                         adapter_thread_id=None,
+                        status="active",
+                        updated_at=now,
+                    )
+                )
+
+    async def set_session_skill(self, *, session_id: str, active_skill: str | None, now: int) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                target = await session.get(Session, session_id)
+                if target is None:
+                    return
+                await session.execute(
+                    update(Session)
+                    .where(
+                        and_(
+                            Session.bot_id == target.bot_id,
+                            Session.chat_id == target.chat_id,
+                            Session.status == "active",
+                            Session.session_id != session_id,
+                        )
+                    )
+                    .values(status="reset", adapter_thread_id=None, updated_at=now)
+                )
+                await session.execute(
+                    update(Session)
+                    .where(Session.session_id == session_id)
+                    .values(
+                        active_skill=active_skill,
                         status="active",
                         updated_at=now,
                     )

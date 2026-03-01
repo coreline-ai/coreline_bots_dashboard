@@ -187,6 +187,34 @@ def test_clear_timeline_messages_endpoint(mock_client: TestClient) -> None:
     assert after.json()["result"]["messages"] == []
 
 
+def test_update_id_monotonic_after_clear(mock_client: TestClient) -> None:
+    token = "token-clear-monotonic"
+    chat_id = 505
+
+    first = mock_client.post(
+        "/_mock/send",
+        json={"token": token, "chat_id": chat_id, "user_id": 9001, "text": "first"},
+    )
+    assert first.status_code == 200
+    first_update_id = int(first.json()["result"]["update_id"])
+
+    cleared = mock_client.post(
+        "/_mock/messages/clear",
+        json={"token": token, "chat_id": chat_id},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["ok"] is True
+
+    second = mock_client.post(
+        "/_mock/send",
+        json={"token": token, "chat_id": chat_id, "user_id": 9001, "text": "second"},
+    )
+    assert second.status_code == 200
+    second_update_id = int(second.json()["result"]["update_id"])
+
+    assert second_update_id > first_update_id
+
+
 def _write_bots_yaml(path: Path) -> None:
     path.write_text(
         "\n".join(
@@ -371,6 +399,196 @@ def test_mock_projects_endpoint_lists_workspace_candidates(tmp_path: Path, monke
         paths = [row["path"] for row in projects]
         assert str(workspace.resolve()) in paths
         assert str(project_a.resolve()) in paths
+    store.close()
+
+
+def test_mock_skills_endpoint_lists_local_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "skills.db"),
+        data_dir=str(tmp_path / "skills-data"),
+    )
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "demo-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: demo skill desc\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BOT_SKILLS_DIR", str(skills_root))
+
+    app = create_app(store=store, allow_get_updates_with_webhook=False)
+    with TestClient(app) as client:
+        response = client.get("/_mock/skills")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        skills = payload["result"]["skills"]
+        assert len(skills) == 1
+        assert skills[0]["skill_id"] == "demo-skill"
+        assert skills[0]["name"] == "demo-skill"
+    store.close()
+
+
+def test_mock_control_tower_endpoint_returns_bot_rows(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "control-tower.db"),
+        data_dir=str(tmp_path / "control-tower-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=65430,
+    )
+    with TestClient(app) as client:
+        response = client.get("/_mock/control_tower")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        rows = payload["result"]["rows"]
+        assert isinstance(rows, list)
+        assert len(rows) == 3
+        first = rows[0]
+        assert first["bot_id"] in {"bot-a", "bot-b", "bot-c"}
+        assert first["state"] in {"healthy", "degraded", "failing"}
+        assert first["recommended_action"] in {"none", "observe", "stop_run", "restart_session"}
+    store.close()
+
+
+def test_mock_runtime_profile_endpoint(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "runtime-profile.db"),
+        data_dir=str(tmp_path / "runtime-profile-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=65430,
+    )
+    with TestClient(app) as client:
+        response = client.get("/_mock/runtime_profile")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        result = payload["result"]
+        assert result["effective_bots"] == 3
+        assert result["source_bots"] == 3
+        assert isinstance(result["is_capped"], bool)
+        assert str(result["bots_config_path"]).endswith("bots.yaml")
+    store.close()
+
+
+def test_mock_control_tower_recover_stop_run_enqueues_stop(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "control-recover.db"),
+        data_dir=str(tmp_path / "control-recover-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=65430,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/_mock/control_tower/recover",
+            json={"bot_id": "bot-a", "chat_id": 1001, "user_id": 9001, "strategy": "stop_run"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["result"]["bot_id"] == "bot-a"
+        assert payload["result"]["strategy"] == "stop_run"
+        commands = payload["result"]["commands"]
+        assert len(commands) == 1
+        assert commands[0]["text"] == "/stop"
+
+        messages = client.get("/_mock/messages", params={"token": "mock_token_a", "chat_id": 1001, "limit": 10}).json()
+        user_texts = [row["text"] for row in messages["result"]["messages"] if row["direction"] == "user"]
+        assert "/stop" in user_texts
+    store.close()
+
+
+def test_mock_forensics_bundle_endpoint(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "forensics-bundle.db"),
+        data_dir=str(tmp_path / "forensics-bundle-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=65430,
+    )
+    with TestClient(app) as client:
+        send_response = client.post(
+            "/_mock/send",
+            json={"token": "mock_token_a", "chat_id": 1001, "user_id": 9001, "text": "forensics hello"},
+        )
+        assert send_response.status_code == 200
+
+        response = client.get(
+            "/_mock/forensics/bundle",
+            params={"bot_id": "bot-a", "token": "mock_token_a", "chat_id": 1001, "limit": 50},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        result = payload["result"]
+        assert result["bot_id"] == "bot-a"
+        assert result["token"] == "mock_token_a"
+        assert result["chat_id"] == 1001
+        assert "runtime_profile" in result
+        assert "state" in result
+        assert "slo" in result
+        assert isinstance(result["diagnostics"], dict)
+        assert isinstance(result["audit_logs"], list)
+        assert isinstance(result["messages"], list)
+        assert isinstance(result["updates"], list)
+    store.close()
+
+
+def test_mock_routing_suggest_endpoint(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "routing-suggest.db"),
+        data_dir=str(tmp_path / "routing-suggest-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=65430,
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/_mock/routing/suggest",
+            params={"text": "@auto 코드 리팩토링", "bot_id": "bot-a"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        result = payload["result"]
+        assert result["enabled"] is True
+        assert result["task_type"] == "code"
+        assert result["provider"] == "codex"
+        assert isinstance(result["model"], str)
+        assert result["stripped_prompt"] == "코드 리팩토링"
     store.close()
 
 

@@ -46,6 +46,7 @@ class FakeSessionService:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        active_skill: str | None = None,
         project_root: str | None = None,
         unsafe_until: int | None = None,
         now: int,
@@ -59,6 +60,7 @@ class FakeSessionService:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        active_skill: str | None = None,
         project_root: str | None = None,
         unsafe_until: int | None = None,
         now: int,
@@ -80,6 +82,7 @@ class FakeSessionServiceForMode:
         self.session_id = "session-1"
         self.adapter_name = adapter_name
         self.adapter_model = "gpt-5" if adapter_name == "codex" else None
+        self.active_skill: str | None = None
         self.project_root: str | None = None
         self.unsafe_until: int | None = None
         self.summary_preview = "summary"
@@ -93,12 +96,14 @@ class FakeSessionServiceForMode:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        active_skill: str | None = None,
         project_root: str | None = None,
         unsafe_until: int | None = None,
         now: int,
     ):
         self.adapter_name = adapter_name
         self.adapter_model = adapter_model
+        self.active_skill = active_skill
         self.project_root = project_root
         self.unsafe_until = unsafe_until
         return SimpleNamespace(session_id=self.session_id)
@@ -110,6 +115,7 @@ class FakeSessionServiceForMode:
         chat_id: str,
         adapter_name: str,
         adapter_model: str | None,
+        active_skill: str | None = None,
         project_root: str | None = None,
         unsafe_until: int | None = None,
         now: int,
@@ -118,6 +124,7 @@ class FakeSessionServiceForMode:
         self.last_create_new_model = adapter_model
         self.adapter_name = adapter_name
         self.adapter_model = adapter_model
+        self.active_skill = active_skill
         self.project_root = project_root
         self.unsafe_until = unsafe_until
         self.session_id = "session-new"
@@ -128,6 +135,7 @@ class FakeSessionServiceForMode:
             session_id=self.session_id,
             adapter_name=self.adapter_name,
             adapter_model=self.adapter_model,
+            active_skill=self.active_skill,
             project_root=self.project_root,
             unsafe_until=self.unsafe_until,
             adapter_thread_id=None,
@@ -150,6 +158,9 @@ class FakeSessionServiceForMode:
 
     async def set_model(self, *, session_id: str, adapter_model: str | None, now: int) -> None:
         self.adapter_model = adapter_model
+
+    async def set_skill(self, *, session_id: str, active_skill: str | None, now: int) -> None:
+        self.active_skill = active_skill
 
     async def set_project_root(self, *, session_id: str, project_root: str | None, now: int) -> None:
         self.project_root = project_root
@@ -847,8 +858,59 @@ async def test_status_uses_session_model_when_present() -> None:
     text = client.messages[-1][1]
     assert "adapter=gemini" in text
     assert "model=gemini-2.5-flash" in text
+    assert "skill=off" in text
     assert "project=default" in text
     assert "unsafe_until=off" in text
+
+
+@pytest.mark.asyncio
+async def test_skills_command_lists_installed_skill_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="gemini")
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="gemini", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    monkeypatch.setattr(
+        "telegram_bot_new.telegram.commands.list_installed_skills",
+        lambda: [SimpleNamespace(skill_id="remotion-best-practices", description="Best practices for Remotion")],
+    )
+
+    payload = {
+        "update_id": 1701,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 1701, "text": "/skills"},
+    }
+    await handler.handle_update_payload(payload, now_ms=1701)
+
+    text = client.messages[-1][1]
+    assert "Installed skills:" in text
+    assert "remotion-best-practices" in text
+
+
+@pytest.mark.asyncio
+async def test_skill_command_updates_active_skill(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="gemini")
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="gemini", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+    monkeypatch.setattr("telegram_bot_new.telegram.commands.resolve_skill_id", lambda _value: "remotion-best-practices")
+
+    payload = {
+        "update_id": 1702,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 1702, "text": "/skill remotion"},
+    }
+    await handler.handle_update_payload(payload, now_ms=1702)
+
+    assert session_service.active_skill == "remotion-best-practices"
+    text = client.messages[-1][1]
+    assert "skill updated: off -> remotion-best-practices" in text
 
 
 @pytest.mark.asyncio

@@ -524,6 +524,17 @@ button:disabled {
   resize: vertical;
 }
 
+.runtime-profile-meta {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-alt);
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .bot-list {
   min-height: 0;
   max-height: none;
@@ -599,7 +610,7 @@ button:disabled {
 .bot-item-model-control {
   margin-top: 8px;
   display: grid;
-  grid-template-columns: 1fr 1.3fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   align-items: end;
 }
@@ -893,6 +904,113 @@ button:disabled {
 .debate-row-status-stopped,
 .debate-row-status-skipped {
   color: #b91c1c;
+}
+
+.tower-section {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--panel-alt) 78%, var(--panel));
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.tower-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tower-section-head h3 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: -0.01em;
+}
+
+.tower-refresh-btn {
+  padding: 4px 8px;
+  min-width: 34px;
+  height: 30px;
+}
+
+.tower-meta {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.tower-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+  min-height: 0;
+}
+
+.tower-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.tower-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tower-row-state {
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  padding: 2px 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.tower-row-state.state-healthy {
+  border-color: color-mix(in srgb, var(--ok) 30%, var(--line));
+  background: color-mix(in srgb, var(--accent-mint) 80%, var(--panel));
+}
+
+.tower-row-state.state-degraded {
+  border-color: color-mix(in srgb, #d97706 30%, var(--line));
+  background: color-mix(in srgb, var(--accent-amber) 85%, var(--panel));
+}
+
+.tower-row-state.state-failing {
+  border-color: color-mix(in srgb, var(--fail) 30%, var(--line));
+  background: color-mix(in srgb, #fee2e2 80%, var(--panel));
+}
+
+.tower-row-detail {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tower-row-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.tower-recover-btn {
+  margin-top: 0;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
 }
 
 .timeline {

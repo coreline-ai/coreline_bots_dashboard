@@ -7,7 +7,8 @@ PYTHON_BIN="$ROOT_DIR/$VENV_DIR/bin/python"
 SCRIPT_NAME="${RUN_LOCAL_MULTIBOT_ALIAS:-$0}"
 
 CONFIG_PATH="${CONFIG_PATH:-config/bots.multibot.yaml}"
-MAX_BOTS="${MAX_BOTS:-8}"
+# Keep bot-7 available by default (bot-a, bot-b, bot-1..bot-7 => 9 bots).
+MAX_BOTS="${MAX_BOTS:-9}"
 MOCK_HOST="${MOCK_HOST:-127.0.0.1}"
 MOCK_PORT="${MOCK_PORT:-9082}"
 MOCK_DB_PATH="${MOCK_DB_PATH:-$ROOT_DIR/.mock_messenger_9082/mock_messenger.db}"

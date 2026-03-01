@@ -14,6 +14,8 @@ from telegram_bot_new.adapters import get_adapter
 from telegram_bot_new.adapters.base import AdapterEvent, AdapterResumeRequest, AdapterRunRequest, utc_now_iso
 from telegram_bot_new.db.repository import LeasedRunJob, Repository
 from telegram_bot_new.model_presets import resolve_selected_model
+from telegram_bot_new.routing_policy import suggest_route
+from telegram_bot_new.skill_library import build_skill_instruction
 from telegram_bot_new.services.summary_service import SummaryInput, SummaryService
 from telegram_bot_new.streaming.telegram_event_streamer import TelegramEventStreamer
 from telegram_bot_new.telegram.client import TelegramApiError, TelegramClient
@@ -457,9 +459,31 @@ async def _process_run_job(
 
         await repository.mark_run_in_flight(job_id=job.id, turn_id=turn.turn_id, now=_now_ms())
 
-        provider = session.adapter_name
+        session_provider = str(session.adapter_name or "gemini")
+        route = suggest_route(
+            prompt=turn.user_text,
+            session_provider=session_provider,
+            session_model=getattr(session, "adapter_model", None),
+            default_models=default_models_by_provider,
+        )
+        provider = route.provider
+        routed_prompt = route.stripped_prompt.strip() if route.enabled else turn.user_text
+        if not routed_prompt:
+            routed_prompt = turn.user_text
         adapter = get_adapter(provider)
         preamble = summary_service.build_recovery_preamble(session.rolling_summary_md)
+        active_skill = getattr(session, "active_skill", None)
+        if active_skill:
+            skill_instruction = build_skill_instruction(
+                skill_id=active_skill,
+                prompt=routed_prompt,
+            )
+            if skill_instruction:
+                prefix = "[Skill Guidance]\n"
+                if preamble and preamble.strip():
+                    preamble = f"{preamble.strip()}\n\n{prefix}{skill_instruction}"
+                else:
+                    preamble = f"{prefix}{skill_instruction}"
         run_started_epoch = time.time()
         artifact_output_dir = _build_turn_artifact_output_dir(
             bot_id=bot_id,
@@ -468,12 +492,12 @@ async def _process_run_job(
         )
         artifact_output_dir.mkdir(parents=True, exist_ok=True)
         execution_prompt = _augment_prompt_for_generation_request(
-            turn.user_text,
+            routed_prompt,
             artifact_output_dir=artifact_output_dir,
         )
-        selected_model = resolve_selected_model(
+        selected_model = route.model or resolve_selected_model(
             provider=provider,
-            session_model=getattr(session, "adapter_model", None),
+            session_model=(getattr(session, "adapter_model", None) if provider == session_provider else None),
             default_models=default_models_by_provider,
         )
         selected_sandbox = default_sandbox if provider == "codex" else ""
@@ -509,7 +533,20 @@ async def _process_run_job(
                 return True
             return False
 
-        if session.adapter_thread_id:
+        routed_provider_changed = provider != session_provider
+        if route.enabled and (routed_provider_changed or selected_model != getattr(session, "adapter_model", None)):
+            await _append_audit_log(
+                repository=repository,
+                bot_id=bot_id,
+                chat_id=str(turn.chat_id),
+                session_id=turn.session_id,
+                action="run.routing",
+                result="applied",
+                detail=f"provider={session_provider}->{provider} model={selected_model or 'default'} reason={route.reason}",
+                now=_now_ms(),
+            )
+
+        if session.adapter_thread_id and not routed_provider_changed:
             stream = adapter.run_resume_turn(
                 AdapterResumeRequest(
                     thread_id=session.adapter_thread_id,
@@ -664,7 +701,7 @@ async def _process_run_job(
             await streamer.close_turn(turn_id=turn.turn_id)
             return
 
-        if thread_id:
+        if thread_id and not routed_provider_changed:
             await repository.set_session_thread_id(session_id=session.session_id, thread_id=thread_id, now=_now_ms())
 
         assistant_text = "\n".join(part.strip() for part in assistant_parts if part.strip()).strip()
