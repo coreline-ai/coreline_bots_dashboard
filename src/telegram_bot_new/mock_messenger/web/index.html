@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
-  <link rel="stylesheet" href="/_mock/ui/styles.css?v=48">
+  <link rel="stylesheet" href="/_mock/ui/styles.css?v=50">
 </head>
 <body>
   <header class="topbar">
@@ -198,18 +198,26 @@
           </div>
         </div>
 
-        <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">monitoring</span>Diagnostics</h2>
-        <pre id="diagnostics-json"></pre>
+        <div class="state-card">
+          <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">monitoring</span>Diagnostics</h2>
+          <pre id="diagnostics-json"></pre>
+        </div>
 
-        <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">data_object</span>State (Compact)</h2>
-        <pre id="state-json"></pre>
+        <div class="state-card">
+          <h2><span class="material-symbols-outlined icon-sm" aria-hidden="true">data_object</span>State (Compact)</h2>
+          <pre id="state-json"></pre>
+        </div>
 
-        <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">forum</span>Threads (Top 10)</h3>
-        <pre id="threads-json"></pre>
+        <div class="state-card">
+          <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">forum</span>Threads (Top 10)</h3>
+          <pre id="threads-json"></pre>
+        </div>
 
-        <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">history</span>Audit Logs</h3>
-        <div id="audit-error" class="audit-error"></div>
-        <pre id="audit-json"></pre>
+        <div class="state-card">
+          <h3><span class="material-symbols-outlined icon-sm" aria-hidden="true">history</span>Audit Logs</h3>
+          <div id="audit-error" class="audit-error"></div>
+          <pre id="audit-json"></pre>
+        </div>
       </section>
     </section>
   </main>

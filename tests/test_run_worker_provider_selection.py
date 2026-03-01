@@ -44,6 +44,28 @@ class _MissingBinAdapter:
         return None
 
 
+class _WatchdogTimeoutAdapter:
+    async def _emit_timeout(self):
+        yield AdapterEvent(
+            seq=1,
+            ts="2026-01-01T00:00:00+00:00",
+            event_type="error",
+            payload={"message": "adapter stream timed out or cancelled"},
+        )
+        yield AdapterEvent(seq=2, ts="2026-01-01T00:00:01+00:00", event_type="turn_completed", payload={"status": "error"})
+
+    async def run_new_turn(self, request):
+        async for event in self._emit_timeout():
+            yield event
+
+    async def run_resume_turn(self, request):
+        async for event in self._emit_timeout():
+            yield event
+
+    def extract_thread_id(self, event: AdapterEvent):
+        return None
+
+
 class _SummaryService:
     def build_recovery_preamble(self, summary: str) -> str:
         return ""
@@ -83,6 +105,7 @@ class _Repository:
         active_skill: str | None = None,
         project_root: str | None = None,
         unsafe_until: int | None = None,
+        adapter_thread_id: str | None = None,
         user_text: str = "hello",
     ) -> None:
         self.adapter_name = adapter_name
@@ -90,6 +113,7 @@ class _Repository:
         self.active_skill = active_skill
         self.project_root = project_root
         self.unsafe_until = unsafe_until
+        self.adapter_thread_id = adapter_thread_id
         self.user_text = user_text
         self.completed = False
         self.failed = False
@@ -97,6 +121,7 @@ class _Repository:
         self.appended_events: list[tuple[str, str]] = []
         self.metrics: list[str] = []
         self.last_set_unsafe_until: int | None | object = object()
+        self.thread_updates: list[str | None] = []
 
     async def get_turn(self, *, turn_id: str):
         return SimpleNamespace(turn_id=turn_id, session_id="session-1", user_text=self.user_text, chat_id="1001")
@@ -110,7 +135,7 @@ class _Repository:
             project_root=self.project_root,
             unsafe_until=self.unsafe_until,
             rolling_summary_md="",
-            adapter_thread_id=None,
+            adapter_thread_id=self.adapter_thread_id,
         )
 
     async def mark_run_in_flight(self, *, job_id: str, turn_id: str, now: int) -> None:
@@ -135,7 +160,8 @@ class _Repository:
         return False
 
     async def set_session_thread_id(self, *, session_id: str, thread_id: str | None, now: int) -> None:
-        return None
+        self.thread_updates.append(thread_id)
+        self.adapter_thread_id = thread_id
 
     async def set_session_unsafe_until(self, *, session_id: str, unsafe_until: int | None, now: int) -> None:
         self.last_set_unsafe_until = unsafe_until
@@ -388,3 +414,27 @@ async def test_process_run_job_injects_active_skill_guidance(monkeypatch: pytest
     assert adapter.last_request is not None
     assert "[Skill Guidance]" in (adapter.last_request.preamble or "")
     assert "demo guidance" in (adapter.last_request.preamble or "")
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_watchdog_timeout_auto_recovers_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: _WatchdogTimeoutAdapter())
+    repo = _Repository(adapter_name="gemini", adapter_thread_id="stale-thread-1")
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-9", turn_id="turn-9", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert repo.failed is True
+    assert repo.thread_updates == [None]
+    assert "provider_run_watchdog_timeout.gemini" in repo.metrics

@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import time
 from asyncio.subprocess import Process
 from typing import Any, AsyncIterator
 
 from .base import AdapterEvent, AdapterResumeRequest, AdapterRunRequest, CliAdapter, utc_now_iso
+
+READ_POLL_TIMEOUT_SEC = max(0.2, float(os.getenv("CLI_READ_POLL_TIMEOUT_SEC", "1.0")))
+TERMINATE_GRACE_SEC = max(0.5, float(os.getenv("CLI_TERMINATE_GRACE_SEC", "3.0")))
 
 
 class CodexAdapter(CliAdapter):
@@ -161,6 +166,7 @@ class CodexAdapter(CliAdapter):
 
         seq = 1
         cancelled = False
+        cancel_requested_at: float | None = None
 
         cancel_task: asyncio.Task[None] | None = None
         if should_cancel is not None:
@@ -171,10 +177,26 @@ class CodexAdapter(CliAdapter):
             while True:
                 if should_cancel is not None and await should_cancel():
                     cancelled = True
+                    if cancel_requested_at is None:
+                        cancel_requested_at = time.monotonic()
                     if process.returncode is None:
                         process.terminate()
-                line = await process.stdout.readline()
+                if (
+                    cancelled
+                    and process.returncode is None
+                    and cancel_requested_at is not None
+                    and (time.monotonic() - cancel_requested_at) >= TERMINATE_GRACE_SEC
+                ):
+                    process.kill()
+                try:
+                    line = await asyncio.wait_for(process.stdout.readline(), timeout=READ_POLL_TIMEOUT_SEC)
+                except asyncio.TimeoutError:
+                    if process.returncode is None:
+                        continue
+                    break
                 if not line:
+                    if process.returncode is None:
+                        continue
                     break
                 decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
                 events = self.normalize_event(decoded, seq_start=seq)
@@ -188,7 +210,12 @@ class CodexAdapter(CliAdapter):
 
             return_code = await process.wait()
             if cancelled:
-                yield AdapterEvent(seq=seq, ts=utc_now_iso(), event_type="error", payload={"message": "cancelled"})
+                yield AdapterEvent(
+                    seq=seq,
+                    ts=utc_now_iso(),
+                    event_type="error",
+                    payload={"message": "adapter stream timed out or cancelled"},
+                )
                 seq += 1
                 yield AdapterEvent(seq=seq, ts=utc_now_iso(), event_type="turn_completed", payload={"status": "cancelled"})
                 return
@@ -205,6 +232,16 @@ class CodexAdapter(CliAdapter):
                 return
 
         finally:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.terminate()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=TERMINATE_GRACE_SEC)
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=1.0)
             if cancel_task is not None:
                 cancel_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

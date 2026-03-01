@@ -485,21 +485,21 @@ button:disabled {
 }
 
 .bot-sidebar {
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  scrollbar-gutter: stable;
 }
 
 .bot-sidebar-scroll {
-  min-height: 0;
-  flex: 1 1 auto;
+  min-height: auto;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  scrollbar-gutter: stable;
+  gap: 6px;
+  overflow: visible;
   padding-right: 2px;
 }
 
@@ -536,23 +536,23 @@ button:disabled {
 }
 
 .bot-list {
-  min-height: 0;
+  min-height: 140px;
   max-height: none;
-  overflow-y: auto;
-  overflow-x: hidden;
-  scrollbar-gutter: stable;
+  overflow: visible;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--panel-alt);
-  padding: 8px;
+  padding: 6px;
+  display: grid;
+  gap: 6px;
 }
 
 .bot-item {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--panel);
-  padding: 10px;
-  margin-bottom: 8px;
+  padding: 8px;
+  margin-bottom: 0;
   cursor: pointer;
   box-shadow: var(--shadow-card);
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
@@ -593,11 +593,11 @@ button:disabled {
 }
 
 .bot-item-meta {
-  margin-top: 8px;
-  font-size: 11px;
+  margin-top: 6px;
+  font-size: 10px;
   color: var(--muted);
   display: grid;
-  gap: 3px;
+  gap: 2px;
   font-family: "Fira Code", "SFMono-Regular", Menlo, monospace;
 }
 
@@ -608,16 +608,16 @@ button:disabled {
 }
 
 .bot-item-model-control {
-  margin-top: 8px;
+  margin-top: 6px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
+  gap: 4px;
   align-items: end;
 }
 
 .bot-item-model-label {
   margin: 0;
-  font-size: 10px;
+  font-size: 9px;
   color: var(--muted);
   font-weight: 700;
   text-transform: uppercase;
@@ -625,9 +625,9 @@ button:disabled {
 }
 
 .bot-item-model-select {
-  margin-top: 3px;
-  padding: 6px 8px;
-  font-size: 11px;
+  margin-top: 2px;
+  padding: 4px 6px;
+  font-size: 10px;
   font-family: "Fira Code", "SFMono-Regular", Menlo, monospace;
 }
 
@@ -650,9 +650,12 @@ button:disabled {
 
 .bot-item-title {
   font-weight: 700;
-  font-size: 13px;
+  font-size: 12px;
   letter-spacing: -0.01em;
   color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bot-item-provider {
@@ -727,6 +730,7 @@ button:disabled {
   scrollbar-gutter: stable;
   padding: 6px;
   font-size: 12px;
+  max-height: 160px;
 }
 
 .debate-section {
@@ -759,7 +763,7 @@ button:disabled {
 
 .debate-panel-body {
   min-height: 0;
-  max-height: 380px;
+  max-height: 240px;
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-gutter: stable;
@@ -947,7 +951,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 220px;
+  max-height: 180px;
   overflow: auto;
   min-height: 0;
 }
@@ -1345,12 +1349,47 @@ button:disabled {
 
 .state {
   gap: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-right: 2px;
 }
 
 .state-block {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-alt);
+  padding: 8px;
+  flex: 0 0 auto;
+}
+
+.state-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-alt);
+  padding: 8px;
+  flex: 0 0 auto;
+}
+
+.state-card h2,
+.state-card h3,
+.state-block h2,
+.state-block h3 {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+
+.state-card pre,
+.state-block pre {
+  min-height: 170px;
+  max-height: 170px;
 }
 
 .state-block-header {
@@ -1412,14 +1451,16 @@ pre {
 }
 
 #agent-json {
-  max-height: 18vh;
+  min-height: 170px;
+  max-height: 170px;
 }
 
 #diagnostics-json,
 #state-json,
 #threads-json,
 #audit-json {
-  max-height: 24vh;
+  min-height: 170px;
+  max-height: 170px;
 }
 
 .audit-error {

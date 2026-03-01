@@ -55,6 +55,17 @@ def _looks_like_gemini_quota_error(message: str | None, stderr: str | None) -> b
     )
 
 
+def _looks_like_watchdog_timeout_error(message: str | None) -> bool:
+    lowered = (message or "").lower()
+    if not lowered:
+        return False
+    return (
+        "watchdog timeout" in lowered
+        or "turn timed out after" in lowered
+        or "adapter stream timed out" in lowered
+    )
+
+
 def _looks_like_image_request(prompt: str) -> bool:
     text = (prompt or "").lower()
     if not text:
@@ -706,6 +717,41 @@ async def _process_run_job(
 
         assistant_text = "\n".join(part.strip() for part in assistant_parts if part.strip()).strip()
         failed = completion_status == "error" or (error_text and not assistant_text)
+        watchdog_timeout = bool(timed_out or _looks_like_watchdog_timeout_error(error_text))
+        auto_recovered = False
+        if failed and watchdog_timeout and session.adapter_thread_id and not routed_provider_changed:
+            try:
+                await repository.set_session_thread_id(
+                    session_id=session.session_id,
+                    thread_id=None,
+                    now=_now_ms(),
+                )
+                auto_recovered = True
+                await _append_audit_log(
+                    repository=repository,
+                    bot_id=bot_id,
+                    chat_id=str(turn.chat_id),
+                    session_id=turn.session_id,
+                    action="run.auto_recover",
+                    result="success",
+                    detail=f"reason=watchdog_timeout thread_reset=true provider={provider}",
+                    now=_now_ms(),
+                )
+            except Exception:
+                LOGGER.exception(
+                    "failed to auto-recover timed out thread bot=%s session=%s",
+                    bot_id,
+                    session.session_id,
+                )
+        if failed and watchdog_timeout and hasattr(repository, "increment_runtime_metric"):
+            try:
+                await repository.increment_runtime_metric(
+                    bot_id=bot_id,
+                    metric_key=f"provider_run_watchdog_timeout.{provider}",
+                    now=_now_ms(),
+                )
+            except Exception:
+                LOGGER.exception("failed to increment watchdog metric bot=%s provider=%s", bot_id, provider)
         if failed and provider == "gemini" and _looks_like_gemini_quota_error(error_text, error_stderr):
             fallback_model = "gemini-2.5-flash"
             if selected_model != fallback_model:
@@ -749,7 +795,10 @@ async def _process_run_job(
                 session_id=turn.session_id,
                 action="run.turn",
                 result="failed",
-                detail=(error_text or "adapter execution failed")[:400],
+                detail=(
+                    f"{(error_text or 'adapter execution failed')[:320]}"
+                    f"{' (auto-recovered thread)' if auto_recovered else ''}"
+                ),
                 now=_now_ms(),
             )
             if hasattr(repository, "increment_runtime_metric"):
