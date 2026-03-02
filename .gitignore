@@ -6,6 +6,7 @@
 .mock_messenger_9082/
 .playwright-cli/
 __pycache__/
+*.egg-info/
 .DS_Store
 
 # E2E local artifacts

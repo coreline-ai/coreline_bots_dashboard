@@ -1,3 +1,0 @@
-[console_scripts]
-telegram-bot-new = telegram_bot_new.main:main
-telegram-bot-new-mock = telegram_bot_new.mock_messenger.main:main
