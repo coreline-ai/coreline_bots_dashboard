@@ -7,6 +7,7 @@ bots:
   webhook:
     path_secret: bot-a-path
     secret_token: bot-a-secret
+  default_role: controller
 - bot_id: bot-b
   name: Bot B
   mode: embedded
@@ -15,6 +16,7 @@ bots:
   webhook:
     path_secret: bot-b-path
     secret_token: bot-b-secret
+  default_role: integrator
 - bot_id: bot-1
   name: Bot 1
   mode: embedded
@@ -31,6 +33,7 @@ bots:
   webhook:
     path_secret: bot-2-path
     secret_token: bot-2-secret
+  default_role: executor
 - bot_id: bot-3
   name: Bot 3
   mode: embedded

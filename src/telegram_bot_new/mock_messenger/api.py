@@ -21,6 +21,12 @@ from telegram_bot_new.mock_messenger.bot_catalog import (
     fetch_embedded_audit_logs,
     fetch_embedded_runtime,
     infer_session_view_from_messages,
+    set_bot_default_role,
+)
+from telegram_bot_new.mock_messenger.cowork import (
+    ActiveCoworkExistsError,
+    CoworkNotFoundError,
+    CoworkOrchestrator,
 )
 from telegram_bot_new.mock_messenger.debate import (
     ActiveDebateExistsError,
@@ -30,7 +36,9 @@ from telegram_bot_new.mock_messenger.debate import (
 from telegram_bot_new.mock_messenger.schemas import (
     BotCatalogAddRequest,
     BotCatalogDeleteRequest,
+    BotCatalogRoleUpdateRequest,
     ControlTowerRecoverRequest,
+    CoworkStartRequest,
     DebateStartRequest,
     MockClearMessagesRequest,
     MockSendRequest,
@@ -83,11 +91,18 @@ def create_app(
         store=store,
         send_user_message=_enqueue_and_dispatch_user_message,
     )
+    cowork_orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=_enqueue_and_dispatch_user_message,
+        artifact_root=Path.cwd() / "cowork",
+    )
     app.state.debate_orchestrator = debate_orchestrator
+    app.state.cowork_orchestrator = cowork_orchestrator
 
     @app.on_event("shutdown")
     async def _shutdown_event() -> None:
         await debate_orchestrator.shutdown()
+        await cowork_orchestrator.shutdown()
 
     @app.get("/")
     async def root() -> RedirectResponse:
@@ -193,6 +208,89 @@ def create_app(
         except DebateNotFoundError as error:
             raise HTTPException(status_code=404, detail=f"unknown debate_id: {error}") from error
         return {"ok": True, "result": result}
+
+    @app.post("/_mock/cowork/start")
+    async def start_cowork(request: CoworkStartRequest) -> dict[str, Any]:
+        if len(request.profiles) < 2:
+            raise HTTPException(status_code=400, detail="profiles must include at least two participants")
+
+        catalog_rows = build_bot_catalog(
+            bots_config_path=bots_config_path,
+            embedded_host=embedded_host,
+            embedded_base_port=embedded_base_port,
+        )
+        by_bot_id = {str(row.get("bot_id") or ""): row for row in catalog_rows}
+
+        participants: list[dict[str, Any]] = []
+        for profile in request.profiles:
+            row = by_bot_id.get(profile.bot_id)
+            if row is None:
+                raise HTTPException(status_code=400, detail=f"unknown bot_id: {profile.bot_id}")
+            expected_token = str(row.get("token") or "")
+            if expected_token != profile.token:
+                raise HTTPException(status_code=400, detail=f"token mismatch for bot_id: {profile.bot_id}")
+            participants.append(
+                {
+                    "profile_id": profile.profile_id,
+                    "label": profile.label,
+                    "bot_id": profile.bot_id,
+                    "token": profile.token,
+                    "chat_id": int(profile.chat_id),
+                    "user_id": int(profile.user_id),
+                    "role": str(profile.role),
+                    "adapter": str(row.get("default_adapter") or ""),
+                }
+            )
+
+        try:
+            result = await cowork_orchestrator.start_cowork(
+                request=request,
+                participants=participants,
+            )
+        except ActiveCoworkExistsError as error:
+            raise HTTPException(status_code=409, detail=f"active cowork already exists: {error}") from error
+        return {"ok": True, "result": result}
+
+    @app.get("/_mock/cowork/active")
+    async def get_active_cowork() -> dict[str, Any]:
+        return {"ok": True, "result": cowork_orchestrator.get_active_cowork_snapshot()}
+
+    @app.get("/_mock/cowork/{cowork_id}")
+    async def get_cowork(cowork_id: str) -> dict[str, Any]:
+        snapshot = cowork_orchestrator.get_cowork_snapshot(cowork_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail=f"unknown cowork_id: {cowork_id}")
+        return {"ok": True, "result": snapshot}
+
+    @app.post("/_mock/cowork/{cowork_id}/stop")
+    async def stop_cowork(cowork_id: str) -> dict[str, Any]:
+        try:
+            result = await cowork_orchestrator.stop_cowork(cowork_id)
+        except CoworkNotFoundError as error:
+            raise HTTPException(status_code=404, detail=f"unknown cowork_id: {error}") from error
+        return {"ok": True, "result": result}
+
+    @app.get("/_mock/cowork/{cowork_id}/artifacts")
+    async def get_cowork_artifacts(cowork_id: str) -> dict[str, Any]:
+        result = cowork_orchestrator.get_cowork_artifacts(cowork_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"unknown cowork_id: {cowork_id}")
+        return {"ok": True, "result": result}
+
+    @app.get("/_mock/cowork/{cowork_id}/artifact/{filename}")
+    async def get_cowork_artifact_file(cowork_id: str, filename: str) -> FileResponse:
+        path = cowork_orchestrator.resolve_artifact_path(cowork_id, filename)
+        if path is None:
+            raise HTTPException(status_code=404, detail=f"unknown cowork artifact: {cowork_id}/{filename}")
+        media_type = "application/octet-stream"
+        suffix = path.suffix.lower()
+        if suffix == ".json":
+            media_type = "application/json"
+        elif suffix in {".md", ".markdown"}:
+            media_type = "text/markdown"
+        elif suffix in {".txt", ".log"}:
+            media_type = "text/plain"
+        return FileResponse(path, media_type=media_type)
 
     @app.get("/_mock/messages")
     async def get_messages(token: str, chat_id: Optional[int] = None, limit: int = 200) -> dict[str, Any]:
@@ -507,6 +605,30 @@ def create_app(
             "ok": True,
             "result": {
                 "deleted_bot_id": request.bot_id,
+                "total_bots": len(bots),
+            },
+        }
+
+    @app.post("/_mock/bot_catalog/role")
+    async def update_bot_catalog_role(request: BotCatalogRoleUpdateRequest) -> dict[str, Any]:
+        async with catalog_mutation_lock:
+            updated = set_bot_default_role(
+                bots_config_path=bots_config_path,
+                bot_id=request.bot_id,
+                role=request.role,
+            )
+            if not updated:
+                raise HTTPException(status_code=404, detail=f"unknown bot_id: {request.bot_id}")
+            bots = build_bot_catalog(
+                bots_config_path=bots_config_path,
+                embedded_host=embedded_host,
+                embedded_base_port=embedded_base_port,
+            )
+        selected = next((row for row in bots if str(row.get("bot_id") or "") == request.bot_id), None)
+        return {
+            "ok": True,
+            "result": {
+                "bot": selected,
                 "total_bots": len(bots),
             },
         }

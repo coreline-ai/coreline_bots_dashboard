@@ -40,6 +40,17 @@ const debateTurns = document.getElementById("debate-turns");
 const debateErrors = document.getElementById("debate-errors");
 const debateStopBtn = document.getElementById("debate-stop-btn");
 const toggleDebatePanelBtn = document.getElementById("toggle-debate-panel-btn");
+const coworkPanel = document.getElementById("cowork-panel");
+const coworkPanelBody = document.getElementById("cowork-panel-body");
+const coworkMeta = document.getElementById("cowork-meta");
+const coworkCurrentStage = document.getElementById("cowork-current-stage");
+const coworkStages = document.getElementById("cowork-stages");
+const coworkTasks = document.getElementById("cowork-tasks");
+const coworkErrors = document.getElementById("cowork-errors");
+const coworkFinal = document.getElementById("cowork-final");
+const coworkArtifacts = document.getElementById("cowork-artifacts");
+const coworkStopBtn = document.getElementById("cowork-stop-btn");
+const toggleCoworkPanelBtn = document.getElementById("toggle-cowork-panel-btn");
 const towerMeta = document.getElementById("tower-meta");
 const towerList = document.getElementById("tower-list");
 const towerRefreshBtn = document.getElementById("tower-refresh-btn");
@@ -66,11 +77,13 @@ const rateCountInput = document.getElementById("rate-count-input");
 const rateRetryInput = document.getElementById("rate-retry-input");
 
 const DEFAULT_TOKEN = "mock_token_1";
-const STORAGE_KEY = "mock_messenger_ui_state_v3";
+const STORAGE_KEY = "mock_messenger_ui_state_v4";
+const LEGACY_STORAGE_KEYS = ["mock_messenger_ui_state_v3"];
 const THEME_STORAGE_KEY = "mock_messenger_theme";
 const SESSION_SECTION_STORAGE_KEY = "mock_messenger_session_section_hidden";
 const AGENT_SECTION_STORAGE_KEY = "mock_messenger_agent_section_hidden";
 const DEBATE_PANEL_COLLAPSE_STORAGE_KEY = "mock_messenger_debate_panel_hidden";
+const COWORK_PANEL_COLLAPSE_STORAGE_KEY = "mock_messenger_cowork_panel_hidden";
 const FIXED_THEME = "light";
 const SCROLL_BOTTOM_THRESHOLD = 24;
 const AUTO_REFRESH_INTERVAL_MS = 1000;
@@ -107,6 +120,7 @@ const COMMAND_CATALOG = [
   { command: "/echo", usage: "/echo ", nameKo: "에코", description: "입력한 텍스트를 그대로 응답합니다." }
 ];
 const SUPPORTED_PROVIDER_OPTIONS = ["codex", "gemini", "claude"];
+const SUPPORTED_ROLE_OPTIONS = ["controller", "planner", "executor", "integrator"];
 const FALLBACK_AVAILABLE_MODELS = {
   codex: [
     "gpt-5.3-codex",
@@ -143,14 +157,19 @@ let uiState = {
   selected_profile_id: null,
   profiles: [],
   active_debate_id: null,
-  active_debate_scope_key: null
+  active_debate_scope_key: null,
+  active_cowork_id: null
 };
 let parallelSendBusy = false;
 let debateBusy = false;
 let debatePollingTimer = null;
 let debateLastStatus = "";
+let coworkBusy = false;
+let coworkPollingTimer = null;
+let coworkLastStatus = "";
 let towerRecoverBusy = false;
 const profileModelApplyBusy = new Set();
+let loadedStateFromLegacy = false;
 
 function makeProfileId() {
   if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
@@ -269,6 +288,26 @@ function resolveProfileProject(profile, diagnostics) {
   return normalizeProjectPath(profile?.selected_project);
 }
 
+function normalizeRole(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (SUPPORTED_ROLE_OPTIONS.includes(normalized)) {
+    return normalized;
+  }
+  return "executor";
+}
+
+function resolveProfileRole(profile, catalogRow) {
+  const selectedRole = normalizeRole(profile?.selected_role);
+  if (selectedRole) {
+    return selectedRole;
+  }
+  const defaultRole = normalizeRole(catalogRow?.default_role);
+  if (defaultRole) {
+    return defaultRole;
+  }
+  return "executor";
+}
+
 function parseUnsafeUntil(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -316,42 +355,50 @@ function userIdValue() {
 }
 
 function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return null;
-    }
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
-      return null;
-    }
-    const profiles = Array.isArray(parsed.profiles)
-      ? parsed.profiles
-          .map((profile) => ({
-            profile_id: String(profile.profile_id || makeProfileId()),
-            label: String(profile.label || "Profile"),
-            bot_id: String(profile.bot_id || ""),
-            token: String(profile.token || ""),
-            chat_id: numberOrDefault(profile.chat_id, 1001),
-            user_id: numberOrDefault(profile.user_id, 9001),
-            selected_for_parallel: profile.selected_for_parallel !== false,
-            selected_provider: String(profile.selected_provider || ""),
-            selected_model: String(profile.selected_model || ""),
-            selected_skill: String(profile.selected_skill || ""),
-            selected_project: String(profile.selected_project || "")
-          }))
-          .filter((profile) => profile.token || profile.bot_id)
-      : [];
+  loadedStateFromLegacy = false;
+  const stateKeys = [STORAGE_KEY, ...LEGACY_STORAGE_KEYS];
+  for (const key of stateKeys) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) {
+        continue;
+      }
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") {
+        continue;
+      }
+      const profiles = Array.isArray(parsed.profiles)
+        ? parsed.profiles
+            .map((profile) => ({
+              profile_id: String(profile.profile_id || makeProfileId()),
+              label: String(profile.label || "Profile"),
+              bot_id: String(profile.bot_id || ""),
+              token: String(profile.token || ""),
+              chat_id: numberOrDefault(profile.chat_id, 1001),
+              user_id: numberOrDefault(profile.user_id, 9001),
+              selected_for_parallel: profile.selected_for_parallel !== false,
+              selected_provider: String(profile.selected_provider || ""),
+              selected_model: String(profile.selected_model || ""),
+              selected_skill: String(profile.selected_skill || ""),
+              selected_project: String(profile.selected_project || ""),
+              selected_role: normalizeRole(profile.selected_role || "")
+            }))
+            .filter((profile) => profile.token || profile.bot_id)
+        : [];
 
-    return {
-      selected_profile_id: parsed.selected_profile_id ? String(parsed.selected_profile_id) : null,
-      profiles,
-      active_debate_id: parsed.active_debate_id ? String(parsed.active_debate_id) : null,
-      active_debate_scope_key: parsed.active_debate_scope_key ? String(parsed.active_debate_scope_key) : null
-    };
-  } catch {
-    return null;
+      loadedStateFromLegacy = key !== STORAGE_KEY;
+      return {
+        selected_profile_id: parsed.selected_profile_id ? String(parsed.selected_profile_id) : null,
+        profiles,
+        active_debate_id: parsed.active_debate_id ? String(parsed.active_debate_id) : null,
+        active_debate_scope_key: parsed.active_debate_scope_key ? String(parsed.active_debate_scope_key) : null,
+        active_cowork_id: parsed.active_cowork_id ? String(parsed.active_cowork_id) : null
+      };
+    } catch {
+      continue;
+    }
   }
+  return null;
 }
 
 function saveState() {
@@ -492,6 +539,42 @@ function initDebatePanelToggle() {
   });
 }
 
+function renderCoworkPanelToggleButton(hidden) {
+  if (!toggleCoworkPanelBtn) {
+    return;
+  }
+  const icon = hidden ? "expand_more" : "expand_less";
+  const label = hidden ? "Cowork Panel 펼치기" : "Cowork Panel 접기";
+  toggleCoworkPanelBtn.innerHTML = [
+    `<span class="material-symbols-outlined" aria-hidden="true">${icon}</span>`,
+    `<span class="sr-only">${label}</span>`
+  ].join("");
+  toggleCoworkPanelBtn.title = label;
+  toggleCoworkPanelBtn.setAttribute("aria-label", label);
+  toggleCoworkPanelBtn.setAttribute("aria-expanded", hidden ? "false" : "true");
+}
+
+function applyCoworkPanelVisibility(hidden) {
+  if (!coworkPanelBody) {
+    return;
+  }
+  coworkPanelBody.classList.toggle("is-collapsed", hidden);
+  renderCoworkPanelToggleButton(hidden);
+}
+
+function initCoworkPanelToggle() {
+  if (!toggleCoworkPanelBtn || !coworkPanelBody) {
+    return;
+  }
+  const hidden = isSectionHidden(COWORK_PANEL_COLLAPSE_STORAGE_KEY);
+  applyCoworkPanelVisibility(hidden);
+  toggleCoworkPanelBtn.addEventListener("click", () => {
+    const nextHidden = !coworkPanelBody.classList.contains("is-collapsed");
+    localStorage.setItem(COWORK_PANEL_COLLAPSE_STORAGE_KEY, nextHidden ? "1" : "0");
+    applyCoworkPanelVisibility(nextHidden);
+  });
+}
+
 function upsertCurrentProfileFromInputs() {
   const profile = currentProfile();
   if (!profile) {
@@ -508,6 +591,7 @@ function upsertCurrentProfileFromInputs() {
     profile.selected_model = "";
     profile.selected_skill = "";
     profile.selected_project = "";
+    profile.selected_role = "executor";
   }
   saveState();
 }
@@ -636,11 +720,17 @@ function setDebateBusy(busy) {
   renderSessionProjectControl();
 }
 
+function setCoworkBusy(busy) {
+  coworkBusy = Boolean(busy);
+  updateParallelSendButtonState();
+  renderSessionProjectControl();
+}
+
 function updateParallelSendButtonState() {
   if (!parallelSendBtn) {
     return;
   }
-  const disabled = parallelSendBusy || debateBusy;
+  const disabled = parallelSendBusy || debateBusy || coworkBusy;
   parallelSendBtn.disabled = disabled;
   if (parallelSendBusy) {
     parallelSendBtn.textContent = "병렬 전송 실행 중...";
@@ -648,6 +738,10 @@ function updateParallelSendButtonState() {
   }
   if (debateBusy) {
     parallelSendBtn.textContent = "토론 진행 중...";
+    return;
+  }
+  if (coworkBusy) {
+    parallelSendBtn.textContent = "팀워크 진행 중...";
     return;
   }
   parallelSendBtn.textContent = "선택 병렬 전송";
@@ -738,6 +832,188 @@ function renderDebatePanel(snapshot) {
     debateStopBtn.disabled = !isActive || !debateId;
   }
   setDebateBusy(isActive);
+}
+
+function summarizeCoworkText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "(empty)";
+  }
+  if (text.length <= 180) {
+    return text;
+  }
+  return `${text.slice(0, 180)}...`;
+}
+
+function formatFileSize(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  if (value < 1024) {
+    return `${Math.trunc(value)} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderCoworkList(target, rows, emptyText, detailKey, headBuilder) {
+  if (!target) {
+    return;
+  }
+  target.innerHTML = "";
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "cowork-row";
+    empty.textContent = emptyText;
+    target.appendChild(empty);
+    return;
+  }
+
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = "cowork-row";
+
+    const head = document.createElement("div");
+    head.className = "cowork-row-head";
+    const status = String(row.status || "unknown");
+    head.textContent = headBuilder(row, status);
+    head.classList.add(`cowork-row-status-${status}`);
+
+    const detail = document.createElement("div");
+    detail.className = "cowork-row-detail";
+    detail.textContent = summarizeCoworkText(row?.[detailKey] || row?.error_text || row?.response_text || status);
+
+    item.appendChild(head);
+    item.appendChild(detail);
+    target.appendChild(item);
+  }
+}
+
+function renderCoworkArtifacts(payload) {
+  if (!coworkArtifacts) {
+    return;
+  }
+  coworkArtifacts.innerHTML = "";
+  const files = payload && Array.isArray(payload.files) ? payload.files : [];
+  if (!files.length) {
+    const empty = document.createElement("div");
+    empty.className = "cowork-artifacts-empty";
+    empty.textContent = "결과 파일 없음";
+    coworkArtifacts.appendChild(empty);
+    return;
+  }
+  const title = document.createElement("div");
+  title.className = "cowork-artifacts-title";
+  title.textContent = "결과 파일";
+  coworkArtifacts.appendChild(title);
+  const list = document.createElement("div");
+  list.className = "cowork-artifacts-list";
+  for (const file of files) {
+    const row = document.createElement("div");
+    row.className = "cowork-artifact-row";
+    const link = document.createElement("a");
+    link.className = "cowork-artifact-link";
+    link.href = String(file?.url || "#");
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = String(file?.name || "artifact");
+    row.appendChild(link);
+    const meta = document.createElement("span");
+    meta.className = "cowork-artifact-size";
+    meta.textContent = formatFileSize(file?.size_bytes);
+    row.appendChild(meta);
+    list.appendChild(row);
+  }
+  coworkArtifacts.appendChild(list);
+}
+
+function renderCoworkPanel(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : null;
+  if (!data) {
+    if (coworkMeta) {
+      coworkMeta.textContent = "팀워크 실행이 없습니다.";
+    }
+    if (coworkCurrentStage) {
+      coworkCurrentStage.textContent = "대기 중";
+    }
+    renderCoworkList(coworkStages, [], "스테이지 로그가 없습니다.", "response_text", () => "none");
+    renderCoworkList(coworkTasks, [], "작업 로그가 없습니다.", "response_text", () => "none");
+    renderCoworkList(coworkErrors, [], "오류가 없습니다.", "error_text", () => "none");
+    if (coworkFinal) {
+      coworkFinal.textContent = "최종 리포트 없음";
+    }
+    renderCoworkArtifacts(null);
+    if (coworkStopBtn) {
+      coworkStopBtn.disabled = true;
+    }
+    setCoworkBusy(false);
+    return;
+  }
+
+  const coworkId = String(data.cowork_id || "");
+  const status = String(data.status || "unknown");
+  const task = String(data.task || "");
+  const currentStage = String(data.current_stage || "none");
+  const currentActor = data.current_actor && typeof data.current_actor === "object" ? data.current_actor : null;
+  const isActive = status === "queued" || status === "running";
+  const rowsStages = Array.isArray(data.stages) ? data.stages : [];
+  const rowsTasks = Array.isArray(data.tasks) ? data.tasks : [];
+  const rowsErrors = Array.isArray(data.errors) ? data.errors : [];
+  const finalReport = data.final_report && typeof data.final_report === "object" ? data.final_report : null;
+  const artifacts = data.artifacts && typeof data.artifacts === "object" ? data.artifacts : null;
+
+  if (coworkMeta) {
+    coworkMeta.textContent = `ID=${coworkId} · ${status.toUpperCase()} · ${task}`;
+  }
+  if (coworkCurrentStage) {
+    const actorText = currentActor
+      ? `${String(currentActor.label || currentActor.bot_id || "bot")} (${String(currentActor.role || "executor")})`
+      : "none";
+    coworkCurrentStage.textContent = `현재 단계: ${currentStage} · actor=${actorText}`;
+  }
+
+  renderCoworkList(
+    coworkStages,
+    rowsStages,
+    "스테이지 로그가 없습니다.",
+    "response_text",
+    (row, rowStatus) =>
+      `S${Number(row.stage_no || 0)} · ${String(row.stage_type || "stage")} · ${String(
+        row.actor_label || row.actor_bot_id || "bot"
+      )} · ${rowStatus}`
+  );
+  renderCoworkList(
+    coworkTasks,
+    rowsTasks,
+    "작업 로그가 없습니다.",
+    "response_text",
+    (row, rowStatus) =>
+      `T${Number(row.task_no || 0)} · ${String(row.assignee_label || row.assignee_bot_id || "bot")} · ${rowStatus}`
+  );
+  renderCoworkList(
+    coworkErrors,
+    rowsErrors,
+    "오류가 없습니다.",
+    "error_text",
+    (row, rowStatus) =>
+      `${String(row.source || "item")}#${Number(row.source_id || 0)} · ${String(row.label || row.bot_id || "bot")} · ${rowStatus}`
+  );
+
+  if (coworkFinal) {
+    if (!finalReport) {
+      coworkFinal.textContent = "최종 리포트 없음";
+    } else {
+      coworkFinal.textContent = JSON.stringify(finalReport, null, 2);
+    }
+  }
+  renderCoworkArtifacts(artifacts);
+  if (coworkStopBtn) {
+    coworkStopBtn.disabled = !isActive || !coworkId;
+  }
+  setCoworkBusy(isActive);
 }
 
 function renderControlTowerPanel(payload) {
@@ -955,6 +1231,7 @@ function buildBotListRenderKey() {
         profile.selected_model || "",
         profile.selected_skill || "",
         profile.selected_project || "",
+        profile.selected_role || "",
         provider,
         model,
         String(session.current_skill || ""),
@@ -998,7 +1275,7 @@ function renderSessionProjectControl() {
   const diag = profileDiagnostics.get(profile.profile_id) || null;
   const selectedProject = resolveProfileProject(profile, diag);
   const applying = isProfileModelApplyBusy(profile.profile_id);
-  const disabled = applying || parallelSendBusy || debateBusy;
+  const disabled = applying || parallelSendBusy || debateBusy || coworkBusy;
 
   sessionProjectSelect.innerHTML = "";
   const defaultOption = document.createElement("option");
@@ -1172,6 +1449,39 @@ async function applyProfileProject(profile, projectPath) {
   }
 }
 
+async function applyProfileRole(profile, role) {
+  const profileId = String(profile?.profile_id || "");
+  if (!profileId || isProfileModelApplyBusy(profileId)) {
+    return false;
+  }
+  const previousRole = String(profile.selected_role || "executor");
+  const nextRole = normalizeRole(role);
+  setProfileModelApplyBusy(profileId, true);
+  try {
+    const response = await requestJson("/_mock/bot_catalog/role", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: String(profile.bot_id || ""),
+        role: nextRole,
+      }),
+    });
+    const bot = response?.result?.bot || null;
+    profile.selected_role = normalizeRole(bot?.default_role || nextRole);
+    await loadCatalog();
+    saveState();
+    renderBotList(true);
+    return true;
+  } catch (error) {
+    profile.selected_role = previousRole;
+    saveState();
+    appendBubble("meta", `${profile.label}: role 변경 실패: ${error.message}`);
+    renderBotList(true);
+    return false;
+  } finally {
+    setProfileModelApplyBusy(profileId, false);
+  }
+}
+
 function renderBotList(force = false) {
   if (!botList) {
     return;
@@ -1200,13 +1510,15 @@ function renderBotList(force = false) {
     const modelOptions = availableModelsForProvider(catalogRow, provider);
     const model = resolveProfileModel(profile, diag, catalogRow, provider);
     const currentSkill = resolveProfileSkill(profile, diag);
+    const currentRole = resolveProfileRole(profile, catalogRow);
     const unsafeLabel = formatUnsafeRemaining(session.unsafe_until);
     const applyingModel = isProfileModelApplyBusy(profile.profile_id);
-    const controlsDisabled = applyingModel || parallelSendBusy || debateBusy;
+    const controlsDisabled = applyingModel || parallelSendBusy || debateBusy || coworkBusy;
     profile.selected_provider = provider;
     profile.selected_model = model;
     profile.selected_skill = currentSkill;
     profile.selected_project = resolveProfileProject(profile, diag);
+    profile.selected_role = currentRole;
 
     const item = document.createElement("div");
     item.className = "bot-item";
@@ -1385,6 +1697,35 @@ function renderBotList(force = false) {
     });
     skillLabel.appendChild(skillSelect);
     modelControl.appendChild(skillLabel);
+
+    const roleLabel = document.createElement("label");
+    roleLabel.className = "bot-item-model-label";
+    roleLabel.textContent = "Role";
+    const roleSelect = document.createElement("select");
+    roleSelect.className = "bot-item-model-select";
+    roleSelect.disabled = controlsDisabled;
+    roleSelect.addEventListener("click", (event) => event.stopPropagation());
+    for (const roleValue of SUPPORTED_ROLE_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = roleValue;
+      option.textContent = roleValue;
+      option.selected = roleValue === currentRole;
+      roleSelect.appendChild(option);
+    }
+    roleSelect.addEventListener("change", async (event) => {
+      event.stopPropagation();
+      const nextRole = normalizeRole(roleSelect.value);
+      if (!nextRole || nextRole === currentRole) {
+        roleSelect.value = currentRole;
+        return;
+      }
+      const ok = await applyProfileRole(profile, nextRole);
+      if (!ok) {
+        roleSelect.value = currentRole;
+      }
+    });
+    roleLabel.appendChild(roleSelect);
+    modelControl.appendChild(roleLabel);
     meta.appendChild(modelControl);
 
     const unsafeRow = document.createElement("div");
@@ -1489,7 +1830,8 @@ function ensureInitialProfileFromParams() {
     selected_provider: normalizeProvider(defaultBot?.default_adapter || "gemini"),
     selected_model: "",
     selected_skill: "",
-    selected_project: ""
+    selected_project: "",
+    selected_role: normalizeRole(defaultBot?.default_role || "executor")
   });
   uiState.selected_profile_id = uiState.profiles[0].profile_id;
 }
@@ -1561,9 +1903,16 @@ async function hydrateInputs() {
   renderBotList();
   renderParallelResults([]);
   renderDebatePanel(null);
+  renderCoworkPanel(null);
   renderControlTowerPanel(null);
   updateParallelSendButtonState();
   saveState();
+  if (loadedStateFromLegacy) {
+    for (const key of LEGACY_STORAGE_KEYS) {
+      localStorage.removeItem(key);
+    }
+    loadedStateFromLegacy = false;
+  }
 }
 
 function hideCommandSuggest() {
@@ -2603,7 +2952,84 @@ function parseDebateCommand(rawText) {
   };
 }
 
+function parseCoworkCommand(rawText) {
+  const text = String(rawText || "").trim();
+  if (!/^\/cowork(?:\s|$)/i.test(text)) {
+    return null;
+  }
+
+  let rest = text.replace(/^\/cowork\b/i, "").trim();
+  if (!rest) {
+    return { error: "작업 요청을 입력하세요. 예: /cowork 대시보드 API 성능 개선" };
+  }
+
+  let maxParallel = 3;
+  let maxTurnSec = 90;
+  let freshSession = true;
+  let keepPartialOnError = true;
+
+  const takeIntOption = (name, min, max) => {
+    const optionRe = new RegExp(`(?:^|\\s)--${name}\\s+(\\d+)(?=\\s|$)`, "i");
+    const match = rest.match(optionRe);
+    if (!match) {
+      return null;
+    }
+    const value = Number(match[1]);
+    rest = rest.replace(match[0], " ").trim();
+    if (!Number.isFinite(value) || value < min || value > max) {
+      return { error: `--${name} 값은 ${min}~${max} 범위여야 합니다.` };
+    }
+    return value;
+  };
+
+  const maxParallelValue = takeIntOption("max-parallel", 1, 8);
+  if (maxParallelValue && typeof maxParallelValue === "object" && maxParallelValue.error) {
+    return maxParallelValue;
+  }
+  if (typeof maxParallelValue === "number") {
+    maxParallel = Math.trunc(maxParallelValue);
+  }
+
+  const maxTurnValue = takeIntOption("max-turn-sec", 10, 300);
+  if (maxTurnValue && typeof maxTurnValue === "object" && maxTurnValue.error) {
+    return maxTurnValue;
+  }
+  if (typeof maxTurnValue === "number") {
+    maxTurnSec = Math.trunc(maxTurnValue);
+  }
+
+  if (/(?:^|\s)--keep-session(?:\s|$)/i.test(rest)) {
+    freshSession = false;
+    rest = rest.replace(/(?:^|\s)--keep-session(?=\s|$)/gi, " ").trim();
+  }
+  if (/(?:^|\s)--strict(?:\s|$)/i.test(rest)) {
+    keepPartialOnError = false;
+    rest = rest.replace(/(?:^|\s)--strict(?=\s|$)/gi, " ").trim();
+  }
+
+  const unknownOption = rest.match(/--[A-Za-z0-9_-]+/);
+  if (unknownOption) {
+    return { error: `알 수 없는 옵션: ${unknownOption[0]}` };
+  }
+
+  const task = rest.replace(/\s+/g, " ").trim();
+  if (!task) {
+    return { error: "작업 요청을 입력하세요." };
+  }
+  return {
+    task,
+    max_parallel: maxParallel,
+    max_turn_sec: maxTurnSec,
+    fresh_session: freshSession,
+    keep_partial_on_error: keepPartialOnError,
+  };
+}
+
 function isDebateTerminalStatus(status) {
+  return status === "completed" || status === "stopped" || status === "failed";
+}
+
+function isCoworkTerminalStatus(status) {
   return status === "completed" || status === "stopped" || status === "failed";
 }
 
@@ -2630,6 +3056,13 @@ function stopDebatePolling() {
   if (debatePollingTimer) {
     clearInterval(debatePollingTimer);
     debatePollingTimer = null;
+  }
+}
+
+function stopCoworkPolling() {
+  if (coworkPollingTimer) {
+    clearInterval(coworkPollingTimer);
+    coworkPollingTimer = null;
   }
 }
 
@@ -2682,6 +3115,53 @@ async function pollDebateStatus(debateId) {
   }
 }
 
+async function pollCoworkStatus(coworkId) {
+  const id = String(coworkId || "").trim();
+  if (!id) {
+    stopCoworkPolling();
+    renderCoworkPanel(null);
+    uiState.active_cowork_id = null;
+    saveState();
+    return;
+  }
+
+  try {
+    const response = await requestJson(`/_mock/cowork/${encodeURIComponent(id)}`);
+    const snapshot = response?.result || null;
+    if (!snapshot) {
+      return;
+    }
+    const status = String(snapshot.status || "unknown");
+    renderCoworkPanel(snapshot);
+    if (status !== coworkLastStatus) {
+      coworkLastStatus = status;
+      if (isCoworkTerminalStatus(status)) {
+        const files = snapshot?.artifacts?.files;
+        const firstUrl = Array.isArray(files) && files[0] && typeof files[0].url === "string" ? files[0].url : "";
+        const artifactNote = firstUrl ? ` · 결과: ${firstUrl}` : "";
+        appendBubble("meta", `팀워크 ${status}: ${String(snapshot.task || "")}${artifactNote}`);
+      }
+    }
+
+    if (isCoworkTerminalStatus(status)) {
+      stopCoworkPolling();
+      uiState.active_cowork_id = null;
+    } else {
+      uiState.active_cowork_id = String(snapshot.cowork_id || id);
+    }
+    saveState();
+  } catch (error) {
+    if (String(error?.message || "").includes("404")) {
+      stopCoworkPolling();
+      renderCoworkPanel(null);
+      uiState.active_cowork_id = null;
+      saveState();
+      return;
+    }
+    appendBubble("meta", `cowork poll error: ${error.message}`);
+  }
+}
+
 function startDebatePolling(debateId) {
   stopDebatePolling();
   const id = String(debateId || "").trim();
@@ -2691,6 +3171,18 @@ function startDebatePolling(debateId) {
   void pollDebateStatus(id);
   debatePollingTimer = setInterval(() => {
     void pollDebateStatus(id);
+  }, 1000);
+}
+
+function startCoworkPolling(coworkId) {
+  stopCoworkPolling();
+  const id = String(coworkId || "").trim();
+  if (!id) {
+    return;
+  }
+  void pollCoworkStatus(id);
+  coworkPollingTimer = setInterval(() => {
+    void pollCoworkStatus(id);
   }, 1000);
 }
 
@@ -2726,6 +3218,28 @@ async function recoverActiveDebate() {
   }
 }
 
+async function recoverActiveCowork() {
+  try {
+    const active = await requestJson("/_mock/cowork/active");
+    const snapshot = active?.result || null;
+    if (!snapshot || !snapshot.cowork_id) {
+      uiState.active_cowork_id = null;
+      saveState();
+      renderCoworkPanel(null);
+      return;
+    }
+    uiState.active_cowork_id = String(snapshot.cowork_id);
+    saveState();
+    renderCoworkPanel(snapshot);
+    if (isCoworkTerminalStatus(String(snapshot.status || ""))) {
+      return;
+    }
+    startCoworkPolling(snapshot.cowork_id);
+  } catch {
+    renderCoworkPanel(null);
+  }
+}
+
 async function runDebateFlow(targets, parsedCommand) {
   if (!parsedCommand || parsedCommand.error) {
     const detail = parsedCommand?.error || "토론 명령 파싱 실패";
@@ -2736,6 +3250,11 @@ async function runDebateFlow(targets, parsedCommand) {
   if (debateBusy) {
     renderParallelResults([{ label: "토론", status: "FAIL", detail: "이미 진행 중인 토론이 있습니다." }]);
     appendBubble("meta", "이미 진행 중인 토론이 있습니다.");
+    return;
+  }
+  if (coworkBusy) {
+    renderParallelResults([{ label: "토론", status: "FAIL", detail: "팀워크 실행 중에는 토론을 시작할 수 없습니다." }]);
+    appendBubble("meta", "팀워크 실행 중에는 토론을 시작할 수 없습니다.");
     return;
   }
 
@@ -2778,6 +3297,63 @@ async function runDebateFlow(targets, parsedCommand) {
   }
 }
 
+async function runCoworkFlow(targets, parsedCommand) {
+  if (!parsedCommand || parsedCommand.error) {
+    const detail = parsedCommand?.error || "팀워크 명령 파싱 실패";
+    renderParallelResults([{ label: "팀워크", status: "FAIL", detail }]);
+    appendBubble("meta", detail);
+    return;
+  }
+  if (coworkBusy) {
+    renderParallelResults([{ label: "팀워크", status: "FAIL", detail: "이미 진행 중인 팀워크가 있습니다." }]);
+    appendBubble("meta", "이미 진행 중인 팀워크가 있습니다.");
+    return;
+  }
+  if (debateBusy) {
+    renderParallelResults([{ label: "팀워크", status: "FAIL", detail: "토론 진행 중에는 팀워크를 시작할 수 없습니다." }]);
+    appendBubble("meta", "토론 진행 중에는 팀워크를 시작할 수 없습니다.");
+    return;
+  }
+
+  const payload = {
+    task: parsedCommand.task,
+    max_parallel: parsedCommand.max_parallel,
+    max_turn_sec: parsedCommand.max_turn_sec,
+    fresh_session: parsedCommand.fresh_session,
+    keep_partial_on_error: parsedCommand.keep_partial_on_error,
+    profiles: targets.map((profile) => ({
+      profile_id: String(profile.profile_id),
+      label: String(profile.label || profile.bot_id || "Bot"),
+      bot_id: String(profile.bot_id || ""),
+      token: String(profile.token || ""),
+      chat_id: Number(profile.chat_id),
+      user_id: Number(profile.user_id),
+      role: normalizeRole(profile.selected_role || catalogByBotId.get(profile.bot_id)?.default_role || "executor"),
+    })),
+  };
+
+  try {
+    const response = await requestJson("/_mock/cowork/start", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const snapshot = response?.result || null;
+    renderParallelResults([{ label: "팀워크", status: "PASS", detail: "started" }]);
+    renderCoworkPanel(snapshot);
+    const coworkId = String(snapshot?.cowork_id || "");
+    uiState.active_cowork_id = coworkId || null;
+    coworkLastStatus = String(snapshot?.status || "");
+    saveState();
+    if (coworkId) {
+      startCoworkPolling(coworkId);
+    }
+    appendBubble("meta", `팀워크 시작: ${payload.task}`);
+  } catch (error) {
+    renderParallelResults([{ label: "팀워크", status: "FAIL", detail: String(error.message || error) }]);
+    appendBubble("meta", `팀워크 시작 실패: ${error.message}`);
+  }
+}
+
 async function runParallelSend() {
   const targets = uiState.profiles.filter((profile) => profile.selected_for_parallel !== false);
   if (targets.length < 2) {
@@ -2812,6 +3388,11 @@ async function runParallelSend() {
   const debateCommand = parseDebateCommand(text);
   if (debateCommand !== null) {
     await runDebateFlow(targets, debateCommand);
+    return;
+  }
+  const coworkCommand = parseCoworkCommand(text);
+  if (coworkCommand !== null) {
+    await runCoworkFlow(targets, coworkCommand);
     return;
   }
 
@@ -3099,6 +3680,7 @@ async function addProfileAutomatically() {
     selected_model: "",
     selected_skill: "",
     selected_project: "",
+    selected_role: normalizeRole(created.default_role || "executor"),
   };
 
   uiState.profiles.push(profile);
@@ -3165,7 +3747,8 @@ function addProfileFromDialog() {
     selected_provider: normalizeProvider(row?.default_adapter || "gemini"),
     selected_model: "",
     selected_skill: "",
-    selected_project: ""
+    selected_project: "",
+    selected_role: normalizeRole(row?.default_role || "executor")
   };
   uiState.profiles.push(profile);
   uiState.selected_profile_id = profile.profile_id;
@@ -3351,6 +3934,22 @@ if (debateStopBtn) {
   });
 }
 
+if (coworkStopBtn) {
+  coworkStopBtn.addEventListener("click", async () => {
+    const coworkId = String(uiState.active_cowork_id || "").trim();
+    if (!coworkId) {
+      return;
+    }
+    try {
+      await requestJson(`/_mock/cowork/${encodeURIComponent(coworkId)}/stop`, { method: "POST" });
+      appendBubble("meta", "팀워크 중단 요청을 전송했습니다.");
+      await pollCoworkStatus(coworkId);
+    } catch (error) {
+      appendBubble("meta", `팀워크 중단 실패: ${error.message}`);
+    }
+  });
+}
+
 if (towerRefreshBtn) {
   towerRefreshBtn.addEventListener("click", () => {
     void refreshControlTower();
@@ -3427,9 +4026,11 @@ setInterval(() => {
 initTheme();
 initSectionToggles();
 initDebatePanelToggle();
+initCoworkPanelToggle();
 hydrateInputs().then(async () => {
   updateEssentialToggleButton();
   await recoverActiveDebate();
+  await recoverActiveCowork();
   await refreshRuntimeProfile();
   await refreshControlTower();
   await refreshProfileDiagnostics();

@@ -269,6 +269,7 @@ def test_mock_bot_catalog_endpoint(tmp_path: Path) -> None:
         bots = payload["result"]["bots"]
         assert len(bots) == 3
         assert bots[0]["bot_id"] == "bot-a"
+        assert bots[0]["default_role"] == "executor"
         assert bots[0]["embedded_url"] == "http://127.0.0.1:8600"
         assert bots[0]["available_models"]["gemini"] == ["gemini-2.5-pro", "gemini-2.5-flash"]
         assert bots[0]["available_models"]["codex"] == [

@@ -5,6 +5,7 @@
 .mock_messenger/
 .mock_messenger_9082/
 .playwright-cli/
+cowork/
 __pycache__/
 *.egg-info/
 .DS_Store

@@ -490,3 +490,127 @@ test('debate stop button requests stop and updates status', async ({ page }) => 
   await page.click('#debate-stop-btn');
   await expect(page.locator('#debate-meta')).toContainText('STOPPED');
 });
+
+test('/cowork command shows cowork panel and completes', async ({ page }) => {
+  await page.route('**/_mock/debate/active*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, result: null }),
+    });
+  });
+
+  await page.route('**/_mock/cowork/active*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, result: null }),
+    });
+  });
+
+  await page.route('**/_mock/cowork/start', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          cowork_id: 'cowork-e2e',
+          task: 'UI test task',
+          status: 'running',
+          max_parallel: 2,
+          max_turn_sec: 90,
+          fresh_session: true,
+          keep_partial_on_error: true,
+          stop_requested: false,
+          created_at: Date.now(),
+          started_at: Date.now(),
+          finished_at: null,
+          error_summary: null,
+          current_stage: 'planning',
+          current_actor: { bot_id: 'bot-a', label: 'Bot A', role: 'planner' },
+          stages: [],
+          tasks: [],
+          errors: [],
+          participants: [],
+          final_report: null,
+        },
+      }),
+    });
+  });
+
+  let pollCount = 0;
+  await page.route('**/_mock/cowork/cowork-e2e', async (route) => {
+    pollCount += 1;
+    const completed = pollCount >= 2;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          cowork_id: 'cowork-e2e',
+          task: 'UI test task',
+          status: completed ? 'completed' : 'running',
+          max_parallel: 2,
+          max_turn_sec: 90,
+          fresh_session: true,
+          keep_partial_on_error: true,
+          stop_requested: false,
+          created_at: Date.now(),
+          started_at: Date.now(),
+          finished_at: completed ? Date.now() : null,
+          error_summary: null,
+          current_stage: completed ? 'finalization' : 'execution',
+          current_actor: { bot_id: 'bot-a', label: 'Bot A', role: 'controller' },
+          stages: [
+            {
+              id: 1,
+              stage_no: 1,
+              stage_type: 'planning',
+              actor_bot_id: 'bot-b',
+              actor_label: 'Bot B',
+              actor_role: 'planner',
+              prompt_text: 'plan',
+              response_text: 'ok',
+              status: 'success',
+              started_at: Date.now(),
+              finished_at: Date.now(),
+              duration_ms: 10,
+            },
+          ],
+          tasks: [
+            {
+              id: 1,
+              task_no: 1,
+              title: 'Task 1',
+              spec_json: { title: 'Task 1' },
+              assignee_bot_id: 'bot-c',
+              assignee_label: 'Bot C',
+              assignee_role: 'executor',
+              status: 'success',
+              response_text: 'done',
+              error_text: null,
+              started_at: Date.now(),
+              finished_at: Date.now(),
+              duration_ms: 12,
+            },
+          ],
+          errors: [],
+          participants: [],
+          final_report: completed ? { final_conclusion: 'ok' } : null,
+        },
+      }),
+    });
+  });
+
+  await page.goto('/_mock/ui');
+  await page.click('#add-profile-btn');
+  await expect(page.locator('.bot-item')).toHaveCount(2);
+  await page.fill('#parallel-message-input', '/cowork UI test task --max-parallel 2');
+  await page.click('#parallel-send-btn');
+
+  await expect(page.locator('#cowork-meta')).toContainText('cowork-e2e');
+  await expect(page.locator('#cowork-meta')).toContainText('COMPLETED');
+  await expect(page.locator('#cowork-tasks .cowork-row')).toHaveCount(1);
+});

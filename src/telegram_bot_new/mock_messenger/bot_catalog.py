@@ -13,6 +13,7 @@ from telegram_bot_new.settings import GlobalSettings, get_global_settings, load_
 
 EVENT_LINE_RE = re.compile(r"^\[(\d+|~)\]\[(\d{2}:\d{2}:\d{2})\]\[([a-z_]+)\]\s?(.*)$", re.IGNORECASE)
 SUPPORTED_AGENTS = ("codex", "gemini", "claude", "echo")
+SUPPORTED_COWORK_ROLES = ("controller", "planner", "executor", "integrator")
 
 
 def mask_token(token: str) -> str:
@@ -31,6 +32,18 @@ def build_bot_catalog(
     if not config_path.exists():
         return []
     settings = _resolve_catalog_settings()
+    raw = _read_bots_file_raw(config_path)
+    raw_bots = list(raw.get("bots") or [])
+    role_by_bot_id: dict[str, str] = {}
+    for item in raw_bots:
+        if not isinstance(item, dict):
+            continue
+        bot_id = str(item.get("bot_id") or "").strip()
+        if not bot_id:
+            continue
+        raw_role = str(item.get("default_role") or "").strip().lower()
+        role_by_bot_id[bot_id] = raw_role if raw_role in SUPPORTED_COWORK_ROLES else "executor"
+
     try:
         bots = load_bots_config(config_path, settings, allow_env_fallback=False)
     except Exception:
@@ -51,6 +64,7 @@ def build_bot_catalog(
                 "mode": bot.mode,
                 "token": bot.telegram_token,
                 "token_masked": mask_token(bot.telegram_token),
+                "default_role": role_by_bot_id.get(str(bot.bot_id), "executor"),
                 "default_adapter": bot.adapter,
                 "default_models": {
                     "codex": bot.codex.model,
@@ -108,6 +122,7 @@ def create_dynamic_embedded_bot(
         "mode": "embedded",
         "telegram_token": resolved_token,
         "adapter": adapter if adapter in SUPPORTED_AGENTS else "gemini",
+        "default_role": "executor",
         "database_url": _build_dynamic_bot_database_url(config_path, resolved_bot_id),
         "webhook": {
             "path_secret": f"{resolved_bot_id}-path",
@@ -150,6 +165,33 @@ def delete_bot_from_catalog(*, bots_config_path: str | Path, bot_id: str) -> boo
         return False
 
     raw["bots"] = next_bots
+    _write_bots_file_raw(config_path, raw)
+    return True
+
+
+def set_bot_default_role(*, bots_config_path: str | Path, bot_id: str, role: str) -> bool:
+    target = str(bot_id or "").strip()
+    normalized_role = str(role or "").strip().lower()
+    if not target or normalized_role not in SUPPORTED_COWORK_ROLES:
+        return False
+
+    config_path = Path(bots_config_path).expanduser().resolve()
+    raw = _read_bots_file_raw(config_path)
+    bots = list(raw.get("bots") or [])
+
+    updated = False
+    for item in bots:
+        if not isinstance(item, dict):
+            continue
+        current_id = str(item.get("bot_id") or "").strip()
+        if current_id != target:
+            continue
+        item["default_role"] = normalized_role
+        updated = True
+        break
+    if not updated:
+        return False
+    raw["bots"] = bots
     _write_bots_file_raw(config_path, raw)
     return True
 

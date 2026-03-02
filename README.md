@@ -45,6 +45,7 @@ Telegram <-> CLI adapter bridge MVP.
 
 - 각 봇은 기본적으로 `/mode` 명령으로 `gemini`, `codex`, `claude` 모드를 전환할 수 있고, 대시보드 봇 카드에서 provider/model 드롭다운으로 즉시 변경할 수 있습니다.
 - 멀티봇을 지원하여, 한 번의 프롬프트로 여러 봇에서 다양한 형태의 결과물을 병렬로 얻을 수 있습니다.
+- 각 봇 카드에서 `Role(controller/planner/executor/integrator)`를 사전 지정할 수 있고, 병렬 입력창에서 `/cowork <요청>`으로 역할 기반 협업 오케스트레이션을 실행할 수 있습니다.
 - 멀티봇은 동적으로 다수 생성 및 삭제가 가능합니다.
 - 대시보드를 제공하여 시뮬레이션과 다양한 추가 개발 테스트를 수행할 수 있습니다.
 - Telegram 연동 코드는 구현되어 있으나, 현재 Telegram 계정 부재로 실계정 연동 테스트는 아직 진행하지 않았습니다.
@@ -386,7 +387,16 @@ Skill 관리:
 | `GET` | `/_mock/bot_catalog` | 봇 카탈로그 |
 | `POST` | `/_mock/bot_catalog/add` | 동적 bot 추가 |
 | `POST` | `/_mock/bot_catalog/delete` | bot 삭제 |
+| `POST` | `/_mock/bot_catalog/role` | bot 기본 역할(controller/planner/executor/integrator) 저장 |
 | `GET` | `/_mock/bot_diagnostics` | bot 진단(health/metrics/session/error_tag) |
+| `POST` | `/_mock/debate/start` | 멀티봇 토론 시작 |
+| `GET` | `/_mock/debate/active` | 진행 중 토론 조회 |
+| `GET` | `/_mock/debate/{debate_id}` | 토론 상세/턴 로그 조회 |
+| `POST` | `/_mock/debate/{debate_id}/stop` | 토론 중단 요청 |
+| `POST` | `/_mock/cowork/start` | 역할 기반 협업(`/cowork`) 시작 |
+| `GET` | `/_mock/cowork/active` | 진행 중 협업 조회 |
+| `GET` | `/_mock/cowork/{cowork_id}` | 협업 단계/작업/리포트 조회 |
+| `POST` | `/_mock/cowork/{cowork_id}/stop` | 협업 중단 요청 |
 | `POST` | `/_mock/rate_limit` | 429 시뮬레이션 룰 |
 
 ---

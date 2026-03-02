@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -33,6 +33,14 @@ class BotCatalogAddRequest(BaseModel):
 
 class BotCatalogDeleteRequest(BaseModel):
     bot_id: str = Field(min_length=1)
+
+
+CoworkRole = Literal["controller", "planner", "executor", "integrator"]
+
+
+class BotCatalogRoleUpdateRequest(BaseModel):
+    bot_id: str = Field(min_length=1)
+    role: CoworkRole
 
 
 class ControlTowerRecoverRequest(BaseModel):
@@ -128,3 +136,129 @@ class DebateStatusResponse(BaseModel):
     errors: list[DebateErrorView] = Field(default_factory=list)
     participants: list[DebateParticipantView] = Field(default_factory=list)
     decision_summary: Optional[DebateDecisionSummary] = None
+
+
+class CoworkProfileRef(BaseModel):
+    profile_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    bot_id: str = Field(min_length=1)
+    token: str = Field(min_length=1)
+    chat_id: int
+    user_id: int
+    role: CoworkRole = "executor"
+
+
+class CoworkStartRequest(BaseModel):
+    task: str = Field(min_length=1)
+    profiles: list[CoworkProfileRef] = Field(min_length=2)
+    max_parallel: int = Field(default=3, ge=1, le=8)
+    max_turn_sec: int = Field(default=90, ge=10, le=300)
+    fresh_session: bool = True
+    keep_partial_on_error: bool = True
+
+
+class CoworkCurrentActor(BaseModel):
+    bot_id: str
+    label: str
+    role: CoworkRole
+
+
+class CoworkStageView(BaseModel):
+    id: int
+    stage_no: int
+    stage_type: str
+    actor_bot_id: str
+    actor_label: str
+    actor_role: CoworkRole
+    prompt_text: str
+    response_text: Optional[str] = None
+    status: str
+    error_text: Optional[str] = None
+    started_at: int
+    finished_at: Optional[int] = None
+    duration_ms: Optional[int] = None
+
+
+class CoworkTaskView(BaseModel):
+    id: int
+    task_no: int
+    title: str
+    spec_json: dict[str, Any] = Field(default_factory=dict)
+    assignee_bot_id: str
+    assignee_label: str
+    assignee_role: CoworkRole
+    status: str
+    response_text: Optional[str] = None
+    error_text: Optional[str] = None
+    started_at: Optional[int] = None
+    finished_at: Optional[int] = None
+    duration_ms: Optional[int] = None
+
+
+class CoworkErrorView(BaseModel):
+    source: Literal["stage", "task"]
+    source_id: int
+    stage_type: Optional[str] = None
+    task_no: Optional[int] = None
+    bot_id: str
+    label: str
+    role: CoworkRole
+    status: str
+    error_text: str
+
+
+class CoworkParticipantView(BaseModel):
+    position: int
+    profile_id: str
+    label: str
+    bot_id: str
+    token: str
+    chat_id: int | str
+    user_id: int | str
+    role: CoworkRole
+    adapter: Optional[str] = None
+
+
+class CoworkFinalReport(BaseModel):
+    integrated_summary: Optional[str] = None
+    conflicts: Optional[str] = None
+    missing: Optional[str] = None
+    recommended_fixes: Optional[str] = None
+    final_conclusion: Optional[str] = None
+    execution_checklist: Optional[str] = None
+    immediate_actions_top3: list[str] = Field(default_factory=list)
+
+
+class CoworkArtifactFile(BaseModel):
+    name: str
+    path: str
+    url: str
+    size_bytes: int
+
+
+class CoworkArtifacts(BaseModel):
+    root_dir: str
+    files: list[CoworkArtifactFile] = Field(default_factory=list)
+
+
+class CoworkStatusResponse(BaseModel):
+    cowork_id: str
+    task: str
+    status: Literal["queued", "running", "completed", "stopped", "failed"]
+    max_parallel: int
+    max_turn_sec: int
+    fresh_session: bool
+    keep_partial_on_error: bool
+    stop_requested: bool
+    created_at: int
+    started_at: Optional[int] = None
+    finished_at: Optional[int] = None
+    error_summary: Optional[str] = None
+    current_stage: Optional[Literal["planning", "execution", "integration", "finalization"]] = None
+    current_actor: Optional[CoworkCurrentActor] = None
+    stages: list[CoworkStageView] = Field(default_factory=list)
+    tasks: list[CoworkTaskView] = Field(default_factory=list)
+    errors: list[CoworkErrorView] = Field(default_factory=list)
+    participants: list[CoworkParticipantView] = Field(default_factory=list)
+    final_report: Optional[CoworkFinalReport] = None
+    artifacts: Optional[CoworkArtifacts] = None
