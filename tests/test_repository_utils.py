@@ -38,6 +38,11 @@ def test_is_active_run_unique_conflict_ignores_fk_violation() -> None:
     assert _is_active_run_unique_conflict(error) is False
 
 
+def test_is_active_run_unique_conflict_detects_sqlite_unique_message() -> None:
+    error = _mk_integrity_error("UNIQUE constraint failed: cli_run_jobs.bot_id, cli_run_jobs.chat_id")
+    assert _is_active_run_unique_conflict(error) is True
+
+
 def test_is_active_session_unique_conflict_detects_partial_index_name() -> None:
     error = _mk_integrity_error("duplicate key value violates unique constraint \"uq_sessions_bot_chat_active\"")
     assert _is_active_session_unique_conflict(error) is True

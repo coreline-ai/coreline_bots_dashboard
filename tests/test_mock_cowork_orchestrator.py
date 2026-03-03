@@ -428,3 +428,176 @@ async def test_cowork_orchestrator_render_task_fails_when_link_missing(tmp_path:
 
     await orchestrator.shutdown()
     store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_orchestrator_serializes_execution_per_bot_chat(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-orchestrator-serialization.db"),
+        data_dir=str(tmp_path / "cowork-orchestrator-serialization-data"),
+    )
+    in_flight_by_scope: dict[tuple[str, int], int] = {}
+    overlaps = 0
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        nonlocal overlaps
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+
+        if text.startswith("당신은 멀티봇 협업의 Planner입니다."):
+            body = "\n".join(
+                [
+                    '{"title":"작업 1","goal":"g1","done_criteria":"d1","risk":"r1"}',
+                    '{"title":"작업 2","goal":"g2","done_criteria":"d2","risk":"r2"}',
+                    '{"title":"작업 3","goal":"g3","done_criteria":"d3","risk":"r3"}',
+                ]
+            )
+        elif text.startswith("당신은 멀티봇 협업의 Integrator입니다."):
+            body = "통합요약: 통합 완료\n충돌사항: 없음\n누락사항: 없음\n권장수정: 없음"
+        elif text.startswith("당신은 멀티봇 협업의 Controller입니다."):
+            body = "최종결론: 실행 가능\n실행체크리스트: 점검 완료\n즉시실행항목(Top3): 1) a 2) b 3) c"
+        else:
+            scope = (token, int(chat_id))
+            current = in_flight_by_scope.get(scope, 0)
+            if current > 0:
+                overlaps += 1
+            in_flight_by_scope[scope] = current + 1
+            await asyncio.sleep(0.05)
+            in_flight_by_scope[scope] = max(0, in_flight_by_scope[scope] - 1)
+            body = "결과요약: 구현 완료\n검증: 충족\n실행링크: http://127.0.0.1:9082/test\n남은이슈: 없음"
+
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(store=store, send_user_message=sender, poll_interval_sec=0.02, cool_down_sec=0.0)
+    req = _make_request(task="executor serialization test", max_parallel=3)
+    participants = [
+        {
+            "profile_id": "p-a",
+            "label": "Bot A",
+            "bot_id": "bot-a",
+            "token": "token-a",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "controller",
+            "adapter": "gemini",
+        },
+        {
+            "profile_id": "p-b",
+            "label": "Bot B",
+            "bot_id": "bot-b",
+            "token": "token-b",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "planner",
+            "adapter": "codex",
+        },
+        {
+            "profile_id": "p-c",
+            "label": "Bot C",
+            "bot_id": "bot-c",
+            "token": "token-c",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "integrator",
+            "adapter": "claude",
+        },
+        {
+            "profile_id": "p-b-exec",
+            "label": "Bot B Executor",
+            "bot_id": "bot-b",
+            "token": "token-b",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "executor",
+            "adapter": "codex",
+        },
+    ]
+    started = await orchestrator.start_cowork(request=req, participants=participants)
+    done = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert done["status"] == "completed"
+    assert overlaps == 0
+
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_orchestrator_fails_when_final_verdict_is_incomplete(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-orchestrator-verdict-fail.db"),
+        data_dir=str(tmp_path / "cowork-orchestrator-verdict-fail-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        if text.startswith("당신은 멀티봇 협업의 Planner입니다."):
+            body = '{"title":"요구사항 정리","goal":"요약","done_criteria":"정리본 작성","risk":"누락"}'
+        elif text.startswith("당신은 멀티봇 협업의 Integrator입니다."):
+            body = "통합요약: 산출물 점검 완료\n충돌사항: 없음\n누락사항: 없음\n권장수정: 없음"
+        elif text.startswith("당신은 멀티봇 협업의 Controller입니다."):
+            body = (
+                "최종결론: 요구사항 미이행 상태\n"
+                "실행체크리스트: 추가 구현 필요\n"
+                "즉시실행항목(Top3): 1) 구현 2) 검증 3) 재검토"
+            )
+        else:
+            body = "결과요약: 초안 작성\n검증: 일부 충족\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        max_rework_rounds=0,
+    )
+    req = _make_request(task="문서 초안 작성")
+    participants = [
+        {
+            "profile_id": "p-a",
+            "label": "Bot A",
+            "bot_id": "bot-a",
+            "token": "token-a",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "controller",
+            "adapter": "gemini",
+        },
+        {
+            "profile_id": "p-b",
+            "label": "Bot B",
+            "bot_id": "bot-b",
+            "token": "token-b",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "planner",
+            "adapter": "codex",
+        },
+        {
+            "profile_id": "p-c",
+            "label": "Bot C",
+            "bot_id": "bot-c",
+            "token": "token-c",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "executor",
+            "adapter": "claude",
+        },
+    ]
+    started = await orchestrator.start_cowork(request=req, participants=participants)
+    done = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert done["status"] == "failed"
+    failures = [str(row) for row in done["final_report"]["quality_gate_failures"]]
+    assert any("미완료/미이행" in row for row in failures)
+
+    await orchestrator.shutdown()
+    store.close()

@@ -33,16 +33,31 @@ ERR_CONNECTION_REFUSED_HINT = "err_connection_refused"
 RENDER_TASK_HINTS = (
     "render",
     "renderer",
+    "game",
+    "games",
+    "tetris",
+    "playable",
     "ui",
     "web",
     "page",
     "screen",
     "layout",
+    "게임",
+    "테트리스",
+    "플레이",
     "랜더",
     "렌더",
     "화면",
     "페이지",
     "웹",
+)
+FAILURE_VERDICT_HINTS = (
+    "미이행",
+    "미완료",
+    "불가",
+    "부재",
+    "진척이 0",
+    "0%",
 )
 ALLOWED_ROLES = ("controller", "planner", "executor", "integrator")
 
@@ -475,78 +490,89 @@ class CoworkOrchestrator:
             )
 
         semaphore = asyncio.Semaphore(max(1, int(max_parallel)))
+        participant_semaphores: dict[tuple[str, str], asyncio.Semaphore] = {}
+
+        def _participant_semaphore(participant: dict[str, Any]) -> asyncio.Semaphore:
+            key = self._participant_scope_key(participant)
+            existing = participant_semaphores.get(key)
+            if existing is not None:
+                return existing
+            created = asyncio.Semaphore(1)
+            participant_semaphores[key] = created
+            return created
 
         async def _run_one(row: dict[str, Any]) -> None:
+            assignee = row["assignee"]
             async with semaphore:
-                if self._is_stop_requested(cowork_id):
-                    self._store.finish_cowork_task(task_id=int(row["task_id"]), status="stopped", error_text="stop requested")
-                    return
+                async with _participant_semaphore(assignee):
+                    if self._is_stop_requested(cowork_id):
+                        self._store.finish_cowork_task(task_id=int(row["task_id"]), status="stopped", error_text="stop requested")
+                        return
 
-                assignee = row["assignee"]
-                plan = row["plan"]
-                self._store.start_cowork_task(task_id=int(row["task_id"]))
-                prompt_text = self._build_execution_prompt(
-                    task_text=task_text,
-                    task_no=int(row["task_no"]),
-                    plan=plan,
-                    assignee=assignee,
-                )
-                stage_id = self._store.insert_cowork_stage_start(
-                    cowork_id=cowork_id,
-                    stage_no=2,
-                    stage_type="execution",
-                    actor_bot_id=str(assignee.get("bot_id") or ""),
-                    actor_label=str(assignee.get("label") or ""),
-                    actor_role=str(assignee.get("role") or "executor"),
-                    prompt_text=prompt_text,
-                )
-
-                try:
-                    baseline = self._max_message_id(assignee)
-                    await self._send_participant_message(assignee, prompt_text)
-                    outcome = await self._wait_for_turn_result(
-                        cowork_id=cowork_id,
-                        participant=assignee,
-                        baseline_message_id=baseline,
-                        max_turn_sec=max_turn_sec,
+                    plan = row["plan"]
+                    self._store.start_cowork_task(task_id=int(row["task_id"]))
+                    prompt_text = self._build_execution_prompt(
+                        task_text=task_text,
+                        task_no=int(row["task_no"]),
+                        plan=plan,
+                        assignee=assignee,
                     )
-                except Exception as error:
-                    outcome = TurnOutcome(done=True, status="error", detail="send_error", error_text=str(error))
-
-                if self._looks_like_active_run_outcome(outcome):
-                    retry = await self._retry_turn_after_stop(
+                    stage_id = self._store.insert_cowork_stage_start(
                         cowork_id=cowork_id,
-                        participant=assignee,
+                        stage_no=2,
+                        stage_type="execution",
+                        actor_bot_id=str(assignee.get("bot_id") or ""),
+                        actor_label=str(assignee.get("label") or ""),
+                        actor_role=str(assignee.get("role") or "executor"),
                         prompt_text=prompt_text,
-                        max_turn_sec=max_turn_sec,
                     )
-                    if retry is not None:
-                        outcome = retry
 
-                if outcome.status == "success":
-                    self._store.finish_cowork_task(
-                        task_id=int(row["task_id"]),
-                        status="success",
-                        response_text=outcome.response_text,
-                    )
-                    self._store.finish_cowork_stage(
-                        stage_id=stage_id,
-                        status="success",
-                        response_text=outcome.response_text,
-                    )
-                else:
-                    self._store.finish_cowork_task(
-                        task_id=int(row["task_id"]),
-                        status=outcome.status,
-                        response_text=outcome.response_text,
-                        error_text=outcome.error_text or outcome.detail,
-                    )
-                    self._store.finish_cowork_stage(
-                        stage_id=stage_id,
-                        status=outcome.status,
-                        response_text=outcome.response_text,
-                        error_text=outcome.error_text or outcome.detail,
-                    )
+                    try:
+                        baseline = self._max_message_id(assignee)
+                        await self._send_participant_message(assignee, prompt_text)
+                        outcome = await self._wait_for_turn_result(
+                            cowork_id=cowork_id,
+                            participant=assignee,
+                            baseline_message_id=baseline,
+                            max_turn_sec=max_turn_sec,
+                        )
+                    except Exception as error:
+                        outcome = TurnOutcome(done=True, status="error", detail="send_error", error_text=str(error))
+
+                    if self._looks_like_active_run_outcome(outcome):
+                        retry = await self._retry_turn_after_stop(
+                            cowork_id=cowork_id,
+                            participant=assignee,
+                            prompt_text=prompt_text,
+                            max_turn_sec=max_turn_sec,
+                        )
+                        if retry is not None:
+                            outcome = retry
+
+                    if outcome.status == "success":
+                        self._store.finish_cowork_task(
+                            task_id=int(row["task_id"]),
+                            status="success",
+                            response_text=outcome.response_text,
+                        )
+                        self._store.finish_cowork_stage(
+                            stage_id=stage_id,
+                            status="success",
+                            response_text=outcome.response_text,
+                        )
+                    else:
+                        self._store.finish_cowork_task(
+                            task_id=int(row["task_id"]),
+                            status=outcome.status,
+                            response_text=outcome.response_text,
+                            error_text=outcome.error_text or outcome.detail,
+                        )
+                        self._store.finish_cowork_stage(
+                            stage_id=stage_id,
+                            status=outcome.status,
+                            response_text=outcome.response_text,
+                            error_text=outcome.error_text or outcome.detail,
+                        )
 
         await asyncio.gather(*[_run_one(row) for row in execution_rows])
         if self._is_stop_requested(cowork_id):
@@ -680,6 +706,12 @@ class CoworkOrchestrator:
         chat_id = int(participant.get("chat_id") or 0)
         user_id = int(participant.get("user_id") or 0)
         await self._send_user_message(token, chat_id, user_id, text)
+
+    @staticmethod
+    def _participant_scope_key(participant: dict[str, Any]) -> tuple[str, str]:
+        bot_id = str(participant.get("bot_id") or "")
+        chat_id = str(participant.get("chat_id") or "")
+        return (bot_id, chat_id)
 
     def _max_message_id(self, participant: dict[str, Any]) -> int:
         token = str(participant.get("token") or "")
@@ -1182,8 +1214,28 @@ class CoworkOrchestrator:
                     ]
                 )
             )
+        task_links: list[str] = []
+        for row in execution_rows:
+            if str(row.get("status") or "") != "success":
+                continue
+            link = self._extract_first_link(str(row.get("response_text") or ""))
+            normalized = self._normalize_link(link)
+            if normalized:
+                task_links.append(normalized)
+        if not execution_link and task_links:
+            execution_link = task_links[0]
         if requires_render_link and not execution_link:
             failures.append("렌더링/화면 요청인데 실행 가능한 링크가 없음")
+
+        verdict_blob = "\n".join(
+            [
+                final_conclusion,
+                str(final_report.get("integrated_summary") or ""),
+                str(final_report.get("evidence_summary") or ""),
+            ]
+        ).lower()
+        if any(hint in verdict_blob for hint in FAILURE_VERDICT_HINTS):
+            failures.append("최종결론이 미완료/미이행 상태")
 
         evidence_blob = "\n".join(
             [str(row.get("response_text") or "") for row in execution_rows]

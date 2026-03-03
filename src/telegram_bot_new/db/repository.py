@@ -36,6 +36,8 @@ def _is_active_run_unique_conflict(error: IntegrityError) -> bool:
     message = str(error).lower()
     if "uq_cli_run_jobs_bot_chat_active" in message:
         return True
+    if "unique constraint failed: cli_run_jobs.bot_id, cli_run_jobs.chat_id" in message:
+        return True
     if "duplicate key value violates unique constraint" in message and "cli_run_jobs" in message:
         return "bot_id" in message and "chat_id" in message
     return False
