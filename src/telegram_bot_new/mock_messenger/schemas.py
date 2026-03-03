@@ -28,7 +28,7 @@ class BotCatalogAddRequest(BaseModel):
     bot_id: Optional[str] = None
     token: Optional[str] = None
     name: Optional[str] = None
-    adapter: Literal["codex", "gemini", "claude", "echo"] = "gemini"
+    adapter: Literal["codex", "gemini", "claude", "echo"] = "codex"
 
 
 class BotCatalogDeleteRequest(BaseModel):
@@ -226,6 +226,10 @@ class CoworkFinalReport(BaseModel):
     recommended_fixes: Optional[str] = None
     final_conclusion: Optional[str] = None
     execution_checklist: Optional[str] = None
+    execution_link: Optional[str] = None
+    evidence_summary: Optional[str] = None
+    completion_status: Optional[str] = None
+    quality_gate_failures: list[str] = Field(default_factory=list)
     immediate_actions_top3: list[str] = Field(default_factory=list)
 
 

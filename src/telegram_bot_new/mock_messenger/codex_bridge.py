@@ -52,7 +52,7 @@ class MockRateLimitError(MockApiError):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Codex bridge for mock messenger")
     parser.add_argument("--base-url", default="http://127.0.0.1:9082")
-    parser.add_argument("--token", default="mock_token_1")
+    parser.add_argument("--token", default="mock_token_a")
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--model", default=None)
     parser.add_argument("--sandbox", default="workspace-write")

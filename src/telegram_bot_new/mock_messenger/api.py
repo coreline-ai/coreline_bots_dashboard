@@ -2,44 +2,34 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+import time
 from pathlib import Path
 from typing import Any, Optional, Union
 
 import httpx
-import yaml
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 
 from telegram_bot_new.mock_messenger.bot_catalog import (
     build_bot_catalog,
-    classify_last_error_tag,
-    compact_threads,
+    cleanup_deleted_bot_state_files,
     create_dynamic_embedded_bot,
     delete_bot_from_catalog,
-    extract_runtime_metrics,
-    fetch_embedded_audit_logs,
-    fetch_embedded_runtime,
-    infer_session_view_from_messages,
     set_bot_default_role,
 )
-from telegram_bot_new.mock_messenger.cowork import (
-    ActiveCoworkExistsError,
-    CoworkNotFoundError,
-    CoworkOrchestrator,
+from telegram_bot_new.mock_messenger.cowork import CoworkOrchestrator
+from telegram_bot_new.mock_messenger.debate import DebateOrchestrator
+from telegram_bot_new.mock_messenger.routes import (
+    register_diagnostics_routes,
+    register_mock_telegram_routes,
+    register_orchestration_routes,
+    register_ui_routes,
 )
-from telegram_bot_new.mock_messenger.debate import (
-    ActiveDebateExistsError,
-    DebateNotFoundError,
-    DebateOrchestrator,
-)
+from telegram_bot_new.mock_messenger.runtime_profile import explain_unknown_bot_id, infer_runtime_profile
 from telegram_bot_new.mock_messenger.schemas import (
     BotCatalogAddRequest,
     BotCatalogDeleteRequest,
     BotCatalogRoleUpdateRequest,
-    ControlTowerRecoverRequest,
-    CoworkStartRequest,
-    DebateStartRequest,
     MockClearMessagesRequest,
     MockSendRequest,
     RateLimitRuleRequest,
@@ -103,26 +93,7 @@ def create_app(
     async def _shutdown_event() -> None:
         await debate_orchestrator.shutdown()
         await cowork_orchestrator.shutdown()
-
-    @app.get("/")
-    async def root() -> RedirectResponse:
-        return RedirectResponse(url="/_mock/ui", status_code=307)
-
-    @app.get("/_mock/ui")
-    async def ui_index() -> FileResponse:
-        return FileResponse(_web_file("index.html"))
-
-    @app.get("/_mock/ui/app.js")
-    async def ui_app_js() -> FileResponse:
-        return FileResponse(_web_file("app.js"), media_type="application/javascript")
-
-    @app.get("/_mock/ui/styles.css")
-    async def ui_styles_css() -> FileResponse:
-        return FileResponse(_web_file("styles.css"), media_type="text/css")
-
-    @app.get("/_mock/ui/favicon.svg")
-    async def ui_favicon() -> FileResponse:
-        return FileResponse(_web_file("favicon.svg"), media_type="image/svg+xml")
+    register_ui_routes(app, web_file=_web_file)
 
     @app.get("/_mock/threads")
     async def get_threads(token: Optional[str] = None) -> dict[str, Any]:
@@ -141,156 +112,14 @@ def create_app(
             "ok": True,
             "result": result,
         }
-
-    @app.post("/_mock/debate/start")
-    async def start_debate(request: DebateStartRequest) -> dict[str, Any]:
-        if len(request.profiles) < 2:
-            raise HTTPException(status_code=400, detail="profiles must include at least two participants")
-
-        catalog_rows = build_bot_catalog(
-            bots_config_path=bots_config_path,
-            embedded_host=embedded_host,
-            embedded_base_port=embedded_base_port,
-        )
-        by_bot_id = {str(row.get("bot_id") or ""): row for row in catalog_rows}
-
-        participants: list[dict[str, Any]] = []
-        for profile in request.profiles:
-            row = by_bot_id.get(profile.bot_id)
-            if row is None:
-                raise HTTPException(status_code=400, detail=f"unknown bot_id: {profile.bot_id}")
-            expected_token = str(row.get("token") or "")
-            if expected_token != profile.token:
-                raise HTTPException(status_code=400, detail=f"token mismatch for bot_id: {profile.bot_id}")
-            participants.append(
-                {
-                    "profile_id": profile.profile_id,
-                    "label": profile.label,
-                    "bot_id": profile.bot_id,
-                    "token": profile.token,
-                    "chat_id": int(profile.chat_id),
-                    "user_id": int(profile.user_id),
-                    "adapter": str(row.get("default_adapter") or ""),
-                }
-            )
-        scope_parts = sorted(
-            f"{str(item.get('bot_id') or '')}:{int(item.get('chat_id') or 0)}"
-            for item in participants
-        )
-        scope_key = "|".join(scope_parts)
-
-        try:
-            result = await debate_orchestrator.start_debate(
-                request=request,
-                participants=participants,
-                scope_key=scope_key,
-            )
-        except ActiveDebateExistsError as error:
-            raise HTTPException(status_code=409, detail=f"active debate already exists: {error}") from error
-        return {"ok": True, "result": result}
-
-    @app.get("/_mock/debate/active")
-    async def get_active_debate(scope_key: Optional[str] = None) -> dict[str, Any]:
-        normalized_scope = scope_key.strip() if isinstance(scope_key, str) and scope_key.strip() else None
-        return {"ok": True, "result": debate_orchestrator.get_active_debate_snapshot(scope_key=normalized_scope)}
-
-    @app.get("/_mock/debate/{debate_id}")
-    async def get_debate(debate_id: str) -> dict[str, Any]:
-        snapshot = debate_orchestrator.get_debate_snapshot(debate_id)
-        if snapshot is None:
-            raise HTTPException(status_code=404, detail=f"unknown debate_id: {debate_id}")
-        return {"ok": True, "result": snapshot}
-
-    @app.post("/_mock/debate/{debate_id}/stop")
-    async def stop_debate(debate_id: str) -> dict[str, Any]:
-        try:
-            result = await debate_orchestrator.stop_debate(debate_id)
-        except DebateNotFoundError as error:
-            raise HTTPException(status_code=404, detail=f"unknown debate_id: {error}") from error
-        return {"ok": True, "result": result}
-
-    @app.post("/_mock/cowork/start")
-    async def start_cowork(request: CoworkStartRequest) -> dict[str, Any]:
-        if len(request.profiles) < 2:
-            raise HTTPException(status_code=400, detail="profiles must include at least two participants")
-
-        catalog_rows = build_bot_catalog(
-            bots_config_path=bots_config_path,
-            embedded_host=embedded_host,
-            embedded_base_port=embedded_base_port,
-        )
-        by_bot_id = {str(row.get("bot_id") or ""): row for row in catalog_rows}
-
-        participants: list[dict[str, Any]] = []
-        for profile in request.profiles:
-            row = by_bot_id.get(profile.bot_id)
-            if row is None:
-                raise HTTPException(status_code=400, detail=f"unknown bot_id: {profile.bot_id}")
-            expected_token = str(row.get("token") or "")
-            if expected_token != profile.token:
-                raise HTTPException(status_code=400, detail=f"token mismatch for bot_id: {profile.bot_id}")
-            participants.append(
-                {
-                    "profile_id": profile.profile_id,
-                    "label": profile.label,
-                    "bot_id": profile.bot_id,
-                    "token": profile.token,
-                    "chat_id": int(profile.chat_id),
-                    "user_id": int(profile.user_id),
-                    "role": str(profile.role),
-                    "adapter": str(row.get("default_adapter") or ""),
-                }
-            )
-
-        try:
-            result = await cowork_orchestrator.start_cowork(
-                request=request,
-                participants=participants,
-            )
-        except ActiveCoworkExistsError as error:
-            raise HTTPException(status_code=409, detail=f"active cowork already exists: {error}") from error
-        return {"ok": True, "result": result}
-
-    @app.get("/_mock/cowork/active")
-    async def get_active_cowork() -> dict[str, Any]:
-        return {"ok": True, "result": cowork_orchestrator.get_active_cowork_snapshot()}
-
-    @app.get("/_mock/cowork/{cowork_id}")
-    async def get_cowork(cowork_id: str) -> dict[str, Any]:
-        snapshot = cowork_orchestrator.get_cowork_snapshot(cowork_id)
-        if snapshot is None:
-            raise HTTPException(status_code=404, detail=f"unknown cowork_id: {cowork_id}")
-        return {"ok": True, "result": snapshot}
-
-    @app.post("/_mock/cowork/{cowork_id}/stop")
-    async def stop_cowork(cowork_id: str) -> dict[str, Any]:
-        try:
-            result = await cowork_orchestrator.stop_cowork(cowork_id)
-        except CoworkNotFoundError as error:
-            raise HTTPException(status_code=404, detail=f"unknown cowork_id: {error}") from error
-        return {"ok": True, "result": result}
-
-    @app.get("/_mock/cowork/{cowork_id}/artifacts")
-    async def get_cowork_artifacts(cowork_id: str) -> dict[str, Any]:
-        result = cowork_orchestrator.get_cowork_artifacts(cowork_id)
-        if result is None:
-            raise HTTPException(status_code=404, detail=f"unknown cowork_id: {cowork_id}")
-        return {"ok": True, "result": result}
-
-    @app.get("/_mock/cowork/{cowork_id}/artifact/{filename}")
-    async def get_cowork_artifact_file(cowork_id: str, filename: str) -> FileResponse:
-        path = cowork_orchestrator.resolve_artifact_path(cowork_id, filename)
-        if path is None:
-            raise HTTPException(status_code=404, detail=f"unknown cowork artifact: {cowork_id}/{filename}")
-        media_type = "application/octet-stream"
-        suffix = path.suffix.lower()
-        if suffix == ".json":
-            media_type = "application/json"
-        elif suffix in {".md", ".markdown"}:
-            media_type = "text/markdown"
-        elif suffix in {".txt", ".log"}:
-            media_type = "text/plain"
-        return FileResponse(path, media_type=media_type)
+    register_orchestration_routes(
+        app,
+        debate_orchestrator=debate_orchestrator,
+        cowork_orchestrator=cowork_orchestrator,
+        bots_config_path=bots_config_path,
+        embedded_host=embedded_host,
+        embedded_base_port=embedded_base_port,
+    )
 
     @app.get("/_mock/messages")
     async def get_messages(token: str, chat_id: Optional[int] = None, limit: int = 200) -> dict[str, Any]:
@@ -344,147 +173,24 @@ def create_app(
             embedded_host=embedded_host,
             embedded_base_port=embedded_base_port,
         )
-        return {"ok": True, "result": {"bots": bots}}
+        return {"ok": True, "result": {"bots": bots, "runtime_profile": _infer_runtime_profile()}}
 
     def _infer_runtime_profile() -> dict[str, Any]:
-        catalog = build_bot_catalog(
+        return infer_runtime_profile(
             bots_config_path=bots_config_path,
             embedded_host=embedded_host,
             embedded_base_port=embedded_base_port,
         )
-        effective_bots = len(catalog)
-        source_bots = effective_bots
-        source_config: str | None = None
 
-        config_path = Path(bots_config_path).expanduser().resolve()
-        default_source = Path.cwd() / "config" / "bots.multibot.yaml"
-        if config_path.name == "bots.effective.yaml" and default_source.exists():
-            source_config = str(default_source.resolve())
-        elif config_path.exists():
-            source_config = str(config_path)
-
-        if source_config:
-            try:
-                raw = yaml.safe_load(Path(source_config).read_text(encoding="utf-8")) or {}
-                if isinstance(raw, dict) and isinstance(raw.get("bots"), list):
-                    source_bots = len(raw["bots"])
-            except Exception:
-                source_bots = effective_bots
-
-        max_bots_env = (os.getenv("MAX_BOTS") or "").strip()
-        max_bots = int(max_bots_env) if max_bots_env.isdigit() else (effective_bots if source_bots > effective_bots else None)
-        return {
-            "effective_bots": effective_bots,
-            "source_bots": source_bots,
-            "max_bots": max_bots,
-            "is_capped": bool(source_bots > effective_bots),
-            "bots_config_path": str(config_path),
-            "source_config_path": source_config,
-        }
+    def _unknown_bot_detail(bot_id: str) -> str:
+        return explain_unknown_bot_id(
+            bot_id=str(bot_id or "").strip(),
+            runtime_profile=_infer_runtime_profile(),
+        )
 
     @app.get("/_mock/runtime_profile")
     async def get_runtime_profile() -> dict[str, Any]:
         return {"ok": True, "result": _infer_runtime_profile()}
-
-    def _compute_slo_snapshot(logs: list[dict[str, Any]]) -> dict[str, Any]:
-        run_turns = [row for row in logs if str(row.get("action") or "") == "run.turn"]
-        turn_total = len(run_turns)
-        turn_success = sum(1 for row in run_turns if str(row.get("result") or "") == "success")
-        turn_fail = max(0, turn_total - turn_success)
-        turn_success_rate = round((turn_success / turn_total) * 100, 1) if turn_total > 0 else None
-        recoveries = sum(
-            1
-            for row in logs
-            if str(row.get("action") or "") in {"run.stop", "session.new"}
-        )
-        return {
-            "turn_total_recent": turn_total,
-            "turn_success_recent": turn_success,
-            "turn_fail_recent": turn_fail,
-            "turn_success_rate_recent": turn_success_rate,
-            "recoveries_recent": recoveries,
-        }
-
-    def _compute_tower_state(
-        *,
-        health: dict[str, Any],
-        metrics: dict[str, Any],
-        session: dict[str, Any],
-        last_error_tag: str,
-        slo: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        bot_ok = bool(((health or {}).get("bot") or {}).get("ok"))
-        run_status = str((session or {}).get("run_status") or "idle").lower()
-        in_flight = (metrics or {}).get("in_flight_runs")
-        error_tag = str(last_error_tag or "unknown").lower()
-        turn_total_recent = int((slo or {}).get("turn_total_recent") or 0)
-        turn_success_rate_recent = (slo or {}).get("turn_success_rate_recent")
-
-        state = "healthy"
-        reason = "steady"
-        action = "none"
-        if not bot_ok:
-            state = "failing"
-            reason = "runtime_down"
-            action = "restart_session"
-        elif run_status == "error":
-            state = "failing"
-            reason = "run_error"
-            action = "stop_run"
-        elif error_tag not in {"", "unknown"}:
-            state = "degraded"
-            reason = f"error_tag:{error_tag}"
-            action = "stop_run"
-        elif isinstance(in_flight, int) and in_flight > 0:
-            state = "degraded"
-            reason = f"in_flight:{in_flight}"
-            action = "observe"
-        elif isinstance(turn_success_rate_recent, (int, float)) and turn_total_recent >= 3:
-            if turn_success_rate_recent < 60:
-                state = "failing"
-                reason = f"slo:turn_success_rate={turn_success_rate_recent}%"
-                action = "restart_session"
-            elif turn_success_rate_recent < 85:
-                state = "degraded"
-                reason = f"slo:turn_success_rate={turn_success_rate_recent}%"
-                action = "observe"
-
-        return {
-            "state": state,
-            "reason": reason,
-            "recommended_action": action,
-            "run_status": run_status,
-            "bot_ok": bot_ok,
-            "in_flight_runs": int(in_flight) if isinstance(in_flight, int) else None,
-            "turn_total_recent": turn_total_recent,
-            "turn_success_rate_recent": turn_success_rate_recent,
-        }
-
-    def _latest_chat_id_for_token(token: str) -> int:
-        threads = store.list_threads(token=token)
-        if not threads:
-            return 1001
-        top = max(threads, key=lambda row: int(row.get("last_updated_at") or 0))
-        candidate = top.get("chat_id")
-        if isinstance(candidate, int):
-            return candidate
-        if isinstance(candidate, str) and candidate.strip().lstrip("-").isdigit():
-            return int(candidate.strip())
-        return 1001
-
-    async def _collect_bot_diagnostics(*, selected: dict[str, Any], token: str, chat_id: Optional[int], limit: int) -> dict[str, Any]:
-        messages = store.get_messages(token=token, chat_id=chat_id, limit=limit)
-        threads = store.list_threads(token=token)
-        health, metrics_payload = await fetch_embedded_runtime(selected.get("embedded_url"))
-        metrics = extract_runtime_metrics(metrics_payload)
-        session_view = infer_session_view_from_messages(messages)
-        return {
-            "health": health,
-            "metrics": metrics,
-            "session": session_view,
-            "threads_top10": compact_threads(threads, selected_chat_id=chat_id),
-            "last_error_tag": classify_last_error_tag(messages),
-        }
 
     @app.get("/_mock/projects")
     async def get_projects() -> dict[str, Any]:
@@ -512,7 +218,7 @@ def create_app(
             embedded_base_port=embedded_base_port,
         )
         selected = next((row for row in catalog if row.get("bot_id") == bot_id), None) if bot_id else None
-        default_provider = str((selected or {}).get("default_adapter") or "gemini")
+        default_provider = str((selected or {}).get("default_adapter") or "codex")
         default_models = (selected or {}).get("default_models")
         normalized_models = default_models if isinstance(default_models, dict) else {}
         decision = suggest_route(
@@ -530,34 +236,6 @@ def create_app(
                 "model": decision.model,
                 "reason": decision.reason,
                 "stripped_prompt": decision.stripped_prompt,
-            },
-        }
-
-    @app.get("/_mock/audit_logs")
-    async def get_audit_logs(
-        bot_id: str,
-        chat_id: Optional[int] = None,
-        limit: int = 100,
-    ) -> dict[str, Any]:
-        catalog = build_bot_catalog(
-            bots_config_path=bots_config_path,
-            embedded_host=embedded_host,
-            embedded_base_port=embedded_base_port,
-        )
-        selected = next((row for row in catalog if row.get("bot_id") == bot_id), None)
-        if selected is None:
-            raise HTTPException(status_code=404, detail=f"unknown bot_id: {bot_id}")
-
-        logs, embedded_error = await fetch_embedded_audit_logs(
-            selected.get("embedded_url"),
-            chat_id=chat_id,
-            limit=max(1, min(int(limit), 500)),
-        )
-        return {
-            "ok": True,
-            "result": {
-                "logs": logs,
-                "embedded_error": embedded_error,
             },
         }
 
@@ -579,6 +257,10 @@ def create_app(
                 embedded_host=embedded_host,
                 embedded_base_port=embedded_base_port,
             )
+            stability = await _stabilize_embedded_runtime_if_needed(
+                bots=bots,
+                bots_config_path=bots_config_path,
+            )
 
         created_id = str(created.get("bot_id") or "").strip()
         created_row = next((row for row in bots if str(row.get("bot_id")) == created_id), None)
@@ -587,25 +269,52 @@ def create_app(
             "result": {
                 "bot": created_row or created,
                 "total_bots": len(bots),
+                "stability": stability,
             },
         }
 
     @app.post("/_mock/bot_catalog/delete")
     async def delete_bot_catalog_entry(request: BotCatalogDeleteRequest) -> dict[str, Any]:
         async with catalog_mutation_lock:
-            removed = delete_bot_from_catalog(bots_config_path=bots_config_path, bot_id=request.bot_id)
-            if not removed:
-                raise HTTPException(status_code=404, detail=f"unknown bot_id: {request.bot_id}")
+            before_bots = build_bot_catalog(
+                bots_config_path=bots_config_path,
+                embedded_host=embedded_host,
+                embedded_base_port=embedded_base_port,
+            )
+            deleted_row = next((row for row in before_bots if str(row.get("bot_id") or "") == request.bot_id), None)
+            removed_entry = delete_bot_from_catalog(bots_config_path=bots_config_path, bot_id=request.bot_id)
+            if removed_entry is None:
+                raise HTTPException(status_code=404, detail=_unknown_bot_detail(request.bot_id))
+            stop_wait = await _wait_embedded_process_stopped_if_needed(
+                embedded_url=str((deleted_row or {}).get("embedded_url") or "").strip(),
+                bots_config_path=bots_config_path,
+            )
+            cleanup_deleted_bot_state_files(
+                bots_config_path=bots_config_path,
+                bot_id=request.bot_id,
+                bot_entry=removed_entry,
+            )
+            cleanup_result: dict[str, int] | None = None
+            token = str((deleted_row or {}).get("token") or "").strip()
+            if token:
+                cleanup_result = store.clear_messages(token=token)
             bots = build_bot_catalog(
                 bots_config_path=bots_config_path,
                 embedded_host=embedded_host,
                 embedded_base_port=embedded_base_port,
+            )
+            stability = await _stabilize_embedded_runtime_if_needed(
+                bots=bots,
+                bots_config_path=bots_config_path,
             )
         return {
             "ok": True,
             "result": {
                 "deleted_bot_id": request.bot_id,
                 "total_bots": len(bots),
+                "cleanup": cleanup_result,
+                "stop_wait": stop_wait,
+                "stability": stability,
             },
         }
 
@@ -618,7 +327,7 @@ def create_app(
                 role=request.role,
             )
             if not updated:
-                raise HTTPException(status_code=404, detail=f"unknown bot_id: {request.bot_id}")
+                raise HTTPException(status_code=404, detail=_unknown_bot_detail(request.bot_id))
             bots = build_bot_catalog(
                 bots_config_path=bots_config_path,
                 embedded_host=embedded_host,
@@ -633,214 +342,15 @@ def create_app(
             },
         }
 
-    @app.get("/_mock/bot_diagnostics")
-    async def get_bot_diagnostics(
-        bot_id: str,
-        token: str,
-        chat_id: Optional[int] = None,
-        limit: int = 120,
-    ) -> dict[str, Any]:
-        resolved_limit = max(1, min(int(limit), 300))
-        catalog = build_bot_catalog(
-            bots_config_path=bots_config_path,
-            embedded_host=embedded_host,
-            embedded_base_port=embedded_base_port,
-        )
-        selected = next((row for row in catalog if row.get("bot_id") == bot_id), None)
-        if selected is None:
-            raise HTTPException(status_code=404, detail=f"unknown bot_id: {bot_id}")
-        expected_token = str(selected.get("token") or "").strip()
-        if expected_token != token:
-            raise HTTPException(status_code=400, detail=f"token does not match bot_id: {bot_id}")
-
-        diagnostics = await _collect_bot_diagnostics(
-            selected=selected,
-            token=token,
-            chat_id=chat_id,
-            limit=resolved_limit,
-        )
-
-        return {
-            "ok": True,
-            "result": {
-                **diagnostics,
-            },
-        }
-
-    @app.get("/_mock/control_tower")
-    async def get_control_tower(chat_id: Optional[int] = None, limit: int = 80) -> dict[str, Any]:
-        resolved_limit = max(20, min(int(limit), 300))
-        catalog = build_bot_catalog(
-            bots_config_path=bots_config_path,
-            embedded_host=embedded_host,
-            embedded_base_port=embedded_base_port,
-        )
-        rows: list[dict[str, Any]] = []
-        for bot in catalog:
-            token = str(bot.get("token") or "")
-            effective_chat_id = int(chat_id) if chat_id is not None else _latest_chat_id_for_token(token)
-            diagnostics = await _collect_bot_diagnostics(
-                selected=bot,
-                token=token,
-                chat_id=effective_chat_id,
-                limit=resolved_limit,
-            )
-            logs, _embedded_error = await fetch_embedded_audit_logs(
-                bot.get("embedded_url"),
-                chat_id=effective_chat_id,
-                limit=min(120, resolved_limit),
-            )
-            slo = _compute_slo_snapshot(logs)
-            state = _compute_tower_state(
-                health=diagnostics.get("health") or {},
-                metrics=diagnostics.get("metrics") or {},
-                session=diagnostics.get("session") or {},
-                last_error_tag=str(diagnostics.get("last_error_tag") or "unknown"),
-                slo=slo,
-            )
-            rows.append(
-                {
-                    "bot_id": str(bot.get("bot_id") or ""),
-                    "name": str(bot.get("name") or ""),
-                    "mode": str(bot.get("mode") or ""),
-                    "token": token,
-                    "chat_id": effective_chat_id,
-                    "embedded_error": _embedded_error,
-                    **state,
-                }
-            )
-        summary = {
-            "healthy": sum(1 for row in rows if row.get("state") == "healthy"),
-            "degraded": sum(1 for row in rows if row.get("state") == "degraded"),
-            "failing": sum(1 for row in rows if row.get("state") == "failing"),
-            "total": len(rows),
-        }
-        return {"ok": True, "result": {"summary": summary, "rows": rows}}
-
-    @app.post("/_mock/control_tower/recover")
-    async def control_tower_recover(request: ControlTowerRecoverRequest) -> dict[str, Any]:
-        catalog = build_bot_catalog(
-            bots_config_path=bots_config_path,
-            embedded_host=embedded_host,
-            embedded_base_port=embedded_base_port,
-        )
-        selected = next((row for row in catalog if str(row.get("bot_id")) == request.bot_id), None)
-        if selected is None:
-            raise HTTPException(status_code=404, detail=f"unknown bot_id: {request.bot_id}")
-        expected_token = str(selected.get("token") or "").strip()
-        selected_token = str(request.token or expected_token).strip()
-        if selected_token != expected_token:
-            raise HTTPException(status_code=400, detail=f"token does not match bot_id: {request.bot_id}")
-
-        target_chat_id = int(request.chat_id) if isinstance(request.chat_id, int) else _latest_chat_id_for_token(selected_token)
-        target_user_id = int(request.user_id)
-        command_results: list[dict[str, Any]] = []
-
-        async def _send_recover_command(text: str) -> None:
-            outcome = await _enqueue_and_dispatch_user_message(
-                selected_token,
-                target_chat_id,
-                target_user_id,
-                text,
-            )
-            command_results.append({"text": text, "result": outcome})
-
-        if request.strategy == "restart_session":
-            await _send_recover_command("/stop")
-            await asyncio.sleep(0.2)
-            await _send_recover_command("/new")
-        else:
-            await _send_recover_command("/stop")
-
-        diagnostics = await _collect_bot_diagnostics(
-            selected=selected,
-            token=selected_token,
-            chat_id=target_chat_id,
-            limit=120,
-        )
-        logs, _embedded_error = await fetch_embedded_audit_logs(
-            selected.get("embedded_url"),
-            chat_id=target_chat_id,
-            limit=120,
-        )
-        slo = _compute_slo_snapshot(logs)
-        state = _compute_tower_state(
-            health=diagnostics.get("health") or {},
-            metrics=diagnostics.get("metrics") or {},
-            session=diagnostics.get("session") or {},
-            last_error_tag=str(diagnostics.get("last_error_tag") or "unknown"),
-            slo=slo,
-        )
-        return {
-            "ok": True,
-            "result": {
-                "bot_id": request.bot_id,
-                "chat_id": target_chat_id,
-                "strategy": request.strategy,
-                "commands": command_results,
-                "slo": slo,
-                "embedded_error": _embedded_error,
-                **state,
-            },
-        }
-
-    @app.get("/_mock/forensics/bundle")
-    async def get_forensics_bundle(
-        bot_id: str,
-        token: Optional[str] = None,
-        chat_id: Optional[int] = None,
-        limit: int = 120,
-    ) -> dict[str, Any]:
-        resolved_limit = max(20, min(int(limit), 500))
-        catalog = build_bot_catalog(
-            bots_config_path=bots_config_path,
-            embedded_host=embedded_host,
-            embedded_base_port=embedded_base_port,
-        )
-        selected = next((row for row in catalog if row.get("bot_id") == bot_id), None)
-        if selected is None:
-            raise HTTPException(status_code=404, detail=f"unknown bot_id: {bot_id}")
-        expected_token = str(selected.get("token") or "").strip()
-        selected_token = str(token or expected_token).strip()
-        if selected_token != expected_token:
-            raise HTTPException(status_code=400, detail=f"token does not match bot_id: {bot_id}")
-        target_chat_id = int(chat_id) if chat_id is not None else _latest_chat_id_for_token(selected_token)
-
-        diagnostics = await _collect_bot_diagnostics(
-            selected=selected,
-            token=selected_token,
-            chat_id=target_chat_id,
-            limit=resolved_limit,
-        )
-        logs, embedded_error = await fetch_embedded_audit_logs(
-            selected.get("embedded_url"),
-            chat_id=target_chat_id,
-            limit=resolved_limit,
-        )
-        slo = _compute_slo_snapshot(logs)
-        state = _compute_tower_state(
-            health=diagnostics.get("health") or {},
-            metrics=diagnostics.get("metrics") or {},
-            session=diagnostics.get("session") or {},
-            last_error_tag=str(diagnostics.get("last_error_tag") or "unknown"),
-            slo=slo,
-        )
-        return {
-            "ok": True,
-            "result": {
-                "bot_id": bot_id,
-                "token": selected_token,
-                "chat_id": target_chat_id,
-                "runtime_profile": _infer_runtime_profile(),
-                "state": state,
-                "slo": slo,
-                "diagnostics": diagnostics,
-                "audit_logs": logs,
-                "embedded_error": embedded_error,
-                "messages": store.get_messages(token=selected_token, chat_id=target_chat_id, limit=resolved_limit),
-                "updates": store.get_recent_updates(token=selected_token, chat_id=target_chat_id, limit=resolved_limit),
-            },
-        }
+    register_diagnostics_routes(
+        app,
+        store=store,
+        bots_config_path=bots_config_path,
+        embedded_host=embedded_host,
+        embedded_base_port=embedded_base_port,
+        infer_runtime_profile=_infer_runtime_profile,
+        enqueue_and_dispatch_user_message=_enqueue_and_dispatch_user_message,
+    )
 
     @app.post("/_mock/rate_limit")
     async def set_rate_limit(rule: RateLimitRuleRequest) -> dict[str, Any]:
@@ -852,156 +362,14 @@ def create_app(
         )
         return {"ok": True, "result": True}
 
-    @app.post("/bot{token}/getUpdates")
-    async def bot_get_updates(token: str, payload: dict[str, Any] = Body(default_factory=dict)) -> Any:
-        if (response := _try_rate_limit(store=store, token=token, method="getUpdates")) is not None:
-            return response
-
-        offset = payload.get("offset")
-        limit = payload.get("limit", 100)
-        if not isinstance(offset, int):
-            offset = None
-        if not isinstance(limit, int):
-            limit = 100
-
-        updates = store.fetch_updates(
-            token=token,
-            offset=offset,
-            limit=max(1, min(limit, 100)),
-            allow_get_updates_with_webhook=allow_get_updates_with_webhook,
-        )
-        return {"ok": True, "result": updates}
-
-    @app.post("/bot{token}/setWebhook")
-    async def bot_set_webhook(token: str, payload: dict[str, Any] = Body(default_factory=dict)) -> Any:
-        if (response := _try_rate_limit(store=store, token=token, method="setWebhook")) is not None:
-            return response
-
-        url = payload.get("url")
-        if not isinstance(url, str) or not url.strip():
-            return _telegram_error(status_code=400, description="Bad Request: url is required")
-
-        secret_token = payload.get("secret_token")
-        if secret_token is not None and not isinstance(secret_token, str):
-            return _telegram_error(status_code=400, description="Bad Request: secret_token must be string")
-
-        drop_pending_updates = bool(payload.get("drop_pending_updates", False))
-        store.set_webhook(
-            token=token,
-            url=url.strip(),
-            secret_token=secret_token,
-            drop_pending_updates=drop_pending_updates,
-        )
-        return {"ok": True, "result": True}
-
-    @app.post("/bot{token}/deleteWebhook")
-    async def bot_delete_webhook(token: str, payload: dict[str, Any] = Body(default_factory=dict)) -> Any:
-        if (response := _try_rate_limit(store=store, token=token, method="deleteWebhook")) is not None:
-            return response
-
-        drop_pending_updates = bool(payload.get("drop_pending_updates", False))
-        store.delete_webhook(token=token, drop_pending_updates=drop_pending_updates)
-        return {"ok": True, "result": True}
-
-    @app.post("/bot{token}/sendMessage")
-    async def bot_send_message(token: str, payload: dict[str, Any] = Body(default_factory=dict)) -> Any:
-        if (response := _try_rate_limit(store=store, token=token, method="sendMessage")) is not None:
-            return response
-
-        chat_id = _parse_chat_id(payload.get("chat_id"))
-        text = payload.get("text")
-        if chat_id is None:
-            return _telegram_error(status_code=400, description="Bad Request: chat_id is required")
-        if not isinstance(text, str):
-            return _telegram_error(status_code=400, description="Bad Request: text is required")
-
-        result = store.store_bot_message(token=token, chat_id=chat_id, text=text)
-        return {"ok": True, "result": result}
-
-    @app.post("/bot{token}/editMessageText")
-    async def bot_edit_message_text(token: str, payload: dict[str, Any] = Body(default_factory=dict)) -> Any:
-        if (response := _try_rate_limit(store=store, token=token, method="editMessageText")) is not None:
-            return response
-
-        chat_id = _parse_chat_id(payload.get("chat_id"))
-        message_id = payload.get("message_id")
-        text = payload.get("text")
-        if chat_id is None:
-            return _telegram_error(status_code=400, description="Bad Request: chat_id is required")
-        if not isinstance(message_id, int):
-            return _telegram_error(status_code=400, description="Bad Request: message_id is required")
-        if not isinstance(text, str):
-            return _telegram_error(status_code=400, description="Bad Request: text is required")
-
-        updated = store.edit_bot_message(token=token, chat_id=chat_id, message_id=message_id, text=text)
-        if updated is None:
-            return _telegram_error(status_code=400, description="Bad Request: message to edit not found")
-        return {"ok": True, "result": updated}
-
-    @app.post("/bot{token}/answerCallbackQuery")
-    async def bot_answer_callback_query(token: str, payload: dict[str, Any] = Body(default_factory=dict)) -> Any:
-        if (response := _try_rate_limit(store=store, token=token, method="answerCallbackQuery")) is not None:
-            return response
-
-        callback_query_id = payload.get("callback_query_id")
-        text = payload.get("text")
-        if not isinstance(callback_query_id, str) or not callback_query_id:
-            return _telegram_error(status_code=400, description="Bad Request: callback_query_id is required")
-        if text is not None and not isinstance(text, str):
-            return _telegram_error(status_code=400, description="Bad Request: text must be string")
-
-        store.record_callback_answer(token=token, callback_query_id=callback_query_id, text=text)
-        return {"ok": True, "result": True}
-
-    @app.post("/bot{token}/sendDocument")
-    async def bot_send_document(
-        token: str,
-        chat_id: str = Form(...),
-        caption: Optional[str] = Form(default=None),
-        document: UploadFile = File(...),
-    ) -> Any:
-        if (response := _try_rate_limit(store=store, token=token, method="sendDocument")) is not None:
-            return response
-
-        parsed_chat_id = _parse_chat_id(chat_id)
-        if parsed_chat_id is None:
-            return _telegram_error(status_code=400, description="Bad Request: chat_id is required")
-
-        filename = document.filename or "document.bin"
-        content = await document.read()
-        result = store.store_document(
-            token=token,
-            chat_id=parsed_chat_id,
-            filename=filename,
-            content=content,
-            caption=caption,
-        )
-        return {"ok": True, "result": result}
-
-    @app.post("/bot{token}/sendPhoto")
-    async def bot_send_photo(
-        token: str,
-        chat_id: str = Form(...),
-        caption: Optional[str] = Form(default=None),
-        photo: UploadFile = File(...),
-    ) -> Any:
-        if (response := _try_rate_limit(store=store, token=token, method="sendPhoto")) is not None:
-            return response
-
-        parsed_chat_id = _parse_chat_id(chat_id)
-        if parsed_chat_id is None:
-            return _telegram_error(status_code=400, description="Bad Request: chat_id is required")
-
-        filename = photo.filename or "photo.bin"
-        content = await photo.read()
-        result = store.store_document(
-            token=token,
-            chat_id=parsed_chat_id,
-            filename=filename,
-            content=content,
-            caption=caption,
-        )
-        return {"ok": True, "result": result}
+    register_mock_telegram_routes(
+        app,
+        store=store,
+        allow_get_updates_with_webhook=allow_get_updates_with_webhook,
+        try_rate_limit=_try_rate_limit,
+        telegram_error=_telegram_error,
+        parse_chat_id=_parse_chat_id,
+    )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, bool]:
@@ -1111,3 +479,88 @@ async def _post_webhook_update(
     except Exception as error:
         LOGGER.warning("webhook post failed url=%s error=%s", url, error)
         return False, str(error)
+
+
+def _should_wait_for_runtime_stability(*, bots_config_path: Union[str, Path]) -> bool:
+    # Only gate for the local multi-bot runtime to avoid slowing down tests and
+    # generic single-process mock usage.
+    try:
+        resolved = Path(bots_config_path).expanduser().resolve()
+    except Exception:
+        return False
+    marker = str(Path(".runlogs/local-multibot").as_posix())
+    return marker in resolved.as_posix()
+
+
+async def _stabilize_embedded_runtime_if_needed(
+    *,
+    bots: list[dict[str, Any]],
+    bots_config_path: Union[str, Path],
+) -> dict[str, Any]:
+    if not _should_wait_for_runtime_stability(bots_config_path=bots_config_path):
+        return {"enabled": False}
+
+    urls: list[str] = []
+    for row in bots:
+        embedded_url = str((row or {}).get("embedded_url") or "").strip()
+        mode = str((row or {}).get("mode") or "").strip()
+        if mode != "embedded" or not embedded_url:
+            continue
+        urls.append(embedded_url.rstrip("/") + "/healthz")
+
+    if not urls:
+        return {"enabled": True, "ready": True, "ready_count": 0, "total": 0, "pending_urls": []}
+
+    deadline = time.monotonic() + 8.0
+    pending = set(urls)
+    timeout = httpx.Timeout(connect=0.35, read=0.6, write=0.6, pool=0.6)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        while pending and time.monotonic() < deadline:
+            current_urls = sorted(pending)
+            checks = [client.get(url) for url in current_urls]
+            results = await asyncio.gather(*checks, return_exceptions=True)
+            for url, result in zip(current_urls, results):
+                if isinstance(result, Exception):
+                    continue
+                if 200 <= result.status_code < 300:
+                    pending.discard(url)
+            if pending:
+                await asyncio.sleep(0.2)
+
+    ready = len(pending) == 0
+    if not ready:
+        LOGGER.warning("runtime stability wait timed out pending=%s", sorted(pending))
+    return {
+        "enabled": True,
+        "ready": ready,
+        "ready_count": len(urls) - len(pending),
+        "total": len(urls),
+        "pending_urls": sorted(pending),
+    }
+
+
+async def _wait_embedded_process_stopped_if_needed(
+    *,
+    embedded_url: str,
+    bots_config_path: Union[str, Path],
+) -> dict[str, Any]:
+    if not _should_wait_for_runtime_stability(bots_config_path=bots_config_path):
+        return {"enabled": False}
+    url = str(embedded_url or "").strip()
+    if not url:
+        return {"enabled": True, "stopped": True, "checked_url": None}
+
+    healthz = url.rstrip("/") + "/healthz"
+    deadline = time.monotonic() + 8.0
+    timeout = httpx.Timeout(connect=0.25, read=0.5, write=0.5, pool=0.5)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        while time.monotonic() < deadline:
+            try:
+                response = await client.get(healthz)
+                if response.status_code >= 500:
+                    return {"enabled": True, "stopped": True, "checked_url": healthz}
+            except Exception:
+                return {"enabled": True, "stopped": True, "checked_url": healthz}
+            await asyncio.sleep(0.2)
+    LOGGER.warning("embedded stop wait timed out url=%s", healthz)
+    return {"enabled": True, "stopped": False, "checked_url": healthz}

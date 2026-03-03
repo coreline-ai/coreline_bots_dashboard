@@ -7,8 +7,8 @@ PYTHON_BIN="$ROOT_DIR/$VENV_DIR/bin/python"
 SCRIPT_NAME="${RUN_LOCAL_MULTIBOT_ALIAS:-$0}"
 
 CONFIG_PATH="${CONFIG_PATH:-config/bots.multibot.yaml}"
-# Keep bot-7 available by default (bot-a, bot-b, bot-1..bot-7 => 9 bots).
-MAX_BOTS="${MAX_BOTS:-9}"
+# By default, run all configured bots. Set MAX_BOTS>0 to intentionally cap.
+MAX_BOTS="${MAX_BOTS:-0}"
 MOCK_HOST="${MOCK_HOST:-127.0.0.1}"
 MOCK_PORT="${MOCK_PORT:-9082}"
 MOCK_DB_PATH="${MOCK_DB_PATH:-$ROOT_DIR/.mock_messenger_9082/mock_messenger.db}"
@@ -36,15 +36,35 @@ Usage: $SCRIPT_NAME [up|start|stop|restart|status|logs|doctor]
 
 Environment overrides:
   CONFIG_PATH, MOCK_HOST, MOCK_PORT, EMBEDDED_HOST, EMBEDDED_BASE_PORT,
-  GATEWAY_HOST, GATEWAY_PORT, VENV_DIR, RUNTIME_DIR, MAX_BOTS
+  GATEWAY_HOST, GATEWAY_PORT, VENV_DIR, RUNTIME_DIR, MAX_BOTS (0=all)
 USAGE
 }
 
 require_python() {
-  if [[ ! -x "$PYTHON_BIN" ]]; then
-    echo "venv python not found: $PYTHON_BIN" >&2
-    exit 1
+  if [[ -x "$PYTHON_BIN" ]]; then
+    return 0
   fi
+
+  # Fallback order: .pyshim -> system python3.11 -> system python3
+  local alt
+  alt="$ROOT_DIR/.pyshim/bin/python"
+  if [[ -x "$alt" ]]; then
+    PYTHON_BIN="$alt"
+    return 0
+  fi
+
+  if command -v python3.11 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3.11)"
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+    return 0
+  fi
+
+  echo "python not found. checked: $ROOT_DIR/$VENV_DIR/bin/python, $ROOT_DIR/.pyshim/bin/python, python3.11, python3" >&2
+  exit 1
 }
 
 ensure_dirs() {
@@ -125,10 +145,31 @@ spawn_detached() {
   shift 2
   if command -v setsid >/dev/null 2>&1; then
     nohup setsid "$@" >"$out_log" 2>"$err_log" < /dev/null &
-  else
-    nohup "$@" >"$out_log" 2>"$err_log" < /dev/null &
+    echo $!
+    return 0
   fi
-  echo $!
+
+  # macOS often lacks `setsid`. Use Python start_new_session=True so the child
+  # is detached from the launcher process group and survives wrapper teardown.
+  "$PYTHON_BIN" - "$out_log" "$err_log" "$@" <<'PY'
+import subprocess
+import sys
+
+out_log = sys.argv[1]
+err_log = sys.argv[2]
+cmd = sys.argv[3:]
+
+with open(out_log, "ab", buffering=0) as out_fp, open(err_log, "ab", buffering=0) as err_fp:
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=out_fp,
+        stderr=err_fp,
+        close_fds=True,
+        start_new_session=True,
+    )
+print(proc.pid)
+PY
 }
 
 prepare_effective_config() {
@@ -152,7 +193,7 @@ max_bots_raw = str(sys.argv[4]).strip()
 try:
     max_bots = int(max_bots_raw)
 except Exception:
-    max_bots = 8
+    max_bots = 0
 
 raw = {}
 if source_path.exists():
@@ -178,9 +219,20 @@ for idx, bot in enumerate(effective_bots, start=1):
         continue
     raw_bot_id = str(bot.get("bot_id") or f"bot-{idx}").strip() or f"bot-{idx}"
     safe_bot_id = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_bot_id) or f"bot-{idx}"
-    if not str(bot.get("database_url") or "").strip():
+    db_url = str(bot.get("database_url") or "").strip()
+    if not db_url:
         db_path = (state_dir / f"{safe_bot_id}.db").resolve()
-        bot["database_url"] = f"sqlite+aiosqlite:///{db_path}"
+        db_url = f"sqlite+aiosqlite:///{db_path}"
+        bot["database_url"] = db_url
+
+    # For sqlite URLs, ensure parent directory exists to prevent
+    # "sqlite3.OperationalError: unable to open database file".
+    if db_url.startswith("sqlite+aiosqlite:///") or db_url.startswith("sqlite:///"):
+        db_path_part = db_url.split(":///", 1)[1]
+        db_file_path = Path(db_path_part).expanduser()
+        if not db_file_path.is_absolute():
+            db_file_path = (root_dir / db_file_path).resolve()
+        db_file_path.parent.mkdir(parents=True, exist_ok=True)
 
 target_path.parent.mkdir(parents=True, exist_ok=True)
 target_path.write_text(
@@ -197,6 +249,16 @@ PY
   EFFECTIVE_CONFIG_PATH="$(echo "$result" | sed -n '1p')"
   SOURCE_BOT_COUNT="$(echo "$result" | sed -n '2p')"
   EFFECTIVE_BOT_COUNT="$(echo "$result" | sed -n '3p')"
+}
+
+use_existing_effective_config_or_prepare() {
+  local runtime_effective
+  runtime_effective="$RUNTIME_DIR/bots.effective.yaml"
+  if [[ -f "$runtime_effective" ]]; then
+    EFFECTIVE_CONFIG_PATH="$runtime_effective"
+    return 0
+  fi
+  prepare_effective_config
 }
 
 embedded_urls() {
@@ -411,10 +473,34 @@ do_up() {
     --gateway-port "$GATEWAY_PORT"
 }
 
+stop_embedded_children() {
+  local bot_id url port listener cmd pid
+
+  # First stop known listeners on embedded ports.
+  while IFS='=' read -r bot_id url; do
+    [[ -z "$bot_id" ]] && continue
+    port="${url##*:}"
+    listener="$(listener_pid "$port")"
+    if [[ -z "$listener" ]]; then
+      continue
+    fi
+    cmd="$(pid_command "$listener")"
+    if [[ "$cmd" == *"telegram_bot_new.main run-bot"* ]] && [[ "$cmd" == *"--config $EFFECTIVE_CONFIG_PATH"* ]]; then
+      stop_pid "$listener" "embedded($bot_id)"
+    fi
+  done < <(embedded_urls)
+
+  # Then clean up possible orphan run-bot processes that no longer listen.
+  while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
+    stop_pid "$pid" "embedded(orphan)"
+  done < <(pgrep -f "telegram_bot_new.main run-bot --config $EFFECTIVE_CONFIG_PATH" || true)
+}
+
 do_stop() {
   require_python
   ensure_dirs
-  prepare_effective_config
+  use_existing_effective_config_or_prepare
   local sup_pid mock_pid
   sup_pid="$(pid_from_file "$PID_SUPERVISOR_FILE")"
   mock_pid="$(pid_from_file "$PID_MOCK_FILE")"
@@ -427,6 +513,7 @@ do_stop() {
   fi
 
   stop_pid "$sup_pid" "supervisor"
+  stop_embedded_children
   stop_pid "$mock_pid" "mock"
   rm -f "$PID_SUPERVISOR_FILE" "$PID_MOCK_FILE"
   echo "stopped local-multibot stack"
@@ -435,7 +522,7 @@ do_stop() {
 do_status() {
   require_python
   ensure_dirs
-  prepare_effective_config
+  use_existing_effective_config_or_prepare
   local sup_pid mock_pid cmd
   sup_pid="$(pid_from_file "$PID_SUPERVISOR_FILE")"
   mock_pid="$(pid_from_file "$PID_MOCK_FILE")"
@@ -501,7 +588,7 @@ do_logs() {
 do_doctor() {
   require_python
   ensure_dirs
-  prepare_effective_config
+  use_existing_effective_config_or_prepare
   echo "python=$PYTHON_BIN"
   echo "config=$EFFECTIVE_CONFIG_PATH"
   echo "effective_bots=${EFFECTIVE_BOT_COUNT:-0}"

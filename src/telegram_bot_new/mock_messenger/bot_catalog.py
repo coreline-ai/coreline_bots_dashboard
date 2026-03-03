@@ -89,7 +89,7 @@ def build_bot_catalog(
 def create_dynamic_embedded_bot(
     *,
     bots_config_path: str | Path,
-    adapter: str = "gemini",
+    adapter: str = "codex",
     bot_id: str | None = None,
     token: str | None = None,
     name: str | None = None,
@@ -104,16 +104,33 @@ def create_dynamic_embedded_bot(
     used_bot_ids = {str(item.get("bot_id") or "").strip() for item in bots if isinstance(item, dict)}
     used_tokens = {str(item.get("telegram_token") or "").strip() for item in bots if isinstance(item, dict)}
 
-    resolved_bot_id = _resolve_unique_text(
-        preferred=(bot_id or "").strip(),
-        used=used_bot_ids,
-        pattern_prefix="bot-",
-    )
-    resolved_token = _resolve_unique_text(
-        preferred=(token or "").strip(),
-        used=used_tokens,
-        pattern_prefix="mock_token_",
-    )
+    preferred_bot_id = (bot_id or "").strip()
+    if preferred_bot_id:
+        resolved_bot_id = _resolve_unique_text(
+            preferred=preferred_bot_id,
+            used=used_bot_ids,
+            pattern_prefix="bot-",
+        )
+    else:
+        resolved_bot_id = _resolve_next_alpha_bot_id(used=used_bot_ids)
+
+    preferred_token = (token or "").strip()
+    if preferred_token:
+        resolved_token = _resolve_unique_text(
+            preferred=preferred_token,
+            used=used_tokens,
+            pattern_prefix="mock_token_",
+        )
+    else:
+        token_from_bot_id = _default_token_from_bot_id(resolved_bot_id)
+        if token_from_bot_id and token_from_bot_id not in used_tokens:
+            resolved_token = token_from_bot_id
+        else:
+            resolved_token = _resolve_unique_text(
+                preferred="",
+                used=used_tokens,
+                pattern_prefix="mock_token_",
+            )
     resolved_name = (name or "").strip() or _build_default_name(resolved_bot_id)
 
     entry = {
@@ -121,7 +138,7 @@ def create_dynamic_embedded_bot(
         "name": resolved_name,
         "mode": "embedded",
         "telegram_token": resolved_token,
-        "adapter": adapter if adapter in SUPPORTED_AGENTS else "gemini",
+        "adapter": adapter if adapter in SUPPORTED_AGENTS else "codex",
         "default_role": "executor",
         "database_url": _build_dynamic_bot_database_url(config_path, resolved_bot_id),
         "webhook": {
@@ -142,31 +159,44 @@ def create_dynamic_embedded_bot(
     return entry
 
 
-def delete_bot_from_catalog(*, bots_config_path: str | Path, bot_id: str) -> bool:
+def delete_bot_from_catalog(*, bots_config_path: str | Path, bot_id: str) -> dict[str, Any] | None:
     target = str(bot_id or "").strip()
     if not target:
-        return False
+        return None
 
     config_path = Path(bots_config_path).expanduser().resolve()
     raw = _read_bots_file_raw(config_path)
     bots = list(raw.get("bots") or [])
     next_bots: list[dict[str, Any]] = []
     removed = False
+    removed_item: dict[str, Any] | None = None
     for item in bots:
         if not isinstance(item, dict):
             continue
         current_id = str(item.get("bot_id") or "").strip()
         if current_id == target:
             removed = True
+            removed_item = item
             continue
         next_bots.append(item)
 
     if not removed:
-        return False
+        return None
 
     raw["bots"] = next_bots
     _write_bots_file_raw(config_path, raw)
-    return True
+    return dict(removed_item or {})
+
+
+def cleanup_deleted_bot_state_files(
+    *,
+    bots_config_path: str | Path,
+    bot_id: str,
+    bot_entry: dict[str, Any] | None = None,
+) -> None:
+    config_path = Path(bots_config_path).expanduser().resolve()
+    _delete_db_from_bot_entry(config_path=config_path, bot_entry=bot_entry or {})
+    _delete_dynamic_bot_state_db(config_path=config_path, bot_id=str(bot_id or "").strip())
 
 
 def set_bot_default_role(*, bots_config_path: str | Path, bot_id: str, role: str) -> bool:
@@ -227,6 +257,30 @@ def _build_dynamic_bot_database_url(config_path: Path, bot_id: str) -> str:
     return f"sqlite+aiosqlite:///{db_path.as_posix()}"
 
 
+def _delete_dynamic_bot_state_db(*, config_path: Path, bot_id: str) -> None:
+    db_path = (config_path.parent / "state" / f"{bot_id}.db").resolve()
+    try:
+        db_path.unlink(missing_ok=True)
+    except Exception:
+        return
+
+
+def _delete_db_from_bot_entry(*, config_path: Path, bot_entry: dict[str, Any]) -> None:
+    raw_db_url = str(bot_entry.get("database_url") or "").strip()
+    if not raw_db_url:
+        return
+
+    if raw_db_url.startswith("sqlite+aiosqlite:///") or raw_db_url.startswith("sqlite:///"):
+        raw_path = raw_db_url.split(":///", 1)[1]
+        db_path = Path(raw_path).expanduser()
+        if not db_path.is_absolute():
+            db_path = (config_path.parent / db_path).resolve()
+        try:
+            db_path.unlink(missing_ok=True)
+        except Exception:
+            return
+
+
 def _resolve_unique_text(*, preferred: str, used: set[str], pattern_prefix: str) -> str:
     candidate = preferred.strip()
     if candidate and candidate not in used:
@@ -240,7 +294,41 @@ def _resolve_unique_text(*, preferred: str, used: set[str], pattern_prefix: str)
         index += 1
 
 
+def _resolve_next_alpha_bot_id(*, used: set[str]) -> str:
+    # Always pick the first available slot (a, b, c, ...), so deleted ids are
+    # deterministically reused and bot labels stay contiguous.
+    next_rank = 0
+    while True:
+        suffix = _alpha_suffix(next_rank)
+        generated = f"bot-{suffix}"
+        if generated not in used:
+            return generated
+        next_rank += 1
+
+
+def _alpha_suffix(index: int) -> str:
+    if index < 0:
+        raise ValueError("index must be >= 0")
+
+    n = index + 1
+    chars: list[str] = []
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        chars.append(chr(ord("a") + rem))
+    return "".join(reversed(chars))
+
+
+def _default_token_from_bot_id(bot_id: str) -> str | None:
+    match = re.fullmatch(r"bot-([a-z]+)", bot_id.strip().lower())
+    if not match:
+        return None
+    return f"mock_token_{match.group(1)}"
+
+
 def _build_default_name(bot_id: str) -> str:
+    alpha = re.search(r"bot-([a-z]+)$", bot_id, flags=re.IGNORECASE)
+    if alpha:
+        return f"Bot {alpha.group(1).upper()}"
     numeric = re.search(r"(\d+)$", bot_id)
     if numeric:
         return f"Bot {numeric.group(1)}"

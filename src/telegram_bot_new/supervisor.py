@@ -17,6 +17,7 @@ LOGGER = logging.getLogger(__name__)
 class ProcessSpec:
     name: str
     command: list[str]
+    revision: str
 
 
 @dataclass(slots=True)
@@ -85,6 +86,7 @@ def _load_desired_specs(
     gateway_host: str,
     gateway_port: int,
 ) -> dict[str, ProcessSpec]:
+    config_revision = _config_revision(config_path)
     try:
         bots = load_bots_config(config_path, global_settings, allow_env_fallback=False)
     except Exception as error:
@@ -111,6 +113,7 @@ def _load_desired_specs(
                     "--embedded-port",
                     str(embedded_port),
                 ],
+                revision=config_revision,
             )
             embedded_port += 1
         else:
@@ -126,6 +129,7 @@ def _load_desired_specs(
                     "--bot-id",
                     bot.bot_id,
                 ],
+                revision=config_revision,
             )
         specs[spec.name] = spec
 
@@ -144,6 +148,7 @@ def _load_desired_specs(
                 "--port",
                 str(gateway_port),
             ],
+            revision=config_revision,
         )
     return specs
 
@@ -161,8 +166,13 @@ async def _reconcile_managed_processes(
             LOGGER.info("stopping removed process name=%s", name)
             await _stop_managed_process(name=name, managed=managed)
             continue
-        if current.spec.command != desired.command:
-            LOGGER.info("restarting process due to spec change name=%s", name)
+        if current.spec != desired:
+            LOGGER.info(
+                "restarting process due to spec change name=%s command_changed=%s revision_changed=%s",
+                name,
+                current.spec.command != desired.command,
+                current.spec.revision != desired.revision,
+            )
             await _stop_managed_process(name=name, managed=managed)
 
     for name, spec in desired_specs.items():
@@ -254,3 +264,14 @@ async def _terminate_process(name: str, process: asyncio.subprocess.Process) -> 
         process.kill()
     with suppress(asyncio.TimeoutError):
         await asyncio.wait_for(process.wait(), timeout=5)
+
+
+def _config_revision(config_path: str | Path) -> str:
+    resolved = Path(config_path).expanduser().resolve()
+    try:
+        stat_result = resolved.stat()
+    except FileNotFoundError:
+        return "missing"
+    except Exception:
+        return "unknown"
+    return f"{stat_result.st_mtime_ns}:{stat_result.st_size}"

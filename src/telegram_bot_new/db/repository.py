@@ -1348,6 +1348,102 @@ class Repository:
             await session.commit()
 
 
+# Stage-3 modular split: bind telegram update/job methods from repos modules.
+from telegram_bot_new.db.repos.update_jobs import (  # noqa: E402
+    complete_telegram_update_job as _repos_complete_telegram_update_job,
+    enqueue_telegram_update_job as _repos_enqueue_telegram_update_job,
+    fail_telegram_update_job as _repos_fail_telegram_update_job,
+    get_max_telegram_update_id as _repos_get_max_telegram_update_id,
+    get_telegram_update as _repos_get_telegram_update,
+    insert_telegram_update as _repos_insert_telegram_update,
+    lease_next_telegram_update_job as _repos_lease_next_telegram_update_job,
+    renew_telegram_update_job_lease as _repos_renew_telegram_update_job_lease,
+    reset_telegram_ingest_state as _repos_reset_telegram_ingest_state,
+)
+from telegram_bot_new.db.repos.run_jobs import (  # noqa: E402
+    append_cli_event as _repos_append_cli_event,
+    cancel_active_turn as _repos_cancel_active_turn,
+    complete_run_job_and_turn as _repos_complete_run_job_and_turn,
+    create_turn_and_job as _repos_create_turn_and_job,
+    enqueue_deferred_button_action as _repos_enqueue_deferred_button_action,
+    fail_run_job_and_turn as _repos_fail_run_job_and_turn,
+    get_latest_completed_turn_for_session as _repos_get_latest_completed_turn_for_session,
+    get_turn as _repos_get_turn,
+    get_turn_events_count as _repos_get_turn_events_count,
+    has_active_run as _repos_has_active_run,
+    is_turn_cancelled as _repos_is_turn_cancelled,
+    lease_next_run_job as _repos_lease_next_run_job,
+    mark_run_in_flight as _repos_mark_run_in_flight,
+    mark_run_job_cancelled as _repos_mark_run_job_cancelled,
+    promote_next_deferred_action as _repos_promote_next_deferred_action,
+    renew_run_job_lease as _repos_renew_run_job_lease,
+)
+from telegram_bot_new.db.repos.sessions import (  # noqa: E402
+    create_fresh_session as _repos_create_fresh_session,
+    get_active_session as _repos_get_active_session,
+    get_latest_session as _repos_get_latest_session,
+    get_or_create_active_session as _repos_get_or_create_active_session,
+    get_session_view as _repos_get_session_view,
+    reset_session as _repos_reset_session,
+    set_session_adapter as _repos_set_session_adapter,
+    set_session_model as _repos_set_session_model,
+    set_session_project_root as _repos_set_session_project_root,
+    set_session_skill as _repos_set_session_skill,
+    set_session_thread_id as _repos_set_session_thread_id,
+    set_session_unsafe_until as _repos_set_session_unsafe_until,
+    upsert_session_summary as _repos_upsert_session_summary,
+)
+from telegram_bot_new.db.repos.audit_metrics import (  # noqa: E402
+    append_audit_log as _repos_append_audit_log,
+    get_metrics as _repos_get_metrics,
+    increment_runtime_metric as _repos_increment_runtime_metric,
+    list_audit_logs as _repos_list_audit_logs,
+)
+
+Repository.insert_telegram_update = _repos_insert_telegram_update
+Repository.enqueue_telegram_update_job = _repos_enqueue_telegram_update_job
+Repository.lease_next_telegram_update_job = _repos_lease_next_telegram_update_job
+Repository.renew_telegram_update_job_lease = _repos_renew_telegram_update_job_lease
+Repository.complete_telegram_update_job = _repos_complete_telegram_update_job
+Repository.fail_telegram_update_job = _repos_fail_telegram_update_job
+Repository.get_telegram_update = _repos_get_telegram_update
+Repository.get_max_telegram_update_id = _repos_get_max_telegram_update_id
+Repository.reset_telegram_ingest_state = _repos_reset_telegram_ingest_state
+Repository.create_turn_and_job = _repos_create_turn_and_job
+Repository.lease_next_run_job = _repos_lease_next_run_job
+Repository.mark_run_in_flight = _repos_mark_run_in_flight
+Repository.renew_run_job_lease = _repos_renew_run_job_lease
+Repository.complete_run_job_and_turn = _repos_complete_run_job_and_turn
+Repository.fail_run_job_and_turn = _repos_fail_run_job_and_turn
+Repository.mark_run_job_cancelled = _repos_mark_run_job_cancelled
+Repository.cancel_active_turn = _repos_cancel_active_turn
+Repository.is_turn_cancelled = _repos_is_turn_cancelled
+Repository.append_cli_event = _repos_append_cli_event
+Repository.get_turn = _repos_get_turn
+Repository.get_latest_completed_turn_for_session = _repos_get_latest_completed_turn_for_session
+Repository.has_active_run = _repos_has_active_run
+Repository.enqueue_deferred_button_action = _repos_enqueue_deferred_button_action
+Repository.promote_next_deferred_action = _repos_promote_next_deferred_action
+Repository.get_turn_events_count = _repos_get_turn_events_count
+Repository.get_latest_session = _repos_get_latest_session
+Repository.get_active_session = _repos_get_active_session
+Repository.get_or_create_active_session = _repos_get_or_create_active_session
+Repository.reset_session = _repos_reset_session
+Repository.create_fresh_session = _repos_create_fresh_session
+Repository.get_session_view = _repos_get_session_view
+Repository.set_session_thread_id = _repos_set_session_thread_id
+Repository.set_session_adapter = _repos_set_session_adapter
+Repository.set_session_skill = _repos_set_session_skill
+Repository.set_session_model = _repos_set_session_model
+Repository.set_session_project_root = _repos_set_session_project_root
+Repository.set_session_unsafe_until = _repos_set_session_unsafe_until
+Repository.upsert_session_summary = _repos_upsert_session_summary
+Repository.increment_runtime_metric = _repos_increment_runtime_metric
+Repository.get_metrics = _repos_get_metrics
+Repository.list_audit_logs = _repos_list_audit_logs
+Repository.append_audit_log = _repos_append_audit_log
+
+
 def create_repository(database_url: str) -> Repository:
     engine = create_async_engine(database_url, pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

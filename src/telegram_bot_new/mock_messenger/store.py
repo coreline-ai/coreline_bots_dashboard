@@ -1508,3 +1508,53 @@ class MockMessengerStore:
         if lower.endswith(".svg"):
             return "image/svg+xml"
         return "application/octet-stream"
+
+
+from telegram_bot_new.mock_messenger.stores import cowork_store as _cowork_store
+from telegram_bot_new.mock_messenger.stores import debate_store as _debate_store
+from telegram_bot_new.mock_messenger.stores import messages_store as _messages_store
+from telegram_bot_new.mock_messenger.stores import updates_store as _updates_store
+
+MockMessengerStore.set_webhook = _updates_store.set_webhook
+MockMessengerStore.delete_webhook = _updates_store.delete_webhook
+MockMessengerStore.enqueue_user_message = _updates_store.enqueue_user_message
+MockMessengerStore.fetch_updates = _updates_store.fetch_updates
+MockMessengerStore.mark_update_delivered = _updates_store.mark_update_delivered
+MockMessengerStore.get_recent_updates = _updates_store.get_recent_updates
+
+MockMessengerStore.store_bot_message = _messages_store.store_bot_message
+MockMessengerStore.edit_bot_message = _messages_store.edit_bot_message
+MockMessengerStore.record_callback_answer = _messages_store.record_callback_answer
+MockMessengerStore.store_document = _messages_store.store_document
+MockMessengerStore.list_threads = _messages_store.list_threads
+MockMessengerStore.clear_messages = _messages_store.clear_messages
+MockMessengerStore.get_messages = _messages_store.get_messages
+MockMessengerStore.get_document_file = _messages_store.get_document_file
+MockMessengerStore.set_rate_limit_rule = _messages_store.set_rate_limit_rule
+MockMessengerStore.consume_rate_limit = _messages_store.consume_rate_limit
+
+MockMessengerStore.create_debate = _debate_store.create_debate
+MockMessengerStore.set_debate_running = _debate_store.set_debate_running
+MockMessengerStore.set_debate_stop_requested = _debate_store.set_debate_stop_requested
+MockMessengerStore.get_debate = _debate_store.get_debate
+MockMessengerStore.get_active_debate = _debate_store.get_active_debate
+MockMessengerStore.insert_debate_turn_start = _debate_store.insert_debate_turn_start
+MockMessengerStore.finish_debate_turn = _debate_store.finish_debate_turn
+MockMessengerStore.finish_debate = _debate_store.finish_debate
+MockMessengerStore.list_debate_turns = _debate_store.list_debate_turns
+MockMessengerStore.list_debate_participants = _debate_store.list_debate_participants
+
+MockMessengerStore.create_cowork = _cowork_store.create_cowork
+MockMessengerStore.set_cowork_running = _cowork_store.set_cowork_running
+MockMessengerStore.set_cowork_stop_requested = _cowork_store.set_cowork_stop_requested
+MockMessengerStore.get_cowork = _cowork_store.get_cowork
+MockMessengerStore.get_active_cowork = _cowork_store.get_active_cowork
+MockMessengerStore.insert_cowork_stage_start = _cowork_store.insert_cowork_stage_start
+MockMessengerStore.finish_cowork_stage = _cowork_store.finish_cowork_stage
+MockMessengerStore.insert_cowork_task = _cowork_store.insert_cowork_task
+MockMessengerStore.start_cowork_task = _cowork_store.start_cowork_task
+MockMessengerStore.finish_cowork_task = _cowork_store.finish_cowork_task
+MockMessengerStore.finish_cowork = _cowork_store.finish_cowork
+MockMessengerStore.list_cowork_participants = _cowork_store.list_cowork_participants
+MockMessengerStore.list_cowork_stages = _cowork_store.list_cowork_stages
+MockMessengerStore.list_cowork_tasks = _cowork_store.list_cowork_tasks

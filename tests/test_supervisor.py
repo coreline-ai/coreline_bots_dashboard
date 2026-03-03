@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from telegram_bot_new.settings import GlobalSettings
@@ -96,3 +97,45 @@ def test_load_desired_specs_returns_empty_on_invalid_config(tmp_path: Path) -> N
         gateway_port=4312,
     )
     assert specs == {}
+
+
+def test_load_desired_specs_changes_revision_when_config_file_changes(tmp_path: Path) -> None:
+    config = tmp_path / "bots.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "bots:",
+                "  - bot_id: bot-a",
+                "    name: Bot A",
+                "    mode: embedded",
+                "    telegram_token: mock_token_1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    specs_before = _load_desired_specs(
+        config_path=config,
+        global_settings=_settings(),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+        gateway_host="127.0.0.1",
+        gateway_port=4312,
+    )
+    before = specs_before["bot:bot-a:embedded"]
+
+    stat_before = config.stat()
+    os.utime(config, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns + 1_000_000))
+
+    specs_after = _load_desired_specs(
+        config_path=config,
+        global_settings=_settings(),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+        gateway_host="127.0.0.1",
+        gateway_port=4312,
+    )
+    after = specs_after["bot:bot-a:embedded"]
+
+    assert before.command == after.command
+    assert before.revision != after.revision

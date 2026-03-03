@@ -29,6 +29,19 @@ def test_infer_session_view_from_messages() -> None:
     assert inferred["run_status"] == "completed"
 
 
+def test_infer_session_view_from_messages_with_multi_skill_csv() -> None:
+    messages = [
+        {
+            "message_id": 1,
+            "direction": "bot",
+            "text": "adapter=codex\nmodel=gpt-5\nskill=remotion-best-practices,audio-mix\nproject=/tmp/work\nsession=s-11",
+        }
+    ]
+    inferred = infer_session_view_from_messages(messages)
+    assert inferred["current_agent"] == "codex"
+    assert inferred["current_skill"] == "remotion-best-practices,audio-mix"
+
+
 def test_classify_last_error_tag() -> None:
     assert classify_last_error_tag([{"text": "provider=gemini executable not found; install CLI"}]) == "binary_missing"
     assert classify_last_error_tag([{"text": "request timeout exceeded"}]) == "timeout"

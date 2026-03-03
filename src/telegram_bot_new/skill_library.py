@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -74,15 +75,45 @@ def list_installed_skills() -> list[SkillInfo]:
 
 
 def resolve_skill_id(name_or_id: str) -> str | None:
-    candidate = str(name_or_id or "").strip().lower()
-    if not candidate:
+    resolved, _unknown = resolve_skill_ids(name_or_ids=name_or_id)
+    if not resolved:
         return None
-    for skill in list_installed_skills():
-        if skill.skill_id.lower() == candidate:
-            return skill.skill_id
-        if skill.name.lower() == candidate:
-            return skill.skill_id
-    return None
+    return resolved[0]
+
+
+def _normalize_skill_tokens(name_or_ids: str | Iterable[str]) -> list[str]:
+    if isinstance(name_or_ids, str):
+        raw_items = re.split(r"[,\s]+", name_or_ids)
+    else:
+        raw_items = [str(item or "") for item in name_or_ids]
+    return [item.strip() for item in raw_items if str(item or "").strip()]
+
+
+def resolve_skill_ids(*, name_or_ids: str | Iterable[str]) -> tuple[list[str], list[str]]:
+    installed = list_installed_skills()
+    if not installed:
+        return ([], _normalize_skill_tokens(name_or_ids))
+
+    by_id: dict[str, str] = {}
+    by_name: dict[str, str] = {}
+    for skill in installed:
+        by_id[skill.skill_id.lower()] = skill.skill_id
+        by_name[skill.name.lower()] = skill.skill_id
+
+    resolved: list[str] = []
+    unknown: list[str] = []
+    seen: set[str] = set()
+    for token in _normalize_skill_tokens(name_or_ids):
+        key = token.lower()
+        canonical = by_id.get(key) or by_name.get(key)
+        if canonical is None:
+            unknown.append(token)
+            continue
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        resolved.append(canonical)
+    return (resolved, unknown)
 
 
 def _extract_rule_links(skill_body: str) -> list[str]:
@@ -114,51 +145,59 @@ def _score_rule_path(rule_path: str, prompt: str) -> int:
 
 def build_skill_instruction(
     *,
-    skill_id: str | None,
+    skill_id: str | Iterable[str] | None,
     prompt: str,
     max_chars: int = 14000,
 ) -> str | None:
     if not skill_id:
         return None
 
-    resolved_id = resolve_skill_id(skill_id)
-    if resolved_id is None:
-        return None
-    target = next((row for row in list_installed_skills() if row.skill_id == resolved_id), None)
-    if target is None:
+    resolved_ids, _unknown = resolve_skill_ids(name_or_ids=skill_id)
+    if not resolved_ids:
         return None
 
-    raw_skill = _read_text(target.entry_file)
-    _, skill_body = _extract_frontmatter(raw_skill)
-    if not skill_body.strip():
-        return None
-
-    links = _extract_rule_links(skill_body)
-    ranked = sorted(
-        links,
-        key=lambda path: _score_rule_path(path, prompt),
-        reverse=True,
-    )
-
-    # Include only top matched rule files to keep prompt size bounded.
-    selected_rule_paths = [path for path in ranked if _score_rule_path(path, prompt) > 0][:4]
-    if not selected_rule_paths:
-        selected_rule_paths = links[:2]
-
-    chunks: list[str] = [
-        f"[Skill:{target.name}]",
-        skill_body.strip(),
-    ]
-    for rel_path in selected_rule_paths:
-        rule_path = (target.path / rel_path).resolve()
-        if not rule_path.exists() or not rule_path.is_file():
+    by_id = {row.skill_id: row for row in list_installed_skills()}
+    sections: list[str] = []
+    for resolved_id in resolved_ids:
+        target = by_id.get(resolved_id)
+        if target is None:
             continue
-        content = _read_text(rule_path).strip()
-        if not content:
-            continue
-        chunks.append(f"\n[Rule:{rel_path}]\n{content}")
 
-    combined = "\n\n".join(chunks).strip()
+        raw_skill = _read_text(target.entry_file)
+        _, skill_body = _extract_frontmatter(raw_skill)
+        if not skill_body.strip():
+            continue
+
+        links = _extract_rule_links(skill_body)
+        ranked = sorted(
+            links,
+            key=lambda path: _score_rule_path(path, prompt),
+            reverse=True,
+        )
+
+        # Include only top matched rule files to keep prompt size bounded.
+        selected_rule_paths = [path for path in ranked if _score_rule_path(path, prompt) > 0][:4]
+        if not selected_rule_paths:
+            selected_rule_paths = links[:2]
+
+        chunks: list[str] = [
+            f"[Skill:{target.name}]",
+            skill_body.strip(),
+        ]
+        for rel_path in selected_rule_paths:
+            rule_path = (target.path / rel_path).resolve()
+            if not rule_path.exists() or not rule_path.is_file():
+                continue
+            content = _read_text(rule_path).strip()
+            if not content:
+                continue
+            chunks.append(f"\n[Rule:{rel_path}]\n{content}")
+        sections.append("\n\n".join(chunks).strip())
+
+    if not sections:
+        return None
+
+    combined = "\n\n".join(sections).strip()
     if len(combined) > max_chars:
         return f"{combined[: max_chars - 3].rstrip()}..."
     return combined

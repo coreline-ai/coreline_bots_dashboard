@@ -173,12 +173,13 @@ class FakeSessionServiceForMode:
 
 
 class FakeRunService:
-    def __init__(self, should_fail: bool = False) -> None:
+    def __init__(self, should_fail: bool = False, *, stop_result: str | None = "turn-1") -> None:
         self.should_fail = should_fail
         self.enqueue_calls = 0
         self.button_enqueue_calls = 0
         self.deferred_calls = 0
         self.has_active = False
+        self.stop_result = stop_result
 
     async def enqueue_turn(self, **kwargs) -> str:
         self.enqueue_calls += 1
@@ -198,7 +199,7 @@ class FakeRunService:
         return self.has_active
 
     async def stop_active_turn(self, *, bot_id: str, chat_id: str, now: int):
-        return "turn-1"
+        return self.stop_result
 
 
 class FakeYoutubeSearchService:
@@ -875,7 +876,7 @@ async def test_skills_command_lists_installed_skill_profiles(monkeypatch: pytest
     )
 
     monkeypatch.setattr(
-        "telegram_bot_new.telegram.commands.list_installed_skills",
+        "telegram_bot_new.telegram.command_handlers.config_commands.list_installed_skills",
         lambda: [SimpleNamespace(skill_id="remotion-best-practices", description="Best practices for Remotion")],
     )
 
@@ -900,7 +901,10 @@ async def test_skill_command_updates_active_skill(monkeypatch: pytest.MonkeyPatc
         session_service=session_service,
         run_service=FakeRunService(),
     )
-    monkeypatch.setattr("telegram_bot_new.telegram.commands.resolve_skill_id", lambda _value: "remotion-best-practices")
+    monkeypatch.setattr(
+        "telegram_bot_new.telegram.command_handlers.config_commands.resolve_skill_ids",
+        lambda **_kwargs: (["remotion-best-practices"], []),
+    )
 
     payload = {
         "update_id": 1702,
@@ -911,6 +915,107 @@ async def test_skill_command_updates_active_skill(monkeypatch: pytest.MonkeyPatc
     assert session_service.active_skill == "remotion-best-practices"
     text = client.messages[-1][1]
     assert "skill updated: off -> remotion-best-practices" in text
+
+
+@pytest.mark.asyncio
+async def test_skill_switch_is_blocked_when_run_is_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="gemini")
+    run_service = FakeRunService()
+    run_service.has_active = True
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="gemini", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=run_service,
+    )
+    monkeypatch.setattr(
+        "telegram_bot_new.telegram.command_handlers.config_commands.resolve_skill_ids",
+        lambda **_kwargs: (["remotion-best-practices"], []),
+    )
+
+    payload = {
+        "update_id": 1703,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 1703, "text": "/skill remotion"},
+    }
+    await handler.handle_update_payload(payload, now_ms=1703)
+
+    assert "Use /stop first" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_skill_command_supports_multiple_skills(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="gemini")
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="gemini", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+    monkeypatch.setattr(
+        "telegram_bot_new.telegram.command_handlers.config_commands.resolve_skill_ids",
+        lambda **_kwargs: (["remotion-best-practices", "storybook-review"], []),
+    )
+
+    payload = {
+        "update_id": 17031,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 17031, "text": "/skill remotion,storybook"},
+    }
+    await handler.handle_update_payload(payload, now_ms=17031)
+
+    assert session_service.active_skill == "remotion-best-practices,storybook-review"
+    assert "skill updated: off -> remotion-best-practices,storybook-review" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_stop_command_requests_stop_and_appends_audit_log() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    run_service = FakeRunService(stop_result="turn-1")
+    repo = FakeRepo()
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="codex", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=run_service,
+        repository=repo,
+    )
+
+    payload = {
+        "update_id": 1704,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 1704, "text": "/stop"},
+    }
+    await handler.handle_update_payload(payload, now_ms=1704)
+
+    assert client.messages[-1][1] == "Stop requested."
+    assert repo.audit_logs[-1]["action"] == "run.stop"
+    assert repo.audit_logs[-1]["result"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_stop_command_reports_no_active_run() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    run_service = FakeRunService(stop_result=None)
+    repo = FakeRepo()
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(bot_id="b1", bot_name="Bot", adapter="codex", owner_user_id=999),
+        client=client,
+        session_service=session_service,
+        run_service=run_service,
+        repository=repo,
+    )
+
+    payload = {
+        "update_id": 1705,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 1705, "text": "/stop"},
+    }
+    await handler.handle_update_payload(payload, now_ms=1705)
+
+    assert client.messages[-1][1] == "No active run."
+    assert repo.audit_logs[-1]["action"] == "run.stop"
+    assert repo.audit_logs[-1]["result"] == "noop"
 
 
 @pytest.mark.asyncio
@@ -1288,10 +1393,13 @@ async def test_providers_lists_installation_and_default_models(monkeypatch: pyte
         run_service=FakeRunService(),
     )
 
-    def fake_which(name: str) -> str | None:
-        return f"/usr/bin/{name}" if name != "claude" else None
+    def fake_is_provider_installed(name: str) -> bool:
+        return name != "claude"
 
-    monkeypatch.setattr("telegram_bot_new.telegram.commands.shutil.which", fake_which)
+    monkeypatch.setattr(
+        "telegram_bot_new.telegram.command_handlers.config_commands.is_provider_installed",
+        fake_is_provider_installed,
+    )
 
     payload = {
         "update_id": 21,
@@ -1303,3 +1411,67 @@ async def test_providers_lists_installation_and_default_models(monkeypatch: pyte
     assert "codex: installed=yes, model=gpt-5" in text
     assert "gemini: installed=yes, model=gemini-2.5-pro" in text
     assert "claude: installed=no, model=sonnet" in text
+
+
+@pytest.mark.asyncio
+async def test_core_configuration_flow_runs_for_three_bots(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "telegram_bot_new.telegram.command_handlers.config_commands.resolve_skill_ids",
+        lambda **_kwargs: (["remotion-best-practices", "storybook-review"], []),
+    )
+
+    defaults = {"codex": "gpt-5", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"}
+    for index, adapter in enumerate(("codex", "gemini", "claude"), start=1):
+        client = FakeTelegramClient()
+        session_service = FakeSessionServiceForMode(adapter_name=adapter)
+        handler = TelegramCommandHandler(
+            bot=BotIdentity(
+                bot_id=f"bot-{index}",
+                bot_name=f"Bot {index}",
+                adapter=adapter,
+                owner_user_id=999,
+                default_models=defaults,
+            ),
+            client=client,
+            session_service=session_service,
+            run_service=FakeRunService(),
+        )
+
+        mode_payload = {
+            "update_id": 2000 + index,
+            "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 2000 + index, "text": "/mode codex"},
+        }
+        await handler.handle_update_payload(mode_payload, now_ms=2000 + index)
+
+        model_payload = {
+            "update_id": 2100 + index,
+            "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 2100 + index, "text": "/model gpt-5"},
+        }
+        await handler.handle_update_payload(model_payload, now_ms=2100 + index)
+
+        project_payload = {
+            "update_id": 2200 + index,
+            "message": {
+                "chat": {"id": 100},
+                "from": {"id": 999},
+                "message_id": 2200 + index,
+                "text": f"/project {tmp_path}",
+            },
+        }
+        await handler.handle_update_payload(project_payload, now_ms=2200 + index)
+
+        skill_payload = {
+            "update_id": 2300 + index,
+            "message": {
+                "chat": {"id": 100},
+                "from": {"id": 999},
+                "message_id": 2300 + index,
+                "text": "/skill remotion,storybook",
+            },
+        }
+        await handler.handle_update_payload(skill_payload, now_ms=2300 + index)
+
+        assert session_service.adapter_name == "codex"
+        assert session_service.adapter_model == "gpt-5"
+        assert session_service.project_root == str(tmp_path.resolve())
+        assert session_service.active_skill == "remotion-best-practices,storybook-review"

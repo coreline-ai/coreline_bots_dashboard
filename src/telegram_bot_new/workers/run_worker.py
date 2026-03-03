@@ -1,24 +1,24 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
 import tempfile
 import time
-from contextlib import suppress
 from pathlib import Path
 
 from telegram_bot_new.adapters import get_adapter
-from telegram_bot_new.adapters.base import AdapterEvent, AdapterResumeRequest, AdapterRunRequest, utc_now_iso
 from telegram_bot_new.db.repository import LeasedRunJob, Repository
 from telegram_bot_new.model_presets import resolve_selected_model
 from telegram_bot_new.routing_policy import suggest_route
 from telegram_bot_new.skill_library import build_skill_instruction
-from telegram_bot_new.services.summary_service import SummaryInput, SummaryService
+from telegram_bot_new.services.summary_service import SummaryService
 from telegram_bot_new.streaming.telegram_event_streamer import TelegramEventStreamer
 from telegram_bot_new.telegram.client import TelegramApiError, TelegramClient
+from telegram_bot_new.workers.run_pipeline.artifact_delivery import deliver_generated_artifacts as _deliver_generated_artifacts_impl
+from telegram_bot_new.workers.run_pipeline.job_runner import process_run_job as _process_run_job_impl
+from telegram_bot_new.workers.run_pipeline.lease import renew_lease_loop as _renew_lease_loop_impl
 
 LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +51,21 @@ def _looks_like_gemini_quota_error(message: str | None, stderr: str | None) -> b
             "exhausted your capacity on this model",
             "quota will reset after",
             "api error: you have exhausted your capacity on this model",
+        )
+    )
+
+
+def _looks_like_codex_access_limited_error(message: str | None, stderr: str | None) -> bool:
+    haystack = " ".join(part for part in [message or "", stderr or ""] if part).lower()
+    if not haystack:
+        return False
+    return any(
+        marker in haystack
+        for marker in (
+            "temporarily limited",
+            "potentially suspicious activity",
+            "related to cybersecurity",
+            "access to gpt-5.3-codex-premium",
         )
     )
 
@@ -310,75 +325,28 @@ async def _deliver_generated_artifacts(
     streamer: TelegramEventStreamer,
     sent_registry: dict[str, set[str]],
 ) -> None:
-    image_paths = _extract_local_paths(assistant_text, suffixes=IMAGE_SUFFIXES)
-    html_paths = _extract_local_paths(assistant_text, suffixes=HTML_SUFFIXES)
-
-    if not image_paths and _looks_like_image_request(user_text):
-        if artifact_output_dir is None:
-            image_paths = _find_recent_files(since_epoch=run_started_epoch, suffixes=IMAGE_SUFFIXES, limit=3)
-        else:
-            image_paths = _find_recent_files_in_roots(
-                since_epoch=run_started_epoch,
-                suffixes=IMAGE_SUFFIXES,
-                scan_roots=[artifact_output_dir],
-                limit=3,
-            )
-    if not html_paths and _looks_like_html_request(user_text):
-        if artifact_output_dir is None:
-            html_paths = _find_recent_files(since_epoch=run_started_epoch, suffixes=HTML_SUFFIXES, limit=2)
-        else:
-            html_paths = _find_recent_files_in_roots(
-                since_epoch=run_started_epoch,
-                suffixes=HTML_SUFFIXES,
-                scan_roots=[artifact_output_dir],
-                limit=2,
-            )
-
-    unique_files: list[tuple[Path, str]] = []
-    sent_for_chat = sent_registry.setdefault(f"{bot_id}:{chat_id}", set())
-
-    for image_path in image_paths:
-        key = _artifact_dedupe_key(image_path)
-        if key in sent_for_chat:
-            continue
-        sent_for_chat.add(key)
-        unique_files.append((image_path, "image"))
-
-    for html_path in html_paths:
-        key = _artifact_dedupe_key(html_path)
-        if key in sent_for_chat:
-            continue
-        sent_for_chat.add(key)
-        unique_files.append((html_path, "html"))
-
-    for path, kind in unique_files:
-        try:
-            if kind == "image":
-                try:
-                    await telegram_client.send_photo(
-                        chat_id=chat_id,
-                        file_path=str(path),
-                        caption=f"[artifact:image] {path.name}",
-                    )
-                except TelegramApiError:
-                    await telegram_client.send_document(
-                        chat_id=chat_id,
-                        file_path=str(path),
-                        caption=f"[artifact:image] {path.name}",
-                    )
-            else:
-                await telegram_client.send_document(
-                    chat_id=chat_id,
-                    file_path=str(path),
-                    caption=f"[artifact:html] {path.name}",
-                )
-        except Exception as error:
-            LOGGER.warning("artifact delivery failed bot=%s chat=%s path=%s err=%s", bot_id, chat_id, path, error)
-            await streamer.append_delivery_error(
-                turn_id=turn_id,
-                chat_id=chat_id,
-                message=f"artifact delivery failed for {path.name}: {error}",
-            )
+    await _deliver_generated_artifacts_impl(
+        bot_id=bot_id,
+        chat_id=chat_id,
+        turn_id=turn_id,
+        user_text=user_text,
+        assistant_text=assistant_text,
+        run_started_epoch=run_started_epoch,
+        artifact_output_dir=artifact_output_dir,
+        telegram_client=telegram_client,
+        streamer=streamer,
+        sent_registry=sent_registry,
+        image_suffixes=IMAGE_SUFFIXES,
+        html_suffixes=HTML_SUFFIXES,
+        extract_local_paths_fn=_extract_local_paths,
+        find_recent_files_fn=_find_recent_files,
+        find_recent_files_in_roots_fn=_find_recent_files_in_roots,
+        artifact_dedupe_key_fn=_artifact_dedupe_key,
+        looks_like_image_request_fn=_looks_like_image_request,
+        looks_like_html_request_fn=_looks_like_html_request,
+        telegram_api_error_type=TelegramApiError,
+        logger=LOGGER,
+    )
 
 
 async def run_cli_worker(
@@ -452,455 +420,42 @@ async def _process_run_job(
     lease_ms: int,
     sent_artifacts_by_chat: dict[str, set[str]],
 ) -> None:
-    lease_stop = asyncio.Event()
-    lease_task = asyncio.create_task(
-        _renew_lease_loop(job_id=job.id, repository=repository, lease_ms=lease_ms, stop_event=lease_stop)
+    await _process_run_job_impl(
+        job=job,
+        bot_id=bot_id,
+        repository=repository,
+        telegram_client=telegram_client,
+        streamer=streamer,
+        summary_service=summary_service,
+        default_models_by_provider=default_models_by_provider,
+        default_sandbox=default_sandbox,
+        lease_ms=lease_ms,
+        sent_artifacts_by_chat=sent_artifacts_by_chat,
+        renew_lease_loop=_renew_lease_loop,
+        now_ms_fn=_now_ms,
+        get_adapter_fn=get_adapter,
+        suggest_route_fn=suggest_route,
+        resolve_selected_model_fn=resolve_selected_model,
+        build_skill_instruction_fn=build_skill_instruction,
+        append_audit_log_fn=_append_audit_log,
+        build_turn_artifact_output_dir_fn=_build_turn_artifact_output_dir,
+        augment_prompt_for_generation_request_fn=_augment_prompt_for_generation_request,
+        looks_like_watchdog_timeout_error_fn=_looks_like_watchdog_timeout_error,
+        looks_like_gemini_quota_error_fn=_looks_like_gemini_quota_error,
+        looks_like_codex_access_limited_error_fn=_looks_like_codex_access_limited_error,
+        looks_like_image_request_fn=_looks_like_image_request,
+        looks_like_html_request_fn=_looks_like_html_request,
+        deliver_generated_artifacts_fn=_deliver_generated_artifacts,
+        run_turn_timeout_sec=RUN_TURN_TIMEOUT_SEC,
+        logger=LOGGER,
     )
-
-    try:
-        turn = await repository.get_turn(turn_id=job.turn_id)
-        if turn is None:
-            await repository.fail_run_job_and_turn(job_id=job.id, turn_id=job.turn_id, error_text="missing turn", now=_now_ms())
-            return
-
-        session = await repository.get_session_view(session_id=turn.session_id)
-        if session is None:
-            await repository.fail_run_job_and_turn(job_id=job.id, turn_id=job.turn_id, error_text="missing session", now=_now_ms())
-            return
-
-        await repository.mark_run_in_flight(job_id=job.id, turn_id=turn.turn_id, now=_now_ms())
-
-        session_provider = str(session.adapter_name or "gemini")
-        route = suggest_route(
-            prompt=turn.user_text,
-            session_provider=session_provider,
-            session_model=getattr(session, "adapter_model", None),
-            default_models=default_models_by_provider,
-        )
-        provider = route.provider
-        routed_prompt = route.stripped_prompt.strip() if route.enabled else turn.user_text
-        if not routed_prompt:
-            routed_prompt = turn.user_text
-        adapter = get_adapter(provider)
-        preamble = summary_service.build_recovery_preamble(session.rolling_summary_md)
-        active_skill = getattr(session, "active_skill", None)
-        if active_skill:
-            skill_instruction = build_skill_instruction(
-                skill_id=active_skill,
-                prompt=routed_prompt,
-            )
-            if skill_instruction:
-                prefix = "[Skill Guidance]\n"
-                if preamble and preamble.strip():
-                    preamble = f"{preamble.strip()}\n\n{prefix}{skill_instruction}"
-                else:
-                    preamble = f"{prefix}{skill_instruction}"
-        run_started_epoch = time.time()
-        artifact_output_dir = _build_turn_artifact_output_dir(
-            bot_id=bot_id,
-            chat_id=str(turn.chat_id),
-            turn_id=turn.turn_id,
-        )
-        artifact_output_dir.mkdir(parents=True, exist_ok=True)
-        execution_prompt = _augment_prompt_for_generation_request(
-            routed_prompt,
-            artifact_output_dir=artifact_output_dir,
-        )
-        selected_model = route.model or resolve_selected_model(
-            provider=provider,
-            session_model=(getattr(session, "adapter_model", None) if provider == session_provider else None),
-            default_models=default_models_by_provider,
-        )
-        selected_sandbox = default_sandbox if provider == "codex" else ""
-        selected_workdir = getattr(session, "project_root", None)
-        session_unsafe_until = getattr(session, "unsafe_until", None)
-        if provider == "codex" and isinstance(session_unsafe_until, int):
-            now_ms = _now_ms()
-            if session_unsafe_until > now_ms:
-                selected_sandbox = "danger-full-access"
-            else:
-                try:
-                    await repository.set_session_unsafe_until(
-                        session_id=session.session_id,
-                        unsafe_until=None,
-                        now=now_ms,
-                    )
-                except Exception:
-                    LOGGER.exception("failed to clear expired unsafe mode session=%s", session.session_id)
-        if selected_workdir:
-            project_dir = Path(selected_workdir).expanduser()
-            if not project_dir.exists() or not project_dir.is_dir():
-                selected_workdir = None
-
-        deadline = time.monotonic() + RUN_TURN_TIMEOUT_SEC
-        timed_out = False
-
-        async def should_cancel() -> bool:
-            nonlocal timed_out
-            if await repository.is_turn_cancelled(turn_id=turn.turn_id):
-                return True
-            if time.monotonic() >= deadline:
-                timed_out = True
-                return True
-            return False
-
-        routed_provider_changed = provider != session_provider
-        if route.enabled and (routed_provider_changed or selected_model != getattr(session, "adapter_model", None)):
-            await _append_audit_log(
-                repository=repository,
-                bot_id=bot_id,
-                chat_id=str(turn.chat_id),
-                session_id=turn.session_id,
-                action="run.routing",
-                result="applied",
-                detail=f"provider={session_provider}->{provider} model={selected_model or 'default'} reason={route.reason}",
-                now=_now_ms(),
-            )
-
-        if session.adapter_thread_id and not routed_provider_changed:
-            stream = adapter.run_resume_turn(
-                AdapterResumeRequest(
-                    thread_id=session.adapter_thread_id,
-                    prompt=execution_prompt,
-                    model=selected_model,
-                    sandbox=selected_sandbox,
-                    workdir=selected_workdir,
-                    preamble=preamble,
-                    should_cancel=should_cancel,
-                )
-            )
-        else:
-            stream = adapter.run_new_turn(
-                AdapterRunRequest(
-                    prompt=execution_prompt,
-                    model=selected_model,
-                    sandbox=selected_sandbox,
-                    workdir=selected_workdir,
-                    preamble=preamble,
-                    should_cancel=should_cancel,
-                )
-            )
-
-        # If this turn was partially processed before a worker restart/crash,
-        # continue with the next sequence number to avoid unique key conflicts.
-        seq = (await repository.get_turn_events_count(turn_id=turn.turn_id)) + 1
-        assistant_parts: list[str] = []
-        command_notes: list[str] = []
-        thread_id: str | None = None
-        completion_status = "success"
-        error_text: str | None = None
-        error_stderr: str | None = None
-
-        async def _persist_and_stream_event(event: AdapterEvent) -> None:
-            nonlocal seq
-            await repository.append_cli_event(
-                turn_id=turn.turn_id,
-                bot_id=bot_id,
-                seq=event.seq,
-                event_type=event.event_type,
-                payload_json=json.dumps({"ts": event.ts, "payload": event.payload}, ensure_ascii=False),
-                now=_now_ms(),
-            )
-            try:
-                await streamer.append_event(turn_id=turn.turn_id, chat_id=int(turn.chat_id), event=event)
-            except Exception as stream_error:
-                seq += 1
-                await repository.append_cli_event(
-                    turn_id=turn.turn_id,
-                    bot_id=bot_id,
-                    seq=seq,
-                    event_type="delivery_error",
-                    payload_json=json.dumps({"message": str(stream_error)}),
-                    now=_now_ms(),
-                )
-
-        try:
-            async for raw_event in stream:
-                event = AdapterEvent(seq=seq, ts=raw_event.ts, event_type=raw_event.event_type, payload=raw_event.payload)
-                await _persist_and_stream_event(event)
-
-                if event.event_type == "assistant_message":
-                    text = event.payload.get("text")
-                    if isinstance(text, str) and text.strip():
-                        assistant_parts.append(text)
-
-                if event.event_type in ("command_started", "command_completed"):
-                    cmd = event.payload.get("command")
-                    if isinstance(cmd, str) and cmd:
-                        command_notes.append(cmd)
-
-                if event.event_type == "thread_started":
-                    candidate = adapter.extract_thread_id(event)
-                    if candidate:
-                        thread_id = candidate
-
-                if event.event_type == "turn_completed":
-                    status = event.payload.get("status")
-                    if isinstance(status, str):
-                        completion_status = status
-
-                if event.event_type == "error" and error_text is None:
-                    msg = event.payload.get("message")
-                    if isinstance(msg, str):
-                        error_text = msg
-                    stderr = event.payload.get("stderr")
-                    if isinstance(stderr, str) and stderr.strip():
-                        error_stderr = stderr
-
-                seq += 1
-        except FileNotFoundError:
-            error_text = f"provider={provider} executable not found; install CLI or switch with /mode codex"
-            completion_status = "error"
-            await _persist_and_stream_event(
-                AdapterEvent(
-                    seq=seq,
-                    ts=utc_now_iso(),
-                    event_type="error",
-                    payload={"message": error_text},
-                )
-            )
-            seq += 1
-            await _persist_and_stream_event(
-                AdapterEvent(
-                    seq=seq,
-                    ts=utc_now_iso(),
-                    event_type="turn_completed",
-                    payload={"status": "error"},
-                )
-            )
-            seq += 1
-        except Exception as stream_error:
-            error_text = str(stream_error)
-            completion_status = "error"
-            await _persist_and_stream_event(
-                AdapterEvent(
-                    seq=seq,
-                    ts=utc_now_iso(),
-                    event_type="error",
-                    payload={"message": error_text},
-                )
-            )
-            seq += 1
-            await _persist_and_stream_event(
-                AdapterEvent(
-                    seq=seq,
-                    ts=utc_now_iso(),
-                    event_type="turn_completed",
-                    payload={"status": "error"},
-                )
-            )
-            seq += 1
-
-        if timed_out:
-            completion_status = "error"
-            if not error_text:
-                error_text = f"turn timed out after {RUN_TURN_TIMEOUT_SEC}s"
-
-        cancelled = await repository.is_turn_cancelled(turn_id=turn.turn_id)
-        if (cancelled or completion_status == "cancelled") and not timed_out:
-            await repository.mark_run_job_cancelled(job_id=job.id, turn_id=turn.turn_id, now=_now_ms())
-            await _append_audit_log(
-                repository=repository,
-                bot_id=bot_id,
-                chat_id=str(turn.chat_id),
-                session_id=turn.session_id,
-                action="run.turn",
-                result="cancelled",
-                detail=f"provider={provider}",
-                now=_now_ms(),
-            )
-            await streamer.close_turn(turn_id=turn.turn_id)
-            return
-
-        if thread_id and not routed_provider_changed:
-            await repository.set_session_thread_id(session_id=session.session_id, thread_id=thread_id, now=_now_ms())
-
-        assistant_text = "\n".join(part.strip() for part in assistant_parts if part.strip()).strip()
-        failed = completion_status == "error" or (error_text and not assistant_text)
-        watchdog_timeout = bool(timed_out or _looks_like_watchdog_timeout_error(error_text))
-        auto_recovered = False
-        if failed and watchdog_timeout and session.adapter_thread_id and not routed_provider_changed:
-            try:
-                await repository.set_session_thread_id(
-                    session_id=session.session_id,
-                    thread_id=None,
-                    now=_now_ms(),
-                )
-                auto_recovered = True
-                await _append_audit_log(
-                    repository=repository,
-                    bot_id=bot_id,
-                    chat_id=str(turn.chat_id),
-                    session_id=turn.session_id,
-                    action="run.auto_recover",
-                    result="success",
-                    detail=f"reason=watchdog_timeout thread_reset=true provider={provider}",
-                    now=_now_ms(),
-                )
-            except Exception:
-                LOGGER.exception(
-                    "failed to auto-recover timed out thread bot=%s session=%s",
-                    bot_id,
-                    session.session_id,
-                )
-        if failed and watchdog_timeout and hasattr(repository, "increment_runtime_metric"):
-            try:
-                await repository.increment_runtime_metric(
-                    bot_id=bot_id,
-                    metric_key=f"provider_run_watchdog_timeout.{provider}",
-                    now=_now_ms(),
-                )
-            except Exception:
-                LOGGER.exception("failed to increment watchdog metric bot=%s provider=%s", bot_id, provider)
-        if failed and provider == "gemini" and _looks_like_gemini_quota_error(error_text, error_stderr):
-            fallback_model = "gemini-2.5-flash"
-            if selected_model != fallback_model:
-                try:
-                    await repository.set_session_model(
-                        session_id=session.session_id,
-                        adapter_model=fallback_model,
-                        now=_now_ms(),
-                    )
-                    await _append_audit_log(
-                        repository=repository,
-                        bot_id=bot_id,
-                        chat_id=str(turn.chat_id),
-                        session_id=turn.session_id,
-                        action="session.auto_fallback_model",
-                        result="success",
-                        detail=f"{selected_model or 'default'}->{fallback_model}",
-                        now=_now_ms(),
-                    )
-                    error_text = (
-                        f"{(error_text or 'gemini quota exceeded').strip()} "
-                        f"(auto-switched model to {fallback_model}; retry the request)"
-                    )
-                except Exception:
-                    LOGGER.exception(
-                        "failed to auto-switch gemini model after quota failure bot=%s session=%s",
-                        bot_id,
-                        session.session_id,
-                    )
-        if failed:
-            await repository.fail_run_job_and_turn(
-                job_id=job.id,
-                turn_id=turn.turn_id,
-                error_text=error_text or "adapter execution failed",
-                now=_now_ms(),
-            )
-            await _append_audit_log(
-                repository=repository,
-                bot_id=bot_id,
-                chat_id=str(turn.chat_id),
-                session_id=turn.session_id,
-                action="run.turn",
-                result="failed",
-                detail=(
-                    f"{(error_text or 'adapter execution failed')[:320]}"
-                    f"{' (auto-recovered thread)' if auto_recovered else ''}"
-                ),
-                now=_now_ms(),
-            )
-            if hasattr(repository, "increment_runtime_metric"):
-                try:
-                    await repository.increment_runtime_metric(
-                        bot_id=bot_id,
-                        metric_key=f"provider_run_failed.{provider}",
-                        now=_now_ms(),
-                    )
-                except Exception:
-                    LOGGER.exception("failed to increment provider failure metric bot=%s provider=%s", bot_id, provider)
-        else:
-            await repository.complete_run_job_and_turn(
-                job_id=job.id,
-                turn_id=turn.turn_id,
-                assistant_text=assistant_text,
-                now=_now_ms(),
-            )
-            await _append_audit_log(
-                repository=repository,
-                bot_id=bot_id,
-                chat_id=str(turn.chat_id),
-                session_id=turn.session_id,
-                action="run.turn",
-                result="success",
-                detail=f"provider={provider}",
-                now=_now_ms(),
-            )
-            should_deliver_artifacts = (
-                bool(assistant_text)
-                or _looks_like_image_request(turn.user_text)
-                or _looks_like_html_request(turn.user_text)
-            )
-            if should_deliver_artifacts:
-                await _deliver_generated_artifacts(
-                    bot_id=bot_id,
-                    chat_id=int(turn.chat_id),
-                    turn_id=turn.turn_id,
-                    user_text=turn.user_text,
-                    assistant_text=assistant_text,
-                    run_started_epoch=run_started_epoch,
-                    artifact_output_dir=artifact_output_dir,
-                    telegram_client=telegram_client,
-                    streamer=streamer,
-                    sent_registry=sent_artifacts_by_chat,
-                )
-
-        summary = summary_service.build_summary(
-            SummaryInput(
-                previous_summary=session.rolling_summary_md,
-                user_text=turn.user_text,
-                assistant_text=assistant_text,
-                command_notes=command_notes,
-                error_text=error_text,
-            )
-        )
-        await repository.upsert_session_summary(
-            session_id=session.session_id,
-            bot_id=bot_id,
-            turn_id=turn.turn_id,
-            summary_md=summary,
-            now=_now_ms(),
-        )
-
-        await streamer.close_turn(turn_id=turn.turn_id)
-    except Exception as error:
-        LOGGER.exception("run worker failed job=%s", job.id)
-        await repository.fail_run_job_and_turn(
-            job_id=job.id,
-            turn_id=job.turn_id,
-            error_text=str(error),
-            now=_now_ms(),
-        )
-        with suppress(Exception):
-            await streamer.close_turn(turn_id=job.turn_id)
-    finally:
-        lease_stop.set()
-        lease_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await lease_task
-        try:
-            promoted = await repository.promote_next_deferred_action(
-                bot_id=bot_id,
-                chat_id=str(job.chat_id),
-                now=_now_ms(),
-            )
-            if promoted is not None:
-                LOGGER.info(
-                    "promoted deferred action bot=%s chat=%s action=%s turn=%s",
-                    bot_id,
-                    job.chat_id,
-                    promoted.action_type,
-                    promoted.turn_id,
-                )
-        except Exception:
-            LOGGER.exception("failed to promote deferred action bot=%s chat=%s", bot_id, job.chat_id)
 
 
 async def _renew_lease_loop(*, job_id: str, repository: Repository, lease_ms: int, stop_event: asyncio.Event) -> None:
-    interval = max(1.0, lease_ms / 2000)
-    while not stop_event.is_set():
-        await asyncio.sleep(interval)
-        if stop_event.is_set():
-            return
-        await repository.renew_run_job_lease(job_id=job_id, now=_now_ms(), lease_duration_ms=lease_ms)
+    await _renew_lease_loop_impl(
+        job_id=job_id,
+        repository=repository,
+        lease_ms=lease_ms,
+        stop_event=stop_event,
+        now_ms_fn=_now_ms,
+    )

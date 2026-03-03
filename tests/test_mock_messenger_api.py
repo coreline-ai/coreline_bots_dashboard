@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+import yaml
 
 from telegram_bot_new.mock_messenger.api import create_app
 from telegram_bot_new.mock_messenger.store import MockMessengerStore
@@ -486,6 +487,46 @@ def test_mock_runtime_profile_endpoint(tmp_path: Path) -> None:
     store.close()
 
 
+def test_bot_diagnostics_unknown_bot_includes_cap_hint_when_capped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cap-hint.db"),
+        data_dir=str(tmp_path / "cap-hint-data"),
+    )
+    workspace = tmp_path / "workspace"
+    config_dir = workspace / "config"
+    runtime_dir = workspace / ".runlogs" / "local-multibot"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    source_config = config_dir / "bots.multibot.yaml"
+    _write_bots_yaml(source_config)
+    source_payload = yaml.safe_load(source_config.read_text(encoding="utf-8")) or {}
+    source_bots = list(source_payload.get("bots") or [])
+    effective_payload = {"bots": source_bots[:2]}
+    effective_config = runtime_dir / "bots.effective.yaml"
+    effective_config.write_text(yaml.safe_dump(effective_payload, sort_keys=False), encoding="utf-8")
+
+    monkeypatch.chdir(workspace)
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(effective_config),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/_mock/bot_diagnostics",
+            params={"bot_id": "bot-c", "token": "mock_token_c", "chat_id": 1001, "limit": 120},
+        )
+        assert response.status_code == 404
+        detail = str(response.json().get("detail") or "")
+        assert "unknown bot_id: bot-c" in detail
+        assert "excluded by MAX_BOTS cap" in detail
+        assert "MAX_BOTS>=3" in detail
+    store.close()
+
+
 def test_mock_control_tower_recover_stop_run_enqueues_stop(tmp_path: Path) -> None:
     store = MockMessengerStore(
         db_path=str(tmp_path / "control-recover.db"),
@@ -650,8 +691,11 @@ def test_mock_bot_catalog_add_endpoint(tmp_path: Path) -> None:
         assert row["mode"] == "embedded"
         assert row["default_adapter"] == "gemini"
         assert row["bot_id"] not in before_ids
+        assert row["bot_id"] == "bot-d"
         assert isinstance(row["token"], str)
         assert row["token"]
+        assert row["token"] == "mock_token_d"
+        assert row["name"] == "Bot D"
 
         after = client.get("/_mock/bot_catalog").json()["result"]["bots"]
         assert len(after) == len(before) + 1
@@ -659,10 +703,10 @@ def test_mock_bot_catalog_add_endpoint(tmp_path: Path) -> None:
     store.close()
 
 
-def test_mock_bot_catalog_delete_endpoint(tmp_path: Path) -> None:
+def test_mock_bot_catalog_add_reuses_deleted_alpha_slot(tmp_path: Path) -> None:
     store = MockMessengerStore(
-        db_path=str(tmp_path / "catalog-delete.db"),
-        data_dir=str(tmp_path / "catalog-delete-data"),
+        db_path=str(tmp_path / "catalog-add-reuse.db"),
+        data_dir=str(tmp_path / "catalog-add-reuse-data"),
     )
     bots_yaml = tmp_path / "bots.yaml"
     _write_bots_yaml(bots_yaml)
@@ -675,15 +719,127 @@ def test_mock_bot_catalog_delete_endpoint(tmp_path: Path) -> None:
         embedded_base_port=8600,
     )
     with TestClient(app) as client:
+        deleted = client.post("/_mock/bot_catalog/delete", json={"bot_id": "bot-b"})
+        assert deleted.status_code == 200
+        assert deleted.json()["ok"] is True
+
+        created = client.post("/_mock/bot_catalog/add", json={"adapter": "codex"})
+        assert created.status_code == 200
+        payload = created.json()
+        assert payload["ok"] is True
+        row = payload["result"]["bot"]
+        assert row["bot_id"] == "bot-b"
+        assert row["name"] == "Bot B"
+        assert row["token"] == "mock_token_b"
+    store.close()
+
+
+def test_mock_bot_catalog_delete_endpoint(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-delete.db"),
+        data_dir=str(tmp_path / "catalog-delete-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    bot_a_state_db = state_dir / "bot-a.db"
+    bot_a_state_db.write_text("placeholder", encoding="utf-8")
+
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
         deleted = client.post("/_mock/bot_catalog/delete", json={"bot_id": "bot-a"})
         assert deleted.status_code == 200
         assert deleted.json()["ok"] is True
+        assert bot_a_state_db.exists() is False
 
         after = client.get("/_mock/bot_catalog").json()["result"]["bots"]
         assert all(row["bot_id"] != "bot-a" for row in after)
 
         missing = client.post("/_mock/bot_catalog/delete", json={"bot_id": "does-not-exist"})
         assert missing.status_code == 404
+    store.close()
+
+
+def test_mock_bot_catalog_delete_endpoint_removes_custom_sqlite_db_path(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-delete-custom.db"),
+        data_dir=str(tmp_path / "catalog-delete-custom-data"),
+    )
+    custom_state_dir = tmp_path / "custom-state"
+    custom_state_dir.mkdir(parents=True, exist_ok=True)
+    custom_db = custom_state_dir / "bot-x.db"
+    custom_db.write_text("placeholder", encoding="utf-8")
+
+    bots_yaml = tmp_path / "bots-custom.yaml"
+    payload = {
+        "bots": [
+            {
+                "bot_id": "bot-x",
+                "name": "Bot X",
+                "mode": "embedded",
+                "telegram_token": "mock_token_x",
+                "adapter": "codex",
+                "database_url": f"sqlite+aiosqlite:///{custom_db.as_posix()}",
+                "webhook": {
+                    "path_secret": "bot-x-path",
+                    "secret_token": "bot-x-secret",
+                },
+            }
+        ]
+    }
+    bots_yaml.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        deleted = client.post("/_mock/bot_catalog/delete", json={"bot_id": "bot-x"})
+        assert deleted.status_code == 200
+        assert deleted.json()["ok"] is True
+
+    assert custom_db.exists() is False
+    store.close()
+
+
+def test_mock_bot_catalog_role_update_for_three_bots(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-role.db"),
+        data_dir=str(tmp_path / "catalog-role-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        role_updates = {
+            "bot-a": "controller",
+            "bot-b": "planner",
+            "bot-c": "integrator",
+        }
+        for bot_id, role in role_updates.items():
+            response = client.post("/_mock/bot_catalog/role", json={"bot_id": bot_id, "role": role})
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["ok"] is True
+            assert payload["result"]["bot"]["bot_id"] == bot_id
+            assert payload["result"]["bot"]["default_role"] == role
     store.close()
 
 
@@ -706,7 +862,27 @@ def test_mock_bot_catalog_add_endpoint_creates_missing_config(tmp_path: Path) ->
         payload = created.json()
         assert payload["ok"] is True
         assert payload["result"]["total_bots"] == 1
+        assert payload["result"]["bot"]["default_adapter"] == "codex"
     assert missing_config.exists()
+    store.close()
+
+
+def test_mock_routing_suggest_defaults_to_codex_without_bot_id(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "routing-default.db"),
+        data_dir=str(tmp_path / "routing-default-data"),
+    )
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(tmp_path / "missing.yaml"),
+    )
+    with TestClient(app) as client:
+        response = client.get("/_mock/routing/suggest", params={"text": "@auto 테스트"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["result"]["provider"] == "codex"
     store.close()
 
 

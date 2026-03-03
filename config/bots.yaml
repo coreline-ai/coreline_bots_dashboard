@@ -1,3 +1,2 @@
-﻿bots:
-  - telegram_token: TELEGRAM_BOT_TOKEN
-    # telegram_api_base_url: http://127.0.0.1:9082
+bots:
+- telegram_token: TELEGRAM_BOT_TOKEN

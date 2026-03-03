@@ -66,6 +66,77 @@ class _WatchdogTimeoutAdapter:
         return None
 
 
+class _GeminiQuotaErrorAdapter:
+    async def _emit_quota_error(self):
+        yield AdapterEvent(
+            seq=1,
+            ts="2026-01-01T00:00:00+00:00",
+            event_type="error",
+            payload={
+                "message": "api error: you have exhausted your capacity on this model",
+                "stderr": "quota will reset after 00:00 UTC",
+            },
+        )
+        yield AdapterEvent(seq=2, ts="2026-01-01T00:00:01+00:00", event_type="turn_completed", payload={"status": "error"})
+
+    async def run_new_turn(self, request):
+        async for event in self._emit_quota_error():
+            yield event
+
+    async def run_resume_turn(self, request):
+        async for event in self._emit_quota_error():
+            yield event
+
+    def extract_thread_id(self, event: AdapterEvent):
+        return None
+
+
+class _CodexAccessLimitedAdapter:
+    async def _emit_access_limited_error(self):
+        yield AdapterEvent(
+            seq=1,
+            ts="2026-01-01T00:00:00+00:00",
+            event_type="error",
+            payload={
+                "message": (
+                    "This user's access to gpt-5.3-codex-premium-1p-codexswic-ev3 "
+                    "has been temporarily limited for potentially suspicious activity "
+                    "related to cybersecurity."
+                ),
+            },
+        )
+        yield AdapterEvent(seq=2, ts="2026-01-01T00:00:01+00:00", event_type="turn_completed", payload={"status": "error"})
+
+    async def run_new_turn(self, request):
+        async for event in self._emit_access_limited_error():
+            yield event
+
+    async def run_resume_turn(self, request):
+        async for event in self._emit_access_limited_error():
+            yield event
+
+    def extract_thread_id(self, event: AdapterEvent):
+        return None
+
+
+class _CancelledAdapter:
+    async def run_new_turn(self, request):
+        should_cancel = await request.should_cancel()
+        yield AdapterEvent(
+            seq=1,
+            ts="2026-01-01T00:00:00+00:00",
+            event_type="turn_completed",
+            payload={"status": "cancelled" if should_cancel else "success"},
+        )
+
+    async def run_resume_turn(self, request):
+        async for event in self.run_new_turn(request):
+            yield event
+
+    def extract_thread_id(self, event: AdapterEvent):
+        return None
+
+
 class _SummaryService:
     def build_recovery_preamble(self, summary: str) -> str:
         return ""
@@ -118,10 +189,13 @@ class _Repository:
         self.completed = False
         self.failed = False
         self.failed_error = ""
+        self.cancelled_marked = False
         self.appended_events: list[tuple[str, str]] = []
         self.metrics: list[str] = []
         self.last_set_unsafe_until: int | None | object = object()
         self.thread_updates: list[str | None] = []
+        self.set_model_calls: list[str] = []
+        self.turn_cancelled = False
 
     async def get_turn(self, *, turn_id: str):
         return SimpleNamespace(turn_id=turn_id, session_id="session-1", user_text=self.user_text, chat_id="1001")
@@ -157,7 +231,7 @@ class _Repository:
         self.appended_events.append((event_type, payload_json))
 
     async def is_turn_cancelled(self, *, turn_id: str) -> bool:
-        return False
+        return self.turn_cancelled
 
     async def set_session_thread_id(self, *, session_id: str, thread_id: str | None, now: int) -> None:
         self.thread_updates.append(thread_id)
@@ -167,6 +241,10 @@ class _Repository:
         self.last_set_unsafe_until = unsafe_until
         self.unsafe_until = unsafe_until
 
+    async def set_session_model(self, *, session_id: str, adapter_model: str | None, now: int) -> None:
+        self.adapter_model = adapter_model
+        self.set_model_calls.append(adapter_model or "default")
+
     async def complete_run_job_and_turn(self, *, job_id: str, turn_id: str, assistant_text: str, now: int) -> None:
         self.completed = True
 
@@ -175,7 +253,7 @@ class _Repository:
         self.failed_error = error_text
 
     async def mark_run_job_cancelled(self, *, job_id: str, turn_id: str, now: int) -> None:
-        return None
+        self.cancelled_marked = True
 
     async def upsert_session_summary(
         self,
@@ -417,6 +495,35 @@ async def test_process_run_job_injects_active_skill_guidance(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_process_run_job_injects_multiple_skills_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _CaptureAdapter()
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: adapter)
+    monkeypatch.setattr(
+        "telegram_bot_new.workers.run_worker.build_skill_instruction",
+        lambda *, skill_id, prompt: "[skill] multi guidance" if skill_id == "demo-skill,audio-skill" else None,
+    )
+    repo = _Repository(adapter_name="gemini", active_skill="demo-skill,audio-skill", user_text="animate intro and mix audio")
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-8b", turn_id="turn-8b", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert adapter.last_request is not None
+    assert "[Skill Guidance]" in (adapter.last_request.preamble or "")
+    assert "multi guidance" in (adapter.last_request.preamble or "")
+
+
+@pytest.mark.asyncio
 async def test_process_run_job_watchdog_timeout_auto_recovers_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: _WatchdogTimeoutAdapter())
     repo = _Repository(adapter_name="gemini", adapter_thread_id="stale-thread-1")
@@ -437,4 +544,102 @@ async def test_process_run_job_watchdog_timeout_auto_recovers_thread(monkeypatch
 
     assert repo.failed is True
     assert repo.thread_updates == [None]
+    assert "provider_run_watchdog_timeout.gemini" in repo.metrics
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_applies_gemini_quota_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: _GeminiQuotaErrorAdapter())
+    repo = _Repository(adapter_name="gemini", adapter_model="gemini-2.5-pro")
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-10", turn_id="turn-10", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert repo.failed is True
+    assert repo.set_model_calls == ["gemini-2.5-flash"]
+    assert "auto-switched model to gemini-2.5-flash" in repo.failed_error
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_applies_codex_access_limited_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: _CodexAccessLimitedAdapter())
+    repo = _Repository(adapter_name="codex", adapter_model="gpt-5.3-codex")
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-10b", turn_id="turn-10b", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert repo.failed is True
+    assert repo.set_model_calls == ["gpt-5"]
+    assert "auto-switched model to gpt-5" in repo.failed_error
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_marks_cancelled_when_turn_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: _CancelledAdapter())
+    repo = _Repository(adapter_name="gemini")
+    repo.turn_cancelled = True
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-11", turn_id="turn-11", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert repo.cancelled_marked is True
+    assert repo.completed is False
+    assert repo.failed is False
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_treats_deadline_timeout_as_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: _CancelledAdapter())
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.RUN_TURN_TIMEOUT_SEC", 0)
+    repo = _Repository(adapter_name="gemini")
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-12", turn_id="turn-12", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert repo.failed is True
+    assert "turn timed out after 0s" in repo.failed_error
     assert "provider_run_watchdog_timeout.gemini" in repo.metrics

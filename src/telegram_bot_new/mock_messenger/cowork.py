@@ -28,6 +28,22 @@ ACTIVE_RUN_HINTS = (
     "already active in this chat",
     "use /stop first",
 )
+LINK_RE = re.compile(r"(https?://[^\s)]+|(?:localhost|127\.0\.0\.1):\d+[^\s)]*)", re.IGNORECASE)
+ERR_CONNECTION_REFUSED_HINT = "err_connection_refused"
+RENDER_TASK_HINTS = (
+    "render",
+    "renderer",
+    "ui",
+    "web",
+    "page",
+    "screen",
+    "layout",
+    "랜더",
+    "렌더",
+    "화면",
+    "페이지",
+    "웹",
+)
 ALLOWED_ROLES = ("controller", "planner", "executor", "integrator")
 
 
@@ -51,6 +67,14 @@ class TurnOutcome:
     error_text: str | None = None
 
 
+@dataclass
+class QualityGateResult:
+    passed: bool
+    failures: list[str]
+    requires_render_link: bool
+    execution_link: str | None = None
+
+
 class CoworkOrchestrator:
     def __init__(
         self,
@@ -60,6 +84,7 @@ class CoworkOrchestrator:
         poll_interval_sec: float = 1.0,
         cool_down_sec: float = 1.0,
         artifact_root: str | Path | None = None,
+        max_rework_rounds: int = 2,
     ) -> None:
         self._store = store
         self._send_user_message = send_user_message
@@ -67,6 +92,7 @@ class CoworkOrchestrator:
         self._cool_down_sec = max(0.0, float(cool_down_sec))
         root = Path(artifact_root) if artifact_root is not None else (Path.cwd() / "cowork")
         self._artifact_root = root.expanduser().resolve()
+        self._max_rework_rounds = max(0, int(max_rework_rounds))
         self._lock = asyncio.Lock()
         self._active_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -257,32 +283,80 @@ class CoworkOrchestrator:
                 executors=role_map["executors"],
                 max_parallel=int(cowork.get("max_parallel") or 3),
                 max_turn_sec=max_turn_sec,
+                task_no_start=1,
             )
             if execution_rows is None:
                 return
 
-            integration_text = await self._stage_integration(
-                cowork_id=cowork_id,
-                task_text=root_task,
-                integrator=role_map["integrator"],
-                execution_rows=execution_rows,
-                max_turn_sec=max_turn_sec,
-            )
-            if integration_text is None:
-                return
+            rework_round = 0
+            while True:
+                integration_text = await self._stage_integration(
+                    cowork_id=cowork_id,
+                    task_text=root_task,
+                    integrator=role_map["integrator"],
+                    execution_rows=execution_rows,
+                    max_turn_sec=max_turn_sec,
+                )
+                if integration_text is None:
+                    return
 
-            final_report = await self._stage_finalization(
-                cowork_id=cowork_id,
-                task_text=root_task,
-                controller=role_map["controller"],
-                integration_text=integration_text,
-                execution_rows=execution_rows,
-                max_turn_sec=max_turn_sec,
-            )
-            if final_report is None:
-                return
+                final_report = await self._stage_finalization(
+                    cowork_id=cowork_id,
+                    task_text=root_task,
+                    controller=role_map["controller"],
+                    integration_text=integration_text,
+                    execution_rows=execution_rows,
+                    max_turn_sec=max_turn_sec,
+                )
+                if final_report is None:
+                    return
 
-            self._store.finish_cowork(cowork_id=cowork_id, status="completed", final_report=final_report)
+                gate = self._evaluate_completion_gate(
+                    task_text=root_task,
+                    execution_rows=execution_rows,
+                    final_report=final_report,
+                )
+                final_report["completion_status"] = "passed" if gate.passed else "needs_rework"
+                final_report["quality_gate_failures"] = gate.failures
+                if gate.execution_link:
+                    final_report["execution_link"] = gate.execution_link
+
+                if gate.passed:
+                    self._store.finish_cowork(cowork_id=cowork_id, status="completed", final_report=final_report)
+                    return
+
+                if rework_round >= self._max_rework_rounds:
+                    error_summary = "; ".join(gate.failures[:3]) or "quality gate failed"
+                    self._store.finish_cowork(
+                        cowork_id=cowork_id,
+                        status="failed",
+                        error_summary=f"quality gate failed: {error_summary}",
+                        final_report=final_report,
+                    )
+                    return
+
+                rework_round += 1
+                rework_plan_items = self._build_rework_plan_items(
+                    task_text=root_task,
+                    failures=gate.failures,
+                    round_no=rework_round,
+                )
+                rework_task_text = self._build_rework_task_text(
+                    task_text=root_task,
+                    failures=gate.failures,
+                    round_no=rework_round,
+                )
+                execution_rows = await self._stage_execution(
+                    cowork_id=cowork_id,
+                    task_text=rework_task_text,
+                    plan_items=rework_plan_items,
+                    executors=role_map["executors"],
+                    max_parallel=int(cowork.get("max_parallel") or 3),
+                    max_turn_sec=max_turn_sec,
+                    task_no_start=len(execution_rows) + 1,
+                )
+                if execution_rows is None:
+                    return
         except asyncio.CancelledError:
             cowork = self._store.get_cowork(cowork_id=cowork_id)
             if cowork is not None and cowork.get("status") in {"queued", "running"}:
@@ -371,6 +445,7 @@ class CoworkOrchestrator:
         executors: list[dict[str, Any]],
         max_parallel: int,
         max_turn_sec: int,
+        task_no_start: int = 1,
     ) -> list[dict[str, Any]] | None:
         if self._is_stop_requested(cowork_id):
             self._store.finish_cowork(cowork_id=cowork_id, status="stopped")
@@ -378,11 +453,12 @@ class CoworkOrchestrator:
 
         execution_rows: list[dict[str, Any]] = []
         for index, item in enumerate(plan_items, start=1):
-            assignee = executors[(index - 1) % len(executors)]
+            task_no = int(task_no_start) + index - 1
+            assignee = executors[(task_no - 1) % len(executors)]
             task_id = self._store.insert_cowork_task(
                 cowork_id=cowork_id,
-                task_no=index,
-                title=str(item.get("title") or f"Task {index}"),
+                task_no=task_no,
+                title=str(item.get("title") or f"Task {task_no}"),
                 spec_json=item,
                 assignee_bot_id=str(assignee.get("bot_id") or ""),
                 assignee_label=str(assignee.get("label") or ""),
@@ -392,7 +468,7 @@ class CoworkOrchestrator:
             execution_rows.append(
                 {
                     "task_id": task_id,
-                    "task_no": index,
+                    "task_no": task_no,
                     "plan": item,
                     "assignee": assignee,
                 }
@@ -910,6 +986,7 @@ class CoworkOrchestrator:
             "반드시 아래 형식으로 작성하세요.\n"
             "결과요약: (핵심 결과)\n"
             "검증: (완료조건 충족 여부)\n"
+            "실행링크: (실제 동작 확인 가능한 URL, 없으면 '없음')\n"
             "남은이슈: (없으면 '없음')\n"
             "총 700자 이내."
         )
@@ -947,6 +1024,7 @@ class CoworkOrchestrator:
             "충돌사항: ...\n"
             "누락사항: ...\n"
             "권장수정: ...\n"
+            "증빙링크: (실행링크가 있으면 기재, 없으면 '없음')\n"
             "총 900자 이내."
         )
 
@@ -973,6 +1051,8 @@ class CoworkOrchestrator:
             "아래 형식을 정확히 지켜 최종 결론을 작성하세요.\n"
             "최종결론: ...\n"
             "실행체크리스트: ...\n"
+            "실행링크: (실제 동작 확인 가능한 URL, 없으면 '없음')\n"
+            "증빙요약: (테스트/캡처/로그 근거 요약)\n"
             "즉시실행항목(Top3): 1) ... 2) ... 3) ...\n"
             "총 900자 이내."
         )
@@ -1014,13 +1094,26 @@ class CoworkOrchestrator:
         conflicts = self._extract_labeled_line(integration_text, "충돌사항")
         missing = self._extract_labeled_line(integration_text, "누락사항")
         recommended_fixes = self._extract_labeled_line(integration_text, "권장수정")
+        integration_link = self._extract_labeled_line(integration_text, "증빙링크")
         final_conclusion = self._extract_labeled_line(finalization_text, "최종결론")
         execution_checklist = self._extract_labeled_line(finalization_text, "실행체크리스트")
+        execution_link = self._extract_labeled_line(finalization_text, "실행링크")
+        evidence_summary = self._extract_labeled_line(finalization_text, "증빙요약")
         actions = self._extract_top3_actions(finalization_text)
         if not integrated_summary:
             integrated_summary = self._fallback_integration_text(execution_rows)
         if not final_conclusion:
             final_conclusion = finalization_text.splitlines()[0].strip() if finalization_text.strip() else "최종 결론 생성 실패"
+        if not execution_link:
+            execution_link = integration_link or self._extract_first_link(
+                "\n".join(
+                    [
+                        integration_text,
+                        finalization_text,
+                        *[str(row.get("response_text") or "") for row in execution_rows],
+                    ]
+                )
+            )
         return {
             "integrated_summary": integrated_summary,
             "conflicts": conflicts or "없음",
@@ -1028,12 +1121,135 @@ class CoworkOrchestrator:
             "recommended_fixes": recommended_fixes or "없음",
             "final_conclusion": final_conclusion,
             "execution_checklist": execution_checklist or "- 완료 기준 검증\n- 누락 사항 재점검\n- 후속 실행 일정 수립",
+            "execution_link": execution_link,
+            "evidence_summary": evidence_summary or "증빙 요약 없음",
             "immediate_actions_top3": actions or [
                 "핵심 결과를 사용자와 합의",
                 "실행 누락 항목을 보완",
                 "후속 검증 라운드 예약",
             ],
         }
+
+    def _normalize_link(self, raw_link: str | None) -> str | None:
+        candidate = str(raw_link or "").strip().strip(".,)")
+        if not candidate or candidate.lower() in {"없음", "none", "n/a", "-"}:
+            return None
+        if candidate.startswith("localhost:") or candidate.startswith("127.0.0.1:"):
+            return f"http://{candidate}"
+        return candidate
+
+    def _extract_first_link(self, text: str) -> str | None:
+        for match in LINK_RE.findall(str(text or "")):
+            link = self._normalize_link(match)
+            if link:
+                return link
+        return None
+
+    def _requires_render_link(self, task_text: str) -> bool:
+        lowered = str(task_text or "").lower()
+        return any(hint in lowered for hint in RENDER_TASK_HINTS)
+
+    def _evaluate_completion_gate(
+        self,
+        *,
+        task_text: str,
+        execution_rows: list[dict[str, Any]],
+        final_report: dict[str, Any],
+    ) -> QualityGateResult:
+        failures: list[str] = []
+        requires_render_link = self._requires_render_link(task_text)
+        non_success_rows = [row for row in execution_rows if str(row.get("status") or "") != "success"]
+        if non_success_rows:
+            failures.append(f"실행 태스크 실패/중단 {len(non_success_rows)}건")
+
+        final_conclusion = str(final_report.get("final_conclusion") or "").strip()
+        execution_checklist = str(final_report.get("execution_checklist") or "").strip()
+        if not final_conclusion or "생성 실패" in final_conclusion:
+            failures.append("최종결론이 비어 있거나 생성 실패 상태")
+        if not execution_checklist:
+            failures.append("실행체크리스트가 비어 있음")
+
+        execution_link = self._normalize_link(final_report.get("execution_link"))
+        if not execution_link:
+            execution_link = self._extract_first_link(
+                "\n".join(
+                    [
+                        final_conclusion,
+                        str(final_report.get("integrated_summary") or ""),
+                        str(final_report.get("recommended_fixes") or ""),
+                        str(final_report.get("evidence_summary") or ""),
+                        *[str(row.get("response_text") or "") for row in execution_rows],
+                    ]
+                )
+            )
+        if requires_render_link and not execution_link:
+            failures.append("렌더링/화면 요청인데 실행 가능한 링크가 없음")
+
+        evidence_blob = "\n".join(
+            [str(row.get("response_text") or "") for row in execution_rows]
+            + [str(final_report.get("evidence_summary") or "")]
+            + [str(final_report.get("recommended_fixes") or "")]
+        ).lower()
+        if ERR_CONNECTION_REFUSED_HINT in evidence_blob:
+            failures.append("실행 링크 접속 실패(ERR_CONNECTION_REFUSED) 흔적 존재")
+
+        return QualityGateResult(
+            passed=not failures,
+            failures=failures,
+            requires_render_link=requires_render_link,
+            execution_link=execution_link,
+        )
+
+    def _build_rework_plan_items(self, *, task_text: str, failures: list[str], round_no: int) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for index, failure in enumerate(failures[:3], start=1):
+            lowered = failure.lower()
+            if "링크" in failure or "render" in lowered or "화면" in failure:
+                items.append(
+                    {
+                        "title": f"R{round_no}-{index} 실행링크 증빙 보강",
+                        "goal": "실제 접속 가능한 렌더링 링크와 검증 근거를 확보",
+                        "done_criteria": "실행링크(http://127.0.0.1:<port>/...)와 접속 검증 결과 제시",
+                        "risk": "로컬 서버 미기동 시 ERR_CONNECTION_REFUSED 재발",
+                    }
+                )
+            elif "실패" in failure or "중단" in failure:
+                items.append(
+                    {
+                        "title": f"R{round_no}-{index} 실패 태스크 재실행",
+                        "goal": "실패/중단 태스크를 성공 상태로 복구",
+                        "done_criteria": "결과요약/검증/남은이슈 모두 작성 후 status=success 확보",
+                        "risk": "동일 원인 재발 시 반복 실패",
+                    }
+                )
+            else:
+                items.append(
+                    {
+                        "title": f"R{round_no}-{index} 품질게이트 보강",
+                        "goal": failure,
+                        "done_criteria": "누락된 증빙과 체크리스트를 포함한 결과 제출",
+                        "risk": "증빙 부재로 최종 승인 실패",
+                    }
+                )
+        if not items:
+            items.append(
+                {
+                    "title": f"R{round_no}-1 결과 검증 보강",
+                    "goal": f"요청 '{task_text}'의 완료 증빙 강화",
+                    "done_criteria": "실행링크/검증근거/체크리스트를 포함해 재제출",
+                    "risk": "최종 보고와 실제 결과 불일치",
+                }
+            )
+        return items
+
+    def _build_rework_task_text(self, *, task_text: str, failures: list[str], round_no: int) -> str:
+        failure_lines = "\n".join(f"- {row}" for row in failures[:5]) or "- 미정의 품질 이슈"
+        return (
+            f"{task_text}\n"
+            f"[보강 라운드 {round_no}] 품질 게이트 미통과 이슈를 해소하세요.\n"
+            "아래 이슈를 모두 반영하고, 실행링크/검증근거를 반드시 포함해 답변하세요.\n"
+            f"{failure_lines}"
+        )
 
     def _fallback_integration_text(self, execution_rows: list[dict[str, Any]]) -> str:
         summary = self._build_execution_summary(execution_rows)

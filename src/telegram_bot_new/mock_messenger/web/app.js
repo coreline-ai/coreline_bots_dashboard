@@ -76,7 +76,7 @@ const rateMethodInput = document.getElementById("rate-method-input");
 const rateCountInput = document.getElementById("rate-count-input");
 const rateRetryInput = document.getElementById("rate-retry-input");
 
-const DEFAULT_TOKEN = "mock_token_1";
+const DEFAULT_TOKEN = "mock_token_a";
 const STORAGE_KEY = "mock_messenger_ui_state_v4";
 const LEGACY_STORAGE_KEYS = ["mock_messenger_ui_state_v3"];
 const THEME_STORAGE_KEY = "mock_messenger_theme";
@@ -241,7 +241,7 @@ function resolveProfileProvider(profile, diagnostics, catalogRow) {
   if (defaultProvider) {
     return defaultProvider;
   }
-  return "gemini";
+  return "codex";
 }
 
 function resolveProfileModel(profile, diagnostics, catalogRow, provider) {
@@ -268,16 +268,27 @@ function normalizeProjectPath(value) {
   return String(value || "").trim();
 }
 
-function normalizeSkillId(value) {
-  return String(value || "").trim();
+function normalizeSkillIds(value) {
+  const raw = Array.isArray(value) ? value.map((item) => String(item || "")) : String(value || "").split(",");
+  const deduped = [];
+  const seen = new Set();
+  for (const row of raw) {
+    const token = String(row || "").trim();
+    if (!token || seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+    deduped.push(token);
+  }
+  return deduped;
 }
 
-function resolveProfileSkill(profile, diagnostics) {
-  const diagnosticSkill = normalizeSkillId(diagnostics?.session?.current_skill);
-  if (diagnosticSkill) {
-    return diagnosticSkill;
+function resolveProfileSkills(profile, diagnostics) {
+  const diagnosticSkills = normalizeSkillIds(diagnostics?.session?.current_skill);
+  if (diagnosticSkills.length > 0) {
+    return diagnosticSkills;
   }
-  return normalizeSkillId(profile?.selected_skill);
+  return normalizeSkillIds(profile?.selected_skill);
 }
 
 function resolveProfileProject(profile, diagnostics) {
@@ -1378,28 +1389,29 @@ async function applyProfileModelOnly(profile, model) {
   }
 }
 
-async function applyProfileSkill(profile, skillId) {
+async function applyProfileSkill(profile, skillIds) {
   const profileId = String(profile?.profile_id || "");
   if (!profileId || isProfileModelApplyBusy(profileId)) {
     return false;
   }
-  const previousSkill = String(profile.selected_skill || "");
+  const previousSkillIds = normalizeSkillIds(profile.selected_skill);
+  const nextSkillIds = normalizeSkillIds(skillIds);
   setProfileModelApplyBusy(profileId, true);
   try {
     await stopActiveRunBeforeModelApply(profile);
     const baseline = await maxMessageIdForProfile(profile);
-    const command = skillId ? `/skill ${skillId}` : "/skill off";
+    const command = nextSkillIds.length > 0 ? `/skill ${nextSkillIds.join(",")}` : "/skill off";
     await sendTextToProfile(profile, command);
     const outcome = await waitForCommandOutcome(profile, baseline, "skill", 30);
     if (outcome.status !== "PASS") {
       throw new Error(`skill change failed: ${outcome.detail}`);
     }
-    profile.selected_skill = String(skillId || "");
+    profile.selected_skill = nextSkillIds.join(",");
     saveState();
     await refresh();
     return true;
   } catch (error) {
-    profile.selected_skill = previousSkill;
+    profile.selected_skill = previousSkillIds.join(",");
     saveState();
     appendBubble("meta", `${profile.label}: ${error.message}`);
     await refresh();
@@ -1509,14 +1521,14 @@ function renderBotList(force = false) {
     const provider = resolveProfileProvider(profile, diag, catalogRow);
     const modelOptions = availableModelsForProvider(catalogRow, provider);
     const model = resolveProfileModel(profile, diag, catalogRow, provider);
-    const currentSkill = resolveProfileSkill(profile, diag);
+    const currentSkills = resolveProfileSkills(profile, diag);
     const currentRole = resolveProfileRole(profile, catalogRow);
     const unsafeLabel = formatUnsafeRemaining(session.unsafe_until);
     const applyingModel = isProfileModelApplyBusy(profile.profile_id);
     const controlsDisabled = applyingModel || parallelSendBusy || debateBusy || coworkBusy;
     profile.selected_provider = provider;
     profile.selected_model = model;
-    profile.selected_skill = currentSkill;
+    profile.selected_skill = currentSkills.join(",");
     profile.selected_project = resolveProfileProject(profile, diag);
     profile.selected_role = currentRole;
 
@@ -1649,19 +1661,15 @@ function renderBotList(force = false) {
 
     const skillLabel = document.createElement("label");
     skillLabel.className = "bot-item-model-label";
-    skillLabel.textContent = "Skill";
+    skillLabel.textContent = "Skill (multi)";
     const skillSelect = document.createElement("select");
     skillSelect.className = "bot-item-model-select";
     skillSelect.disabled = controlsDisabled;
+    skillSelect.multiple = true;
+    skillSelect.size = Math.max(2, Math.min(6, skillCatalog.length || 2));
     skillSelect.addEventListener("click", (event) => event.stopPropagation());
 
-    const offOption = document.createElement("option");
-    offOption.value = "";
-    offOption.textContent = "off";
-    offOption.selected = !currentSkill;
-    skillSelect.appendChild(offOption);
-
-    let matchedSkill = !currentSkill;
+    let matchedSkillCount = 0;
     for (const entry of skillCatalog) {
       const skillId = String(entry?.skill_id || "").trim();
       if (!skillId) {
@@ -1670,29 +1678,44 @@ function renderBotList(force = false) {
       const option = document.createElement("option");
       option.value = skillId;
       option.textContent = skillId;
-      option.selected = skillId === currentSkill;
+      option.selected = currentSkills.includes(skillId);
       if (option.selected) {
-        matchedSkill = true;
+        matchedSkillCount += 1;
       }
       skillSelect.appendChild(option);
     }
-    if (currentSkill && !matchedSkill) {
+    for (const skillId of currentSkills) {
+      if (!skillId || Array.from(skillSelect.options).some((row) => row.value === skillId)) {
+        continue;
+      }
       const custom = document.createElement("option");
-      custom.value = currentSkill;
-      custom.textContent = `${currentSkill} (custom)`;
+      custom.value = skillId;
+      custom.textContent = `${skillId} (custom)`;
       custom.selected = true;
+      matchedSkillCount += 1;
       skillSelect.appendChild(custom);
+    }
+    if (matchedSkillCount === 0 && skillSelect.options.length === 0) {
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "no skills";
+      placeholder.disabled = true;
+      skillSelect.appendChild(placeholder);
     }
     skillSelect.addEventListener("change", async (event) => {
       event.stopPropagation();
-      const nextSkill = String(skillSelect.value || "").trim();
-      if (nextSkill === currentSkill) {
-        skillSelect.value = currentSkill;
+      const nextSkills = normalizeSkillIds(
+        Array.from(skillSelect.selectedOptions).map((option) => String(option.value || ""))
+      );
+      if (nextSkills.join(",") === currentSkills.join(",")) {
         return;
       }
-      const ok = await applyProfileSkill(profile, nextSkill);
+      const ok = await applyProfileSkill(profile, nextSkills);
       if (!ok) {
-        skillSelect.value = currentSkill;
+        const selected = new Set(currentSkills);
+        for (const option of skillSelect.options) {
+          option.selected = selected.has(option.value);
+        }
       }
     });
     skillLabel.appendChild(skillSelect);
@@ -1827,7 +1850,7 @@ function ensureInitialProfileFromParams() {
     chat_id: paramChatId,
     user_id: paramUserId,
     selected_for_parallel: true,
-    selected_provider: normalizeProvider(defaultBot?.default_adapter || "gemini"),
+    selected_provider: normalizeProvider(defaultBot?.default_adapter || "codex"),
     selected_model: "",
     selected_skill: "",
     selected_project: "",
@@ -1868,6 +1891,73 @@ function dedupeProfilesByBotId() {
   uiState.profiles = nextProfiles;
 }
 
+function reconcileProfilesWithCatalog() {
+  if (!Array.isArray(catalog) || catalog.length === 0) {
+    return false;
+  }
+
+  const knownBotIds = new Set(catalog.map((row) => String(row?.bot_id || "").trim()).filter((value) => value));
+  const nextProfiles = [];
+  let changed = false;
+  const existingProfiles = Array.isArray(uiState.profiles) ? uiState.profiles : [];
+  for (const profile of existingProfiles) {
+    const currentBotId = String(profile?.bot_id || "").trim();
+    if (!currentBotId || !knownBotIds.has(currentBotId)) {
+      // Drop stale profile ids that are no longer present in runtime catalog.
+      changed = true;
+      continue;
+    }
+    const byBotId = catalogByBotId.get(currentBotId);
+    const currentToken = String(profile?.token || "").trim();
+    const canonicalToken = String(byBotId?.token || "").trim();
+    if (canonicalToken && canonicalToken !== currentToken) {
+      profile.token = canonicalToken;
+      changed = true;
+    }
+    if (!profile.selected_provider && byBotId) {
+      profile.selected_provider = normalizeProvider(byBotId.default_adapter || "codex");
+      changed = true;
+    }
+    nextProfiles.push(profile);
+  }
+
+  const existingByBotId = new Set(nextProfiles.map((profile) => String(profile?.bot_id || "").trim()).filter(Boolean));
+  const baseProfile = nextProfiles[0] || existingProfiles[0] || null;
+  const defaultChatId = numberOrDefault(baseProfile?.chat_id, 1001);
+  const defaultUserId = numberOrDefault(baseProfile?.user_id, 9001);
+  for (const row of catalog) {
+    const botId = String(row?.bot_id || "").trim();
+    if (!botId || existingByBotId.has(botId)) {
+      continue;
+    }
+    nextProfiles.push({
+      profile_id: makeProfileId(),
+      label: `${String(row?.name || botId)} 기본`,
+      bot_id: botId,
+      token: String(row?.token || DEFAULT_TOKEN),
+      chat_id: defaultChatId,
+      user_id: defaultUserId,
+      selected_for_parallel: true,
+      selected_provider: normalizeProvider(row?.default_adapter || "codex"),
+      selected_model: "",
+      selected_skill: "",
+      selected_project: "",
+      selected_role: normalizeRole(row?.default_role || "executor"),
+    });
+    existingByBotId.add(botId);
+    changed = true;
+  }
+
+  if (nextProfiles.length !== uiState.profiles.length) {
+    changed = true;
+  }
+  if (changed) {
+    uiState.profiles = nextProfiles;
+  }
+
+  return changed;
+}
+
 function hydrateProfileDialog() {
   if (!profileBotIdInput) {
     return;
@@ -1893,6 +1983,7 @@ async function hydrateInputs() {
   await loadCatalog();
   await loadProjectCatalog();
   await loadSkillCatalog();
+  reconcileProfilesWithCatalog();
   dedupeProfilesByBotId();
   ensureInitialProfileFromParams();
   ensureSelectedProfile();
@@ -3451,6 +3542,16 @@ async function refreshProfileDiagnostics() {
     if (!profile.bot_id || !profile.token) {
       return;
     }
+    if (!catalogByBotId.has(String(profile.bot_id || ""))) {
+      profileDiagnostics.set(profile.profile_id, {
+        health: { bot: { ok: false, error: "unknown bot_id in current catalog" } },
+        session: { current_agent: "unknown", run_status: "unknown" },
+        metrics: { in_flight_runs: null, worker_heartbeat: { run_worker: null, update_worker: null } },
+        last_error_tag: "unknown",
+        threads_top10: []
+      });
+      return;
+    }
     try {
       const response = await requestJson(
         `/_mock/bot_diagnostics?bot_id=${encodeURIComponent(profile.bot_id)}&token=${encodeURIComponent(
@@ -3474,7 +3575,7 @@ async function refreshProfileDiagnostics() {
 }
 
 async function refreshOnce() {
-  const profile = currentProfile();
+  let profile = currentProfile();
   if (!profile || !profile.token) {
     latestMessages = [];
     renderTimeline([]);
@@ -3494,19 +3595,51 @@ async function refreshOnce() {
     return;
   }
 
+  if (!catalogByBotId.has(String(profile.bot_id || ""))) {
+    await loadCatalog();
+    const changed = reconcileProfilesWithCatalog();
+    if (changed) {
+      dedupeProfilesByBotId();
+      ensureSelectedProfile();
+      profile = currentProfile();
+      applyProfileToInputs(profile);
+      saveState();
+      renderBotList();
+      appendBubble("meta", "bot catalog 갱신으로 프로필을 카탈로그와 동기화했습니다.");
+    }
+  }
+
+  profile = currentProfile();
+  if (!profile || !profile.token) {
+    return;
+  }
+
   try {
+    const knownBot = catalogByBotId.has(String(profile.bot_id || ""));
     const [messagesResp, stateResp, threadsResp, diagnosticsResp, auditResp] = await Promise.all([
       requestJson(`/_mock/messages?token=${encodeURIComponent(profile.token)}&chat_id=${Number(profile.chat_id)}&limit=120`),
       requestJson(`/_mock/state?token=${encodeURIComponent(profile.token)}`),
       requestJson(`/_mock/threads?token=${encodeURIComponent(profile.token)}`),
-      requestJson(
-        `/_mock/bot_diagnostics?bot_id=${encodeURIComponent(profile.bot_id)}&token=${encodeURIComponent(
-          profile.token
-        )}&chat_id=${Number(profile.chat_id)}&limit=120`
-      ),
-      requestJson(
-        `/_mock/audit_logs?bot_id=${encodeURIComponent(profile.bot_id)}&chat_id=${Number(profile.chat_id)}&limit=120`
-      ),
+      knownBot
+        ? requestJson(
+            `/_mock/bot_diagnostics?bot_id=${encodeURIComponent(profile.bot_id)}&token=${encodeURIComponent(
+              profile.token
+            )}&chat_id=${Number(profile.chat_id)}&limit=120`
+          )
+        : Promise.resolve({
+            result: {
+              health: { bot: { ok: false, error: "unknown bot_id in current catalog" } },
+              session: { current_agent: "unknown", run_status: "unknown" },
+              metrics: { in_flight_runs: null, worker_heartbeat: { run_worker: null, update_worker: null } },
+              last_error_tag: "unknown",
+              threads_top10: []
+            }
+          }),
+      knownBot
+        ? requestJson(
+            `/_mock/audit_logs?bot_id=${encodeURIComponent(profile.bot_id)}&chat_id=${Number(profile.chat_id)}&limit=120`
+          )
+        : Promise.resolve({ result: { logs: [], embedded_error: `unknown bot_id: ${profile.bot_id}` } }),
     ]);
 
     latestMessages = Array.isArray(messagesResp.result.messages) ? messagesResp.result.messages : [];
@@ -3655,7 +3788,7 @@ async function addProfileAutomatically() {
   const chatId = current ? numberOrDefault(current.chat_id, 1001) : numberOrDefault(chatIdInput.value, 1001);
   const userId = current ? numberOrDefault(current.user_id, 9001) : numberOrDefault(userIdInput.value, 9001);
   const currentCatalogRow = current ? catalogByBotId.get(String(current.bot_id || "")) : null;
-  const adapter = String(currentCatalogRow?.default_adapter || "gemini");
+  const adapter = String(currentCatalogRow?.default_adapter || "codex");
 
   const response = await requestJson("/_mock/bot_catalog/add", {
     method: "POST",
@@ -3676,7 +3809,7 @@ async function addProfileAutomatically() {
     chat_id: chatId,
     user_id: userId,
     selected_for_parallel: true,
-    selected_provider: normalizeProvider(created.default_adapter || "gemini"),
+    selected_provider: normalizeProvider(created.default_adapter || "codex"),
     selected_model: "",
     selected_skill: "",
     selected_project: "",
@@ -3744,7 +3877,7 @@ function addProfileFromDialog() {
     chat_id: numberOrDefault(profileChatIdInput.value, 1001),
     user_id: numberOrDefault(profileUserIdInput.value, 9001),
     selected_for_parallel: true,
-    selected_provider: normalizeProvider(row?.default_adapter || "gemini"),
+    selected_provider: normalizeProvider(row?.default_adapter || "codex"),
     selected_model: "",
     selected_skill: "",
     selected_project: "",

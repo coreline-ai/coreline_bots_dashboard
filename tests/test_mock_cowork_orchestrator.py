@@ -250,3 +250,181 @@ async def test_cowork_orchestrator_stop_requested(tmp_path: Path) -> None:
 
     await orchestrator.shutdown()
     store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_orchestrator_render_task_reworks_until_link_present(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-orchestrator-render.db"),
+        data_dir=str(tmp_path / "cowork-orchestrator-render-data"),
+    )
+    counters = {"controller": 0}
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+
+        lowered = text.lower()
+        if "planner" in lowered:
+            body = '{"title":"화면 구현","goal":"꽃집 랜더링","done_criteria":"화면 렌더와 검증","risk":"링크 누락"}'
+        elif "integrator" in lowered:
+            body = "통합요약: 통합 완료\n충돌사항: 없음\n누락사항: 링크 재확인\n권장수정: 실행링크 제출\n증빙링크: 없음"
+        elif "controller" in lowered:
+            counters["controller"] += 1
+            if counters["controller"] == 1:
+                body = (
+                    "최종결론: 조건부 완료\n"
+                    "실행체크리스트: 링크 보강 필요\n"
+                    "실행링크: 없음\n"
+                    "증빙요약: 링크 누락\n"
+                    "즉시실행항목(Top3): 1) 링크보강 2) 재검증 3) 승인"
+                )
+            else:
+                body = (
+                    "최종결론: 실행 가능\n"
+                    "실행체크리스트: 링크 확인 완료\n"
+                    "실행링크: http://127.0.0.1:9082/flower-shop\n"
+                    "증빙요약: 브라우저 접속 확인\n"
+                    "즉시실행항목(Top3): 1) 회귀테스트 2) 리뷰 3) 배포"
+                )
+        else:
+            if "[보강 라운드" in text:
+                body = (
+                    "결과요약: 링크 증빙 보강\n"
+                    "검증: 충족\n"
+                    "실행링크: http://127.0.0.1:9082/flower-shop\n"
+                    "남은이슈: 없음"
+                )
+            else:
+                body = "결과요약: 초안 구현\n검증: 일부 충족\n실행링크: 없음\n남은이슈: 링크 미제출"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(store=store, send_user_message=sender, poll_interval_sec=0.02, cool_down_sec=0.0)
+    req = _make_request(task="꽃집 랜더링 페이지 만들어줘")
+    participants = [
+        {
+            "profile_id": "p-a",
+            "label": "Bot A",
+            "bot_id": "bot-a",
+            "token": "token-a",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "controller",
+            "adapter": "gemini",
+        },
+        {
+            "profile_id": "p-b",
+            "label": "Bot B",
+            "bot_id": "bot-b",
+            "token": "token-b",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "planner",
+            "adapter": "codex",
+        },
+        {
+            "profile_id": "p-c",
+            "label": "Bot C",
+            "bot_id": "bot-c",
+            "token": "token-c",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "executor",
+            "adapter": "claude",
+        },
+    ]
+    started = await orchestrator.start_cowork(request=req, participants=participants)
+    done = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert done["status"] == "completed"
+    assert str(done["final_report"]["completion_status"]) == "passed"
+    assert str(done["final_report"]["execution_link"]).startswith("http://127.0.0.1:9082")
+    assert len(done["tasks"]) >= 2
+
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_orchestrator_render_task_fails_when_link_missing(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-orchestrator-render-fail.db"),
+        data_dir=str(tmp_path / "cowork-orchestrator-render-fail-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "planner" in lowered:
+            body = '{"title":"화면 구현","goal":"꽃집 랜더링","done_criteria":"화면 렌더와 검증","risk":"링크 누락"}'
+        elif "integrator" in lowered:
+            body = "통합요약: 통합 완료\n충돌사항: 없음\n누락사항: 링크 누락\n권장수정: 링크 제출\n증빙링크: 없음"
+        elif "controller" in lowered:
+            body = (
+                "최종결론: 조건부 완료\n"
+                "실행체크리스트: 링크 필요\n"
+                "실행링크: 없음\n"
+                "증빙요약: 링크 누락\n"
+                "즉시실행항목(Top3): 1) 링크 2) 검증 3) 승인"
+            )
+        else:
+            body = "결과요약: 구현\n검증: 일부 충족\n실행링크: 없음\n남은이슈: 링크 미제출"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        max_rework_rounds=1,
+    )
+    req = _make_request(task="꽃집 랜더링 페이지 만들어줘")
+    participants = [
+        {
+            "profile_id": "p-a",
+            "label": "Bot A",
+            "bot_id": "bot-a",
+            "token": "token-a",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "controller",
+            "adapter": "gemini",
+        },
+        {
+            "profile_id": "p-b",
+            "label": "Bot B",
+            "bot_id": "bot-b",
+            "token": "token-b",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "planner",
+            "adapter": "codex",
+        },
+        {
+            "profile_id": "p-c",
+            "label": "Bot C",
+            "bot_id": "bot-c",
+            "token": "token-c",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "executor",
+            "adapter": "claude",
+        },
+    ]
+    started = await orchestrator.start_cowork(request=req, participants=participants)
+    done = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert done["status"] == "failed"
+    assert "quality gate failed" in str(done.get("error_summary") or "")
+    failures = done["final_report"]["quality_gate_failures"]
+    assert any("실행 가능한 링크" in row for row in failures)
+
+    await orchestrator.shutdown()
+    store.close()
