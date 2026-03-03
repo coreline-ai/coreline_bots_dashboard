@@ -5,6 +5,8 @@
 .mock_messenger/
 .mock_messenger_9082/
 .playwright-cli/
+node_modules/
+.pyshim/
 cowork/
 __pycache__/
 *.egg-info/
