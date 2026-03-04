@@ -45,7 +45,8 @@ Telegram <-> CLI adapter bridge MVP.
 
 - 각 봇은 기본적으로 `/mode` 명령으로 `gemini`, `codex`, `claude` 모드를 전환할 수 있고, 대시보드 봇 카드에서 provider/model 드롭다운으로 즉시 변경할 수 있습니다.
 - 멀티봇을 지원하여, 한 번의 프롬프트로 여러 봇에서 다양한 형태의 결과물을 병렬로 얻을 수 있습니다.
-- 각 봇 카드에서 `Role(controller/planner/executor/integrator)`를 사전 지정할 수 있고, 병렬 입력창에서 `/cowork <요청>`으로 역할 기반 협업 오케스트레이션을 실행할 수 있습니다.
+- Session 섹션에서 `Project / Skill / Role(controller/planner/executor/integrator)`를 통합 제어할 수 있고, 병렬 입력창에서 `/cowork <요청>`으로 역할 기반 협업 오케스트레이션을 실행할 수 있습니다.
+- 좌측 `Parallel Results / Debate Panel / Cowork Panel / Control Tower`는 동일한 접기/펼치기 UX를 제공하며, 펼친 상태가 많아지면 사이드바 전체에서 스크롤됩니다.
 - 멀티봇은 동적으로 다수 생성 및 삭제가 가능합니다.
 - 대시보드를 제공하여 시뮬레이션과 다양한 추가 개발 테스트를 수행할 수 있습니다.
 - Telegram 연동 코드는 구현되어 있으나, 현재 Telegram 계정 부재로 실계정 연동 테스트는 아직 진행하지 않았습니다.
@@ -172,6 +173,7 @@ python -m telegram_bot_new.main supervisor
 | `LOG_LEVEL` | No | `INFO` | 로그 레벨 |
 | `JOB_LEASE_MS` | No | `30000` | 잡 lease 기간 |
 | `WORKER_POLL_INTERVAL_MS` | No | `250` | 워커 poll 주기 |
+| `RUN_TURN_TIMEOUT_SEC` | No | `90` | 단일 turn watchdog timeout(초, 최소 15) |
 | `SUPERVISOR_RESTART_MAX_BACKOFF_SEC` | No | `30` | supervisor 재시작 백오프 상한 |
 | `TELEGRAM_API_BASE_URL` | No | `https://api.telegram.org` | Telegram base URL (mock 사용 시 로컬 주소) |
 | `TELEGRAM_VIRTUAL_TOKEN` | No | `mock_token_1` | mock 토큰 자동 fallback |
@@ -183,6 +185,8 @@ python -m telegram_bot_new.main supervisor
 | `TELEGRAM_WEBHOOK_PUBLIC_URL` | No | empty | webhook URL (없으면 polling) |
 | `TELEGRAM_WEBHOOK_PATH_SECRET` | No | empty | webhook path secret |
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN` | No | empty | webhook secret token |
+| `BOT_SKILLS_DIR` | No | empty | skill 루트 경로(기본 `./skills`) |
+| `STRICT_BOT_DB_ISOLATION` | No | `false` | 멀티봇에서 bot별 `database_url` 강제 여부 |
 
 ### 6.2 `config/bots.yaml`
 
@@ -308,6 +312,19 @@ CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
 .\scripts\stop-mock-codex-bridge.ps1
 ```
 
+### 8.4 Dashboard UI 변경 포인트 (2026-03)
+
+- Session 패널은 `Session 기본 / Webhook / Rate Limit` 3개 아코디언으로 분리되며, 각 섹션 접힘 상태는 localStorage에 저장됩니다.
+- `Project / Skill / Role` 제어는 봇 카드가 아니라 Session 기본 섹션으로 이동했습니다.
+- Project 셀렉터의 후보는 `GET /_mock/projects`로 로드되며, 기준은 다음과 같습니다.
+  - 현재 workspace 루트는 항상 포함
+  - workspace의 1-depth 하위 디렉터리 중 `.git`, `package.json`, `pyproject.toml`, `requirements.txt`, `go.mod`, `Cargo.toml`, `README.md` 같은 marker 파일이 있는 디렉터리만 포함
+- Session Project 적용 우선순위:
+  - 1순위: diagnostics의 `session.current_project`(실제 런타임 상태)
+  - 2순위: 프로필의 `selected_project`(UI 저장값)
+- 좌측 사이드바 패널(`Parallel Results / Debate Panel / Cowork Panel / Control Tower`)은 모두 동일한 collapse 토글 패턴과 상태 저장(localStorage)을 사용합니다.
+- 패널을 모두 펼친 경우, 개별 패널만이 아니라 사이드바 전체(`.bot-sidebar`)에서 스크롤되도록 동작합니다.
+
 ---
 
 ## 9. Telegram Command Reference
@@ -324,10 +341,13 @@ CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
 | `/mode <codex\|gemini\|claude>` | provider 전환 (활성 run 중이면 차단) |
 | `/model` | 현재 provider의 model/허용 목록 조회 |
 | `/model <name>` | 현재 provider model 변경 (활성 run 중이면 차단) |
+| `/project` | 현재 세션 project root 조회 + 사용법 안내 |
+| `/project <directory-path>` | 세션 작업 경로 변경 (`off/default/reset`으로 해제, 활성 run 중이면 차단) |
 | `/skills` | 로컬 설치된 skill 프로필 목록 조회 |
 | `/skill` | 현재 세션 skill 조회 + 사용법 안내 |
-| `/skill <skill-id>` | 현재 세션 skill 적용 (활성 run 중이면 차단) |
+| `/skill <skill-id[,skill-id...]>` | 현재 세션 skill 적용 (활성 run 중이면 차단) |
 | `/skill off` | 현재 세션 skill 해제 |
+| `/unsafe on [minutes]` / `/unsafe off` | 세션 unsafe 모드 on/off (1~120분, 활성 run 중이면 차단) |
 | `/providers` | provider binary 설치여부 + 기본 model 표시 |
 | `/stop` | 활성 run 취소 요청 |
 | `/youtube <query>` / `/yt <query>` | YouTube 검색 후 watch URL 전송 |
@@ -385,10 +405,18 @@ Skill 관리:
 | `GET` | `/_mock/document/{document_id}` | 문서/이미지 다운로드 |
 | `GET` | `/_mock/state` | mock 내부 상태 |
 | `GET` | `/_mock/bot_catalog` | 봇 카탈로그 |
+| `GET` | `/_mock/runtime_profile` | multi-bot runtime 프로파일(effective/source/max_bots) |
+| `GET` | `/_mock/projects` | Session Project 선택 후보 목록 |
+| `GET` | `/_mock/skills` | 설치된 skill 카탈로그 |
+| `GET` | `/_mock/routing/suggest` | 라우팅 정책 기반 provider/model 제안 |
 | `POST` | `/_mock/bot_catalog/add` | 동적 bot 추가 |
 | `POST` | `/_mock/bot_catalog/delete` | bot 삭제 |
 | `POST` | `/_mock/bot_catalog/role` | bot 기본 역할(controller/planner/executor/integrator) 저장 |
 | `GET` | `/_mock/bot_diagnostics` | bot 진단(health/metrics/session/error_tag) |
+| `GET` | `/_mock/audit_logs` | 최근 audit 로그 조회 |
+| `GET` | `/_mock/control_tower` | 전체 bot 상태 집계(SLO/state/action) |
+| `POST` | `/_mock/control_tower/recover` | `/stop` 또는 `/stop+/new` 기반 자동 복구 |
+| `GET` | `/_mock/forensics/bundle` | diagnostics/audit/messages/updates 포렌식 번들 |
 | `POST` | `/_mock/debate/start` | 멀티봇 토론 시작 |
 | `GET` | `/_mock/debate/active` | 진행 중 토론 조회 |
 | `GET` | `/_mock/debate/{debate_id}` | 토론 상세/턴 로그 조회 |
@@ -397,6 +425,8 @@ Skill 관리:
 | `GET` | `/_mock/cowork/active` | 진행 중 협업 조회 |
 | `GET` | `/_mock/cowork/{cowork_id}` | 협업 단계/작업/리포트 조회 |
 | `POST` | `/_mock/cowork/{cowork_id}/stop` | 협업 중단 요청 |
+| `GET` | `/_mock/cowork/{cowork_id}/artifacts` | 협업 아티팩트 메타 조회 |
+| `GET` | `/_mock/cowork/{cowork_id}/artifact/{filename}` | 협업 아티팩트 파일 다운로드 |
 | `POST` | `/_mock/rate_limit` | 429 시뮬레이션 룰 |
 
 ---
@@ -458,6 +488,7 @@ Skill 관리:
 - `worker_heartbeat.update_worker`
 - `provider_switch_total.<provider>`
 - `provider_run_failed.<provider>`
+- `provider_run_watchdog_timeout.<provider>`
 
 ---
 
@@ -534,6 +565,29 @@ pytest
 - 메시지: `A run is already active...`
 - `/stop` 실행 후 재시도
 - active run 보호 인덱스가 의도적으로 중복 실행을 차단
+
+### Gemini 응답이 느리거나 timeout으로 실패하는 경우
+
+- 기본 turn watchdog은 `RUN_TURN_TIMEOUT_SEC=90`초이며, 초과 시 run은 `error`로 종료됩니다.
+- watchdog timeout이 감지되면 `runtime_counters.provider_run_watchdog_timeout.<provider>`가 증가합니다.
+- `GET /metrics`, `/_mock/bot_diagnostics`, `/_mock/control_tower`에서 timeout 흔적(in_flight, run_status, error_tag)을 먼저 확인하세요.
+- timeout이 반복되면 `RUN_TURN_TIMEOUT_SEC` 상향, 모델 변경(`/model`), 세션 재생성(`/new`) 순으로 점검하세요.
+
+### `/cowork`가 바로 실패하거나 "아무것도 안 한 것처럼" 보이는 경우
+
+- 협업 단계에서 participant별 실행은 같은 `(bot_id, chat_id)` 조합에 대해 직렬화되어 동작합니다(중복 active run 충돌 완화).
+- 그래도 기존 활성 run이 남아 있으면 `/stop` 선행이 필요합니다.
+- 최종 품질 게이트에서 아래 조건이면 `failed` 처리됩니다.
+  - 실행 태스크 실패/중단 존재
+  - 렌더링/화면 요청인데 실행 가능한 링크 부재
+  - 최종 결론이 `미이행/미완료` 등 실패 신호 포함
+- `Cowork Panel`의 stages/tasks/errors와 `/_mock/cowork/{cowork_id}/artifacts`를 함께 확인하세요.
+
+### Session Project 선택 기준이 헷갈리는 경우
+
+- 목록 자체는 `/_mock/projects` 결과(workspace + marker가 있는 1-depth 하위 프로젝트)에서 구성됩니다.
+- UI 선택값 표시 우선순위는 `session.current_project`(런타임) > `selected_project`(UI 저장값)입니다.
+- 실제 적용은 `/project <path>` 명령으로 처리되며, 활성 run이 있으면 적용이 차단됩니다.
 
 ### mock에서 update가 안 들어오는 경우
 
