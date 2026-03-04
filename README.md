@@ -17,6 +17,7 @@ Telegram <-> CLI adapter bridge MVP.
 
 <img width="1917" height="956" alt="스크린샷 2026-03-01 오후 12 00 09" src="https://github.com/user-attachments/assets/dfa2f3bb-07bf-4e68-8d42-61c67b9e4fee" />
 
+<img width="1520" height="874" alt="스크린샷 2026-03-04 오후 9 06 37" src="https://github.com/user-attachments/assets/4bf76de6-b9c7-4060-ae95-fceb8cf44e84" />
 
 
 ## Table of Contents
