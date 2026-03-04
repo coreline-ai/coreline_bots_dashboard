@@ -4,6 +4,8 @@ const tokenInput = document.getElementById("token-input");
 const chatIdInput = document.getElementById("chat-id-input");
 const userIdInput = document.getElementById("user-id-input");
 const sessionProjectSelect = document.getElementById("session-project-select");
+const sessionSkillSelect = document.getElementById("session-skill-select");
+const sessionRoleSelect = document.getElementById("session-role-select");
 const botIdInput = document.getElementById("bot-id-input");
 const messageInput = document.getElementById("message-input");
 const webhookUrlInput = document.getElementById("webhook-url-input");
@@ -29,6 +31,8 @@ const selectedStatus = document.getElementById("selected-status");
 const timelineSessionStatus = document.getElementById("timeline-session-status");
 const botList = document.getElementById("bot-list");
 const parallelResults = document.getElementById("parallel-results");
+const parallelResultsBody = document.getElementById("parallel-results-body");
+const toggleParallelResultsBtn = document.getElementById("toggle-parallel-results-btn");
 const addProfileBtn = document.getElementById("add-profile-btn");
 const parallelSendBtn = document.getElementById("parallel-send-btn");
 const parallelMessageInput = document.getElementById("parallel-message-input");
@@ -51,6 +55,8 @@ const coworkFinal = document.getElementById("cowork-final");
 const coworkArtifacts = document.getElementById("cowork-artifacts");
 const coworkStopBtn = document.getElementById("cowork-stop-btn");
 const toggleCoworkPanelBtn = document.getElementById("toggle-cowork-panel-btn");
+const towerPanelBody = document.getElementById("tower-panel-body");
+const toggleTowerPanelBtn = document.getElementById("toggle-tower-panel-btn");
 const towerMeta = document.getElementById("tower-meta");
 const towerList = document.getElementById("tower-list");
 const towerRefreshBtn = document.getElementById("tower-refresh-btn");
@@ -81,9 +87,12 @@ const STORAGE_KEY = "mock_messenger_ui_state_v4";
 const LEGACY_STORAGE_KEYS = ["mock_messenger_ui_state_v3"];
 const THEME_STORAGE_KEY = "mock_messenger_theme";
 const SESSION_SECTION_STORAGE_KEY = "mock_messenger_session_section_hidden";
+const SESSION_ACCORDION_STORAGE_KEY_PREFIX = "mock_messenger_session_group_hidden_";
 const AGENT_SECTION_STORAGE_KEY = "mock_messenger_agent_section_hidden";
+const PARALLEL_RESULTS_COLLAPSE_STORAGE_KEY = "mock_messenger_parallel_results_hidden";
 const DEBATE_PANEL_COLLAPSE_STORAGE_KEY = "mock_messenger_debate_panel_hidden";
 const COWORK_PANEL_COLLAPSE_STORAGE_KEY = "mock_messenger_cowork_panel_hidden";
+const TOWER_PANEL_COLLAPSE_STORAGE_KEY = "mock_messenger_tower_panel_hidden";
 const FIXED_THEME = "light";
 const SCROLL_BOTTOM_THRESHOLD = 24;
 const AUTO_REFRESH_INTERVAL_MS = 1000;
@@ -467,6 +476,53 @@ function applySessionSectionVisibility(hidden) {
   renderSessionToggleButton(hidden);
 }
 
+function renderSessionAccordionToggleButton(button, hidden) {
+  if (!button) {
+    return;
+  }
+  const icon = hidden ? "expand_more" : "expand_less";
+  button.classList.toggle("is-collapsed", hidden);
+  button.setAttribute("aria-expanded", hidden ? "false" : "true");
+  const iconNode = button.querySelector(".session-accordion-icon");
+  if (iconNode) {
+    iconNode.textContent = icon;
+  }
+}
+
+function applySessionAccordionVisibility(button, body, hidden) {
+  if (!button || !body) {
+    return;
+  }
+  body.classList.toggle("is-collapsed", hidden);
+  renderSessionAccordionToggleButton(button, hidden);
+}
+
+function initSessionAccordions() {
+  if (!sessionSectionBody) {
+    return;
+  }
+  const toggles = Array.from(sessionSectionBody.querySelectorAll(".session-accordion-toggle"));
+  for (const button of toggles) {
+    const targetId = String(button.dataset.sessionAccordionTarget || "").trim();
+    if (!targetId) {
+      continue;
+    }
+    const body = document.getElementById(targetId);
+    if (!body) {
+      continue;
+    }
+    const key = String(button.dataset.sessionAccordionKey || targetId).trim();
+    const storageKey = `${SESSION_ACCORDION_STORAGE_KEY_PREFIX}${key}`;
+    const hidden = isSectionHidden(storageKey);
+    applySessionAccordionVisibility(button, body, hidden);
+    button.addEventListener("click", () => {
+      const nextHidden = !body.classList.contains("is-collapsed");
+      localStorage.setItem(storageKey, nextHidden ? "1" : "0");
+      applySessionAccordionVisibility(button, body, nextHidden);
+    });
+  }
+}
+
 function renderAgentToggleButton(hidden) {
   if (!toggleAgentSectionBtn) {
     return;
@@ -512,6 +568,42 @@ function initSectionToggles() {
       applyAgentSectionVisibility(nextHidden);
     });
   }
+}
+
+function renderParallelResultsToggleButton(hidden) {
+  if (!toggleParallelResultsBtn) {
+    return;
+  }
+  const icon = hidden ? "expand_more" : "expand_less";
+  const label = hidden ? "Parallel Results 펼치기" : "Parallel Results 접기";
+  toggleParallelResultsBtn.innerHTML = [
+    `<span class="material-symbols-outlined" aria-hidden="true">${icon}</span>`,
+    `<span class="sr-only">${label}</span>`
+  ].join("");
+  toggleParallelResultsBtn.title = label;
+  toggleParallelResultsBtn.setAttribute("aria-label", label);
+  toggleParallelResultsBtn.setAttribute("aria-expanded", hidden ? "false" : "true");
+}
+
+function applyParallelResultsVisibility(hidden) {
+  if (!parallelResultsBody) {
+    return;
+  }
+  parallelResultsBody.classList.toggle("is-collapsed", hidden);
+  renderParallelResultsToggleButton(hidden);
+}
+
+function initParallelResultsToggle() {
+  if (!toggleParallelResultsBtn || !parallelResultsBody) {
+    return;
+  }
+  const hidden = isSectionHidden(PARALLEL_RESULTS_COLLAPSE_STORAGE_KEY);
+  applyParallelResultsVisibility(hidden);
+  toggleParallelResultsBtn.addEventListener("click", () => {
+    const nextHidden = !parallelResultsBody.classList.contains("is-collapsed");
+    localStorage.setItem(PARALLEL_RESULTS_COLLAPSE_STORAGE_KEY, nextHidden ? "1" : "0");
+    applyParallelResultsVisibility(nextHidden);
+  });
 }
 
 function renderDebatePanelToggleButton(hidden) {
@@ -583,6 +675,42 @@ function initCoworkPanelToggle() {
     const nextHidden = !coworkPanelBody.classList.contains("is-collapsed");
     localStorage.setItem(COWORK_PANEL_COLLAPSE_STORAGE_KEY, nextHidden ? "1" : "0");
     applyCoworkPanelVisibility(nextHidden);
+  });
+}
+
+function renderTowerPanelToggleButton(hidden) {
+  if (!toggleTowerPanelBtn) {
+    return;
+  }
+  const icon = hidden ? "expand_more" : "expand_less";
+  const label = hidden ? "Control Tower 펼치기" : "Control Tower 접기";
+  toggleTowerPanelBtn.innerHTML = [
+    `<span class="material-symbols-outlined" aria-hidden="true">${icon}</span>`,
+    `<span class="sr-only">${label}</span>`
+  ].join("");
+  toggleTowerPanelBtn.title = label;
+  toggleTowerPanelBtn.setAttribute("aria-label", label);
+  toggleTowerPanelBtn.setAttribute("aria-expanded", hidden ? "false" : "true");
+}
+
+function applyTowerPanelVisibility(hidden) {
+  if (!towerPanelBody) {
+    return;
+  }
+  towerPanelBody.classList.toggle("is-collapsed", hidden);
+  renderTowerPanelToggleButton(hidden);
+}
+
+function initTowerPanelToggle() {
+  if (!toggleTowerPanelBtn || !towerPanelBody) {
+    return;
+  }
+  const hidden = isSectionHidden(TOWER_PANEL_COLLAPSE_STORAGE_KEY);
+  applyTowerPanelVisibility(hidden);
+  toggleTowerPanelBtn.addEventListener("click", () => {
+    const nextHidden = !towerPanelBody.classList.contains("is-collapsed");
+    localStorage.setItem(TOWER_PANEL_COLLAPSE_STORAGE_KEY, nextHidden ? "1" : "0");
+    applyTowerPanelVisibility(nextHidden);
   });
 }
 
@@ -1274,6 +1402,7 @@ function setProfileModelApplyBusy(profileId, busy) {
 }
 
 function renderSessionProjectControl() {
+  renderSessionSkillRoleControls();
   if (!sessionProjectSelect) {
     return;
   }
@@ -1314,6 +1443,81 @@ function renderSessionProjectControl() {
     sessionProjectSelect.appendChild(customOption);
   }
   sessionProjectSelect.disabled = disabled;
+}
+
+function renderSessionSkillRoleControls() {
+  if (!sessionSkillSelect || !sessionRoleSelect) {
+    return;
+  }
+  const profile = currentProfile();
+  if (!profile) {
+    sessionSkillSelect.innerHTML = '<option value="" disabled>no skills</option>';
+    sessionSkillSelect.disabled = true;
+    sessionRoleSelect.innerHTML = "";
+    for (const roleValue of SUPPORTED_ROLE_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = roleValue;
+      option.textContent = roleValue;
+      option.selected = roleValue === "executor";
+      sessionRoleSelect.appendChild(option);
+    }
+    sessionRoleSelect.disabled = true;
+    return;
+  }
+
+  const diag = profileDiagnostics.get(profile.profile_id) || null;
+  const catalogRow = catalogByBotId.get(profile.bot_id);
+  const currentSkills = resolveProfileSkills(profile, diag);
+  const currentRole = resolveProfileRole(profile, catalogRow);
+  const applying = isProfileModelApplyBusy(profile.profile_id);
+  const disabled = applying || parallelSendBusy || debateBusy || coworkBusy;
+
+  sessionSkillSelect.innerHTML = "";
+  sessionSkillSelect.size = Math.max(2, Math.min(6, skillCatalog.length || 2));
+  let matchedSkillCount = 0;
+  for (const entry of skillCatalog) {
+    const skillId = String(entry?.skill_id || "").trim();
+    if (!skillId) {
+      continue;
+    }
+    const option = document.createElement("option");
+    option.value = skillId;
+    option.textContent = skillId;
+    option.selected = currentSkills.includes(skillId);
+    if (option.selected) {
+      matchedSkillCount += 1;
+    }
+    sessionSkillSelect.appendChild(option);
+  }
+  for (const skillId of currentSkills) {
+    if (!skillId || Array.from(sessionSkillSelect.options).some((row) => row.value === skillId)) {
+      continue;
+    }
+    const custom = document.createElement("option");
+    custom.value = skillId;
+    custom.textContent = `${skillId} (custom)`;
+    custom.selected = true;
+    matchedSkillCount += 1;
+    sessionSkillSelect.appendChild(custom);
+  }
+  if (matchedSkillCount === 0 && sessionSkillSelect.options.length === 0) {
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "no skills";
+    placeholder.disabled = true;
+    sessionSkillSelect.appendChild(placeholder);
+  }
+  sessionSkillSelect.disabled = disabled;
+
+  sessionRoleSelect.innerHTML = "";
+  for (const roleValue of SUPPORTED_ROLE_OPTIONS) {
+    const option = document.createElement("option");
+    option.value = roleValue;
+    option.textContent = roleValue;
+    option.selected = roleValue === currentRole;
+    sessionRoleSelect.appendChild(option);
+  }
+  sessionRoleSelect.disabled = disabled;
 }
 
 async function applyProfileProviderAndModel(profile, provider, model) {
@@ -1658,97 +1862,6 @@ function renderBotList(force = false) {
     modelLabel.appendChild(modelSelect);
     modelControl.appendChild(providerLabel);
     modelControl.appendChild(modelLabel);
-
-    const skillLabel = document.createElement("label");
-    skillLabel.className = "bot-item-model-label";
-    skillLabel.textContent = "Skill (multi)";
-    const skillSelect = document.createElement("select");
-    skillSelect.className = "bot-item-model-select";
-    skillSelect.disabled = controlsDisabled;
-    skillSelect.multiple = true;
-    skillSelect.size = Math.max(2, Math.min(6, skillCatalog.length || 2));
-    skillSelect.addEventListener("click", (event) => event.stopPropagation());
-
-    let matchedSkillCount = 0;
-    for (const entry of skillCatalog) {
-      const skillId = String(entry?.skill_id || "").trim();
-      if (!skillId) {
-        continue;
-      }
-      const option = document.createElement("option");
-      option.value = skillId;
-      option.textContent = skillId;
-      option.selected = currentSkills.includes(skillId);
-      if (option.selected) {
-        matchedSkillCount += 1;
-      }
-      skillSelect.appendChild(option);
-    }
-    for (const skillId of currentSkills) {
-      if (!skillId || Array.from(skillSelect.options).some((row) => row.value === skillId)) {
-        continue;
-      }
-      const custom = document.createElement("option");
-      custom.value = skillId;
-      custom.textContent = `${skillId} (custom)`;
-      custom.selected = true;
-      matchedSkillCount += 1;
-      skillSelect.appendChild(custom);
-    }
-    if (matchedSkillCount === 0 && skillSelect.options.length === 0) {
-      const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.textContent = "no skills";
-      placeholder.disabled = true;
-      skillSelect.appendChild(placeholder);
-    }
-    skillSelect.addEventListener("change", async (event) => {
-      event.stopPropagation();
-      const nextSkills = normalizeSkillIds(
-        Array.from(skillSelect.selectedOptions).map((option) => String(option.value || ""))
-      );
-      if (nextSkills.join(",") === currentSkills.join(",")) {
-        return;
-      }
-      const ok = await applyProfileSkill(profile, nextSkills);
-      if (!ok) {
-        const selected = new Set(currentSkills);
-        for (const option of skillSelect.options) {
-          option.selected = selected.has(option.value);
-        }
-      }
-    });
-    skillLabel.appendChild(skillSelect);
-    modelControl.appendChild(skillLabel);
-
-    const roleLabel = document.createElement("label");
-    roleLabel.className = "bot-item-model-label";
-    roleLabel.textContent = "Role";
-    const roleSelect = document.createElement("select");
-    roleSelect.className = "bot-item-model-select";
-    roleSelect.disabled = controlsDisabled;
-    roleSelect.addEventListener("click", (event) => event.stopPropagation());
-    for (const roleValue of SUPPORTED_ROLE_OPTIONS) {
-      const option = document.createElement("option");
-      option.value = roleValue;
-      option.textContent = roleValue;
-      option.selected = roleValue === currentRole;
-      roleSelect.appendChild(option);
-    }
-    roleSelect.addEventListener("change", async (event) => {
-      event.stopPropagation();
-      const nextRole = normalizeRole(roleSelect.value);
-      if (!nextRole || nextRole === currentRole) {
-        roleSelect.value = currentRole;
-        return;
-      }
-      const ok = await applyProfileRole(profile, nextRole);
-      if (!ok) {
-        roleSelect.value = currentRole;
-      }
-    });
-    roleLabel.appendChild(roleSelect);
-    modelControl.appendChild(roleLabel);
     meta.appendChild(modelControl);
 
     const unsafeRow = document.createElement("div");
@@ -4141,6 +4254,49 @@ if (sessionProjectSelect) {
   });
 }
 
+if (sessionSkillSelect) {
+  sessionSkillSelect.addEventListener("change", async () => {
+    const profile = currentProfile();
+    if (!profile) {
+      renderSessionProjectControl();
+      return;
+    }
+    const diag = profileDiagnostics.get(profile.profile_id) || null;
+    const currentSkills = resolveProfileSkills(profile, diag);
+    const nextSkills = normalizeSkillIds(
+      Array.from(sessionSkillSelect.selectedOptions).map((option) => String(option.value || ""))
+    );
+    if (nextSkills.join(",") === currentSkills.join(",")) {
+      return;
+    }
+    const ok = await applyProfileSkill(profile, nextSkills);
+    if (!ok) {
+      renderSessionProjectControl();
+    }
+  });
+}
+
+if (sessionRoleSelect) {
+  sessionRoleSelect.addEventListener("change", async () => {
+    const profile = currentProfile();
+    if (!profile) {
+      renderSessionProjectControl();
+      return;
+    }
+    const catalogRow = catalogByBotId.get(profile.bot_id);
+    const currentRole = resolveProfileRole(profile, catalogRow);
+    const nextRole = normalizeRole(sessionRoleSelect.value);
+    if (!nextRole || nextRole === currentRole) {
+      sessionRoleSelect.value = currentRole;
+      return;
+    }
+    const ok = await applyProfileRole(profile, nextRole);
+    if (!ok) {
+      renderSessionProjectControl();
+    }
+  });
+}
+
 webhookUrlInput.addEventListener("change", saveState);
 webhookSecretInput.addEventListener("change", saveState);
 timelineList.addEventListener("scroll", () => {
@@ -4157,9 +4313,12 @@ setInterval(() => {
   void refresh();
 }, AUTO_REFRESH_INTERVAL_MS);
 initTheme();
+initSessionAccordions();
 initSectionToggles();
+initParallelResultsToggle();
 initDebatePanelToggle();
 initCoworkPanelToggle();
+initTowerPanelToggle();
 hydrateInputs().then(async () => {
   updateEssentialToggleButton();
   await recoverActiveDebate();
