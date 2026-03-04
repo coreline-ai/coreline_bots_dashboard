@@ -125,6 +125,18 @@ body {
   border-radius: var(--radius-md);
 }
 
+#open-talk-viewer-btn {
+  background: color-mix(in srgb, #0f172a 82%, #111827 18%);
+  border-color: color-mix(in srgb, #334155 58%, #0f172a);
+  color: #e2e8f0;
+}
+
+#open-talk-viewer-btn.is-active {
+  background: color-mix(in srgb, #14532d 72%, #0f172a 28%);
+  border-color: color-mix(in srgb, #22c55e 44%, #0f172a);
+  color: #dcfce7;
+}
+
 .selected-status {
   min-height: 34px;
   display: flex;
@@ -1799,6 +1811,191 @@ pre {
   word-break: break-word;
 }
 
+.talk-viewer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+}
+
+.talk-viewer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.58);
+  backdrop-filter: blur(2px);
+}
+
+.talk-viewer-panel {
+  position: relative;
+  width: min(980px, 96vw);
+  height: min(84vh, 820px);
+  border-radius: 16px;
+  border: 1px solid #1f2937;
+  background: #020617;
+  color: #e5e7eb;
+  box-shadow: 0 24px 70px rgba(2, 6, 23, 0.5);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.talk-viewer-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 14px;
+  border-bottom: 1px solid #1f2937;
+  background: #0b1220;
+}
+
+.talk-viewer-head-copy {
+  min-width: 0;
+}
+
+.talk-viewer-head-copy h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.talk-viewer-meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #93a4bd;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+.talk-viewer-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.talk-viewer-head-actions button {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  margin-top: 0;
+  border-radius: 9px;
+  border: 1px solid #334155;
+  background: #111827;
+  color: #dbeafe;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: none;
+}
+
+.talk-viewer-head-actions button:hover {
+  transform: none;
+  filter: none;
+  background: #172133;
+}
+
+.talk-viewer-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  font-family: "Fira Code", "SFMono-Regular", Menlo, monospace;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  background: linear-gradient(180deg, #020617 0%, #030a18 100%);
+}
+
+.talk-viewer-empty {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.talk-line {
+  display: grid;
+  grid-template-columns: 10px 112px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #e2e8f0;
+}
+
+.talk-line-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  margin-top: 5px;
+  background: #475569;
+}
+
+.talk-line-speaker {
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.talk-line-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.talk-line.is-user .talk-line-dot {
+  background: #facc15;
+}
+
+.talk-line.is-user .talk-line-speaker {
+  color: #fde047;
+}
+
+.talk-line.is-system .talk-line-dot {
+  background: #94a3b8;
+}
+
+.talk-line.is-system .talk-line-speaker {
+  color: #cbd5e1;
+}
+
+.talk-line.is-error .talk-line-dot {
+  background: #f87171;
+}
+
+.talk-line.is-error .talk-line-speaker {
+  color: #fca5a5;
+}
+
+.talk-line.provider-codex .talk-line-dot,
+.talk-line.provider-gpt .talk-line-dot {
+  background: #22c55e;
+}
+
+.talk-line.provider-codex .talk-line-speaker,
+.talk-line.provider-gpt .talk-line-speaker {
+  color: #4ade80;
+}
+
+.talk-line.provider-claude .talk-line-dot {
+  background: #a78bfa;
+}
+
+.talk-line.provider-claude .talk-line-speaker {
+  color: #c4b5fd;
+}
+
+.talk-line.provider-gemini .talk-line-dot {
+  background: #38bdf8;
+}
+
+.talk-line.provider-gemini .talk-line-speaker {
+  color: #7dd3fc;
+}
+
 dialog {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
@@ -1869,5 +2066,18 @@ dialog::backdrop {
 
   .quick-action-btn[data-command="/stop"] {
     grid-column: auto;
+  }
+
+  .talk-viewer-panel {
+    width: 100vw;
+    height: 100dvh;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+
+  .talk-line {
+    grid-template-columns: 10px 96px minmax(0, 1fr);
+    font-size: 12px;
   }
 }

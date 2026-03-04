@@ -373,9 +373,8 @@ test('parallel send succeeds across at least three selected bots', async ({ page
     await page.fill('#chat-id-input', chatId);
     await page.locator('#chat-id-input').blur();
 
-    await page.click('#add-profile-btn');
-    await page.click('#add-profile-btn');
-    await expect(page.locator('.bot-item')).toHaveCount(3);
+    await ensureMinimumProfiles(page, 3);
+    await setParallelSelectionCount(page, 3);
 
     const prompt = `병렬 전송 E2E ${Date.now()} 너는 누구니 한 줄로 답해줘`;
     await page.fill('#parallel-message-input', prompt);
@@ -482,8 +481,8 @@ test('/debate command shows debate panel and completes', async ({ page }) => {
 
   try {
     await page.goto('/_mock/ui');
-    await page.click('#add-profile-btn');
-    await expect(page.locator('.bot-item')).toHaveCount(2);
+    await ensureMinimumProfiles(page, 2);
+    await setParallelSelectionCount(page, 2);
 
     await page.fill('#parallel-message-input', '/debate 테스트 토론 --rounds 1');
     await page.click('#parallel-send-btn');
@@ -700,14 +699,274 @@ test('/cowork command shows cowork panel and completes', async ({ page }) => {
 
   try {
     await page.goto('/_mock/ui');
-    await page.click('#add-profile-btn');
-    await expect(page.locator('.bot-item')).toHaveCount(2);
+    await ensureMinimumProfiles(page, 2);
+    await setParallelSelectionCount(page, 2);
     await page.fill('#parallel-message-input', '/cowork UI test task --max-parallel 2');
     await page.click('#parallel-send-btn');
 
     await expect(page.locator('#cowork-meta')).toContainText('cowork-e2e');
     await expect(page.locator('#cowork-meta')).toContainText('COMPLETED');
     await expect(page.locator('#cowork-tasks .cowork-row')).toHaveCount(1);
+  } finally {
+    await cleanupCreatedBots(page, beforeCatalog.botIds);
+  }
+});
+
+async function setupMockParallelRuntime(page) {
+  const state = {
+    nextMessageId: 9000,
+    byToken: new Map(),
+    sentTexts: [],
+  };
+
+  function pushBotMessage(token, text) {
+    const key = String(token || '');
+    const rows = state.byToken.get(key) || [];
+    rows.push({
+      message_id: ++state.nextMessageId,
+      direction: 'bot',
+      text,
+    });
+    state.byToken.set(key, rows);
+  }
+
+  await page.route('**/_mock/send', async (route) => {
+    const payload = route.request().postDataJSON() || {};
+    const token = String(payload.token || '');
+    const text = String(payload.text || '');
+    state.sentTexts.push(text);
+
+    if (text.startsWith('/new')) {
+      pushBotMessage(token, 'new session created: session-play-e2e');
+    } else if (text.startsWith('/stop')) {
+      pushBotMessage(token, 'No active run.');
+    } else if (!text.startsWith('/')) {
+      let reply = '좋아, 이어서 진행할게.';
+      if (text.includes('[Quest Verdict]')) {
+        reply = 'RESULT: SUCCESS\nVERDICT: 핵심 목표를 모두 달성함';
+      } else if (text.includes('[Court Verdict]')) {
+        reply = 'VERDICT: 무죄\nWINNER: defense';
+      } else if (text.includes('Verdict]')) {
+        reply = 'WINNER: Bot A\nVERDICT: 논리와 일관성이 우세';
+      }
+      pushBotMessage(
+        token,
+        `[1][12:00:00][assistant_message] ${reply}\n[2][12:00:01][turn_completed] {"status":"success"}`
+      );
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          update_id: state.nextMessageId,
+          delivery_mode: 'polling',
+          delivered_via_webhook: false,
+          webhook_error: null,
+        },
+      }),
+    });
+  });
+
+  await page.route('**/_mock/messages*', async (route) => {
+    const token = String(new URL(route.request().url()).searchParams.get('token') || '');
+    const rows = state.byToken.get(token) || [];
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, result: { messages: rows, updates: [] } }),
+    });
+  });
+
+  await page.route('**/_mock/bot_diagnostics*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        result: {
+          health: { bot: { ok: true }, runtime: { ok: true } },
+          session: {
+            current_agent: 'codex',
+            current_model: 'gpt-5',
+            session_id: 'session-play-e2e',
+            thread_id: null,
+            run_status: 'completed',
+            summary_preview: null,
+          },
+          metrics: {},
+          last_error_tag: 'unknown',
+        },
+      }),
+    });
+  });
+
+  return state;
+}
+
+async function ensureMinimumProfiles(page, minimumCount) {
+  let current = await page.locator('.bot-item').count();
+  while (current < minimumCount) {
+    await page.click('#add-profile-btn');
+    current = await page.locator('.bot-item').count();
+  }
+  return current;
+}
+
+async function setParallelSelectionCount(page, selectedCount) {
+  await page.evaluate((count) => {
+    const checks = Array.from(document.querySelectorAll('#bot-list .bot-item-check'));
+    let selected = 0;
+    for (const checkbox of checks) {
+      const shouldSelect = selected < Number(count);
+      if (shouldSelect && !checkbox.checked) {
+        checkbox.click();
+      }
+      if (!shouldSelect && checkbox.checked) {
+        checkbox.click();
+      }
+      if (shouldSelect) {
+        selected += 1;
+      }
+    }
+  }, selectedCount);
+}
+
+test('play command suggestions include /relay to /court', async ({ page }) => {
+  await page.goto('/_mock/ui');
+
+  const input = page.locator('#message-input');
+  await input.click();
+  await input.fill('/');
+  await expect(page.locator('#command-suggest')).toBeVisible();
+  await expect(page.locator('#command-suggest')).toContainText('/relay');
+  await expect(page.locator('#command-suggest')).toContainText('/court');
+});
+
+test('message-input /relay routes through orchestration flow', async ({ page }) => {
+  const beforeCatalog = await snapshotCatalog(page);
+  const state = await setupMockParallelRuntime(page);
+
+  try {
+    await page.goto('/_mock/ui');
+    await ensureMinimumProfiles(page, 2);
+    await setParallelSelectionCount(page, 2);
+
+    const command = '/relay 라우팅 테스트 --rounds 1 --max-turn-sec 20';
+    await page.fill('#message-input', command);
+    await page.locator('#message-input').press('Enter');
+
+    await expect
+      .poll(async () => await page.locator('#parallel-results .parallel-status-wait').count(), { timeout: 30000 })
+      .toBe(0);
+    await expect(page.locator('#parallel-results')).toContainText('relay');
+    expect(state.sentTexts).not.toContain(command);
+  } finally {
+    await cleanupCreatedBots(page, beforeCatalog.botIds);
+  }
+});
+
+test('play commands smoke test for 8 commands', async ({ page }) => {
+  const beforeCatalog = await snapshotCatalog(page);
+
+  const commands = [
+    '/relay 릴레이 스모크 --rounds 1 --max-turn-sec 20 --keep-session',
+    '/pitchbattle 피치 스모크 --rounds 1 --max-turn-sec 20 --keep-session',
+    '/quizbattle 퀴즈 스모크 --rounds 1 --max-turn-sec 20 --keep-session',
+    '/debate-lite 토론 스모크 --rounds 1 --max-turn-sec 20 --keep-session',
+    '/improv 즉흥극 스모크 --rounds 1 --max-turn-sec 20 --keep-session',
+    '/quest 퀘스트 스모크 --rounds 1 --max-turn-sec 20 --keep-session',
+    '/memechain 밈 스모크 --rounds 1 --max-turn-sec 20 --keep-session',
+    '/court 법정 스모크 --rounds 1 --max-turn-sec 20 --keep-session',
+  ];
+
+  try {
+    await page.goto('/_mock/ui');
+    await ensureMinimumProfiles(page, 3);
+    await setParallelSelectionCount(page, 3);
+    await page.evaluate(() => {
+      const flowMap = {
+        relay: 'runRelayFlow',
+        pitchbattle: 'runPitchbattleFlow',
+        quizbattle: 'runQuizbattleFlow',
+        'debate-lite': 'runDebateLiteFlow',
+        improv: 'runImprovFlow',
+        quest: 'runQuestFlow',
+        memechain: 'runMemechainFlow',
+        court: 'runCourtFlow',
+      };
+      window.__playDispatchHits = [];
+      Object.entries(flowMap).forEach(([key, fnName]) => {
+        const original = window[fnName];
+        if (typeof original !== 'function') {
+          return;
+        }
+        window[fnName] = async function () {
+          window.__playDispatchHits.push(key);
+          if (typeof window.renderParallelResults === 'function') {
+            window.renderParallelResults([{ label: key, status: 'PASS', detail: 'dispatch-ok' }]);
+          }
+        };
+      });
+    });
+
+    for (const command of commands) {
+      const key = command.split(' ')[0].replace('/', '');
+      await page.fill('#parallel-message-input', command);
+      await page.click('#parallel-send-btn');
+      await expect(page.locator('#parallel-results')).toContainText(key);
+      const lastHit = await page.evaluate(() => {
+        const rows = Array.isArray(window.__playDispatchHits) ? window.__playDispatchHits : [];
+        return rows.length > 0 ? String(rows[rows.length - 1]) : '';
+      });
+      expect(lastHit).toBe(key);
+    }
+  } finally {
+    await cleanupCreatedBots(page, beforeCatalog.botIds);
+  }
+});
+
+test('play command error paths: /court min participants and unknown option', async ({ page }) => {
+  const beforeCatalog = await snapshotCatalog(page);
+  await setupMockParallelRuntime(page);
+
+  try {
+    await page.goto('/_mock/ui');
+    await ensureMinimumProfiles(page, 2);
+    await setParallelSelectionCount(page, 2);
+
+    await page.fill('#parallel-message-input', '/court 사건 테스트 --rounds 1');
+    await page.click('#parallel-send-btn');
+    await expect(page.locator('#parallel-results')).toContainText('3개 이상의 봇 선택');
+
+    await page.fill('#parallel-message-input', '/relay 옵션 실패 테스트 --foo 1');
+    await page.click('#parallel-send-btn');
+    await expect(page.locator('#parallel-results')).toContainText('알 수 없는 옵션: --foo');
+  } finally {
+    await cleanupCreatedBots(page, beforeCatalog.botIds);
+  }
+});
+
+test('/talk regression still works with orchestration router', async ({ page }) => {
+  const beforeCatalog = await snapshotCatalog(page);
+  const state = await setupMockParallelRuntime(page);
+
+  try {
+    await page.goto('/_mock/ui');
+    await ensureMinimumProfiles(page, 2);
+    await setParallelSelectionCount(page, 2);
+
+    const command = '/talk 회귀 테스트 --rounds 1 --max-turn-sec 20';
+    await page.fill('#message-input', command);
+    await page.locator('#message-input').press('Enter');
+
+    await expect
+      .poll(async () => await page.locator('#parallel-results .parallel-status-wait').count(), { timeout: 30000 })
+      .toBe(0);
+    await expect(page.locator('#parallel-results')).toContainText('talk');
+    expect(state.sentTexts).not.toContain(command);
   } finally {
     await cleanupCreatedBots(page, beforeCatalog.botIds);
   }

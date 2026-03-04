@@ -19,9 +19,66 @@ Telegram <-> CLI adapter bridge MVP.
 
 <img width="1520" height="874" alt="스크린샷 2026-03-04 오후 9 06 37" src="https://github.com/user-attachments/assets/4bf76de6-b9c7-4060-ae95-fceb8cf44e84" />
 
+## 빠른 사용 가이드 (Talk/Play 기능)
+
+처음 실행한 뒤, 아래 순서대로 하면 신규 기능(`/talk`, `/relay`~`/court`)을 바로 체험할 수 있습니다.
+
+### 1) 실행
+
+```bash
+./scripts/run-local-multibot.sh start
+```
+
+### 2) UI 접속
+
+- 기본 URL: `http://127.0.0.1:9082/_mock/ui`
+- 왼쪽 `Multi Bots`에서 필요한 수만큼 봇을 선택합니다.
+- `/court`는 반드시 3개 이상 봇을 선택해야 합니다.
+
+### 3) 입력 위치
+
+- 아래 2곳 모두 동일하게 동작합니다.
+  - Timeline 입력창(`message-input`)
+  - 왼쪽 병렬 입력창(`parallel-message-input`)
+
+### 4) 가장 빠른 체험 명령
+
+```text
+/talk 오늘은 뭐 만들까? --rounds 1
+/relay 퇴근길 지하철에서 생긴 일 --rounds 1
+/pitchbattle 주말 사이드 프로젝트 아이디어 --rounds 1
+/quizbattle 한국사 상식 --rounds 1
+/debate-lite 원격근무 vs 오피스근무 --rounds 1
+/improv 우주 엘리베이터에서 길을 잃은 팀 --rounds 1
+/quest 30분 안에 랜딩 페이지 초안 완성 --rounds 1
+/memechain 재택근무 현실 --rounds 1
+/court 버그 배포 사고 책임 공방 --rounds 1
+```
+
+### 5) 공통 옵션
+
+- `--rounds <n>`: 라운드 수 (`1~8`)
+- `--max-turn-sec <n>`: 턴 최대 대기 시간 (`10~240`)
+- `--keep-session`: `/new`를 생략하고 현재 세션 유지
+
+### 6) 결과 보는 곳
+
+- `Parallel Results`: 각 턴/명령의 PASS/FAIL 요약
+- 상단 `Talk / Play Viewer`: 대화/플레이 로그 전체 흐름
+
+### 7) 자주 막히는 경우
+
+- `알 수 없는 옵션` 에러: 지원 옵션(`--rounds`, `--max-turn-sec`, `--keep-session`)만 사용
+- 오래 걸림: `--rounds 1`, `--max-turn-sec 20~45`로 먼저 테스트
+- 활성 run 충돌: `/stop` 후 재시도
+- 판정 표시가 `[판정 실패]`: 봇 응답에 `WINNER:`, `VERDICT:`, `RESULT:` 형식이 없는 경우
+
+상세 운영 가이드는 [docs/play_commands_manual.md](./docs/play_commands_manual.md)를 참고하세요.
+
 
 ## Table of Contents
 
+- [빠른 사용 가이드 (Talk/Play 기능)](#빠른-사용-가이드-talkplay-기능)
 - [특징](#특징)
 - [1. Project Summary](#1-project-summary)
 - [2. Architecture](#2-architecture)
@@ -47,6 +104,7 @@ Telegram <-> CLI adapter bridge MVP.
 - 각 봇은 기본적으로 `/mode` 명령으로 `gemini`, `codex`, `claude` 모드를 전환할 수 있고, 대시보드 봇 카드에서 provider/model 드롭다운으로 즉시 변경할 수 있습니다.
 - 멀티봇을 지원하여, 한 번의 프롬프트로 여러 봇에서 다양한 형태의 결과물을 병렬로 얻을 수 있습니다.
 - Session 섹션에서 `Project / Skill / Role(controller/planner/executor/integrator)`를 통합 제어할 수 있고, 병렬 입력창에서 `/cowork <요청>`으로 역할 기반 협업 오케스트레이션을 실행할 수 있습니다.
+- Mock Dashboard UI에서는 `/talk` 외에 `/relay`, `/pitchbattle`, `/quizbattle`, `/debate-lite`, `/improv`, `/quest`, `/memechain`, `/court` Play 명령 8종을 즉시 실행할 수 있습니다.
 - 좌측 `Parallel Results / Debate Panel / Cowork Panel / Control Tower`는 동일한 접기/펼치기 UX를 제공하며, 펼친 상태가 많아지면 사이드바 전체에서 스크롤됩니다.
 - 멀티봇은 동적으로 다수 생성 및 삭제가 가능합니다.
 - 대시보드를 제공하여 시뮬레이션과 다양한 추가 개발 테스트를 수행할 수 있습니다.
@@ -326,6 +384,28 @@ CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
 - 좌측 사이드바 패널(`Parallel Results / Debate Panel / Cowork Panel / Control Tower`)은 모두 동일한 collapse 토글 패턴과 상태 저장(localStorage)을 사용합니다.
 - 패널을 모두 펼친 경우, 개별 패널만이 아니라 사이드바 전체(`.bot-sidebar`)에서 스크롤되도록 동작합니다.
 
+### 8.5 Dashboard UI Play Commands (2026-03)
+
+- 아래 명령은 Telegram 백엔드 slash command가 아니라 **Mock Dashboard UI 오케스트레이션 명령**입니다.
+- 입력 위치는 `message-input` 또는 `병렬 전송 메시지`(`parallel-message-input`) 둘 다 가능합니다.
+- 공통 옵션:
+  - `--rounds <n>`: 기본값은 명령별 상이, 범위 `1~8`
+  - `--max-turn-sec <n>`: 턴 타임아웃, 범위 `10~240`
+  - `--keep-session`: `/new` 없이 현재 세션을 유지하고 실행
+
+| Command | 기본 rounds | 최소 봇 | 설명 |
+|---|---:|---:|---|
+| `/relay <주제>` | 3 | 2 | 릴레이 대사 이어쓰기 |
+| `/pitchbattle <주제>` | 2 | 2 | 아이디어 피치 배틀 + 판정 |
+| `/quizbattle <주제>` | 2 | 2 | 퀴즈 배틀 + 판정 |
+| `/debate-lite <주제>` | 2 | 2 | 경량 토론 + 판정 |
+| `/improv <상황>` | 3 | 2 | 즉흥극 릴레이 |
+| `/quest <미션>` | 3 | 2 | 협동 퀘스트 + 성공/실패 판정 |
+| `/memechain <주제>` | 3 | 2 | 한 줄 밈 체인 |
+| `/court <사건>` | 2 | 3 | 법정극 + 판결 |
+
+- 결과는 `Parallel Results`와 상단 `Talk / Play Viewer`에 함께 기록됩니다.
+
 ---
 
 ## 9. Telegram Command Reference
@@ -355,6 +435,23 @@ CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
 | `/echo <text>` | 입력 텍스트 그대로 에코 |
 
 일반 텍스트를 보내면 run queue에 turn이 적재됩니다.
+
+### 9.1 UI Orchestration Commands (Dashboard 전용)
+
+다음 명령은 Mock Dashboard UI 클라이언트(`/_mock/ui`)가 직접 해석해서 멀티봇 실행을 오케스트레이션합니다.
+백엔드 Telegram Command Handler의 slash command 라우팅과는 별개입니다.
+
+| Command | Description |
+|---|---|
+| `/talk <문장> [--rounds n] [--max-turn-sec n] [--keep-session]` | 자유 대화 라운드 실행 |
+| `/relay <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 릴레이 대화 |
+| `/pitchbattle <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 피치 배틀 + 판정 |
+| `/quizbattle <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 퀴즈 배틀 + 판정 |
+| `/debate-lite <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 경량 토론 + 판정 |
+| `/improv <상황> [--rounds n] [--max-turn-sec n] [--keep-session]` | 즉흥극 |
+| `/quest <미션> [--rounds n] [--max-turn-sec n] [--keep-session]` | 협동 퀘스트 + 성공/실패 판정 |
+| `/memechain <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 밈 체인 |
+| `/court <사건> [--rounds n] [--max-turn-sec n] [--keep-session]` | 법정극 + 판결 (`3` bots 이상 필요) |
 
 추가 동작:
 
@@ -583,6 +680,14 @@ pytest
   - 렌더링/화면 요청인데 실행 가능한 링크 부재
   - 최종 결론이 `미이행/미완료` 등 실패 신호 포함
 - `Cowork Panel`의 stages/tasks/errors와 `/_mock/cowork/{cowork_id}/artifacts`를 함께 확인하세요.
+
+### Play 명령(`/relay`~`/court`)이 실패하거나 멈춘 것처럼 보이는 경우
+
+- 최소 선택 봇 수 조건을 먼저 확인하세요. 특히 `/court`는 3개 이상 봇이 필요합니다.
+- 옵션 오탈자(`--foo` 등)는 즉시 파싱 실패 처리됩니다.
+- 활성 run 충돌이 있으면 `/stop` 후 재시도하거나 `--keep-session` 없이 실행해 세션을 재정비하세요.
+- 응답이 느리면 `--rounds`를 낮추고 `--max-turn-sec`를 조정해 전체 대기 시간을 줄일 수 있습니다.
+- 판정 명령에서 형식(`WINNER/VERDICT/RESULT`)이 없으면 Viewer에 `[판정 실패]`가 표시됩니다(실행 자체는 완료 처리).
 
 ### Session Project 선택 기준이 헷갈리는 경우
 

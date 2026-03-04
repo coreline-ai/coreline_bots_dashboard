@@ -70,6 +70,7 @@ const profileUserIdInput = document.getElementById("profile-user-id-input");
 const profileCancelBtn = document.getElementById("profile-cancel-btn");
 
 const refreshStateBtn = document.getElementById("refresh-state-btn");
+const openTalkViewerBtn = document.getElementById("open-talk-viewer-btn");
 const toggleEssentialBtn = document.getElementById("toggle-essential-btn");
 const themeToggleBtn = document.getElementById("theme-toggle-btn");
 const sendBtn = document.getElementById("send-btn");
@@ -81,6 +82,12 @@ const rateLimitBtn = document.getElementById("rate-limit-btn");
 const rateMethodInput = document.getElementById("rate-method-input");
 const rateCountInput = document.getElementById("rate-count-input");
 const rateRetryInput = document.getElementById("rate-retry-input");
+const talkViewerOverlay = document.getElementById("talk-viewer-overlay");
+const talkViewerBackdrop = document.getElementById("talk-viewer-backdrop");
+const talkViewerBody = document.getElementById("talk-viewer-body");
+const talkViewerMeta = document.getElementById("talk-viewer-meta");
+const talkViewerCloseBtn = document.getElementById("talk-viewer-close-btn");
+const talkViewerClearBtn = document.getElementById("talk-viewer-clear-btn");
 
 const DEFAULT_TOKEN = "mock_token_a";
 const STORAGE_KEY = "mock_messenger_ui_state_v4";
@@ -97,6 +104,7 @@ const FIXED_THEME = "light";
 const SCROLL_BOTTOM_THRESHOLD = 24;
 const AUTO_REFRESH_INTERVAL_MS = 1000;
 const SIDEBAR_DIAGNOSTICS_REFRESH_MS = 5000;
+const TALK_VIEWER_MAX_ENTRIES = 500;
 const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const EVENT_LINE_RE = /^\[(\d+|~)\]\[(\d{2}:\d{2}:\d{2})\]\[([a-z_]+)\]\s?(.*)$/i;
 const FENCED_CODE_BLOCK_RE = /```([A-Za-z0-9_+-]+)?\n?([\s\S]*?)```/g;
@@ -126,7 +134,26 @@ const COMMAND_CATALOG = [
   { command: "/stop", usage: "/stop", nameKo: "실행 중단", description: "현재 실행 중인 turn을 중단 요청합니다." },
   { command: "/youtube", usage: "/youtube ", nameKo: "유튜브 검색", description: "검색어로 유튜브 영상을 찾아 링크를 보냅니다." },
   { command: "/yt", usage: "/yt ", nameKo: "유튜브 검색(축약)", description: "/youtube의 축약 명령입니다." },
-  { command: "/echo", usage: "/echo ", nameKo: "에코", description: "입력한 텍스트를 그대로 응답합니다." }
+  { command: "/echo", usage: "/echo ", nameKo: "에코", description: "입력한 텍스트를 그대로 응답합니다." },
+  { command: "/talk", usage: "/talk ", nameKo: "자유 대화", description: "선택된 멀티봇 자유 대화를 라운드 기반으로 실행합니다." },
+  { command: "/relay", usage: "/relay ", nameKo: "릴레이", description: "멀티봇이 대사를 순서대로 이어가는 릴레이를 실행합니다." },
+  { command: "/pitchbattle", usage: "/pitchbattle ", nameKo: "피치 배틀", description: "아이디어 피치 배틀 후 판정 턴을 수행합니다." },
+  { command: "/quizbattle", usage: "/quizbattle ", nameKo: "퀴즈 배틀", description: "퀴즈마스터 기반 배틀 후 판정 턴을 수행합니다." },
+  { command: "/debate-lite", usage: "/debate-lite ", nameKo: "경량 토론", description: "짧은 찬반 토론 후 판정 턴을 수행합니다." },
+  { command: "/improv", usage: "/improv ", nameKo: "즉흥극", description: "상황극을 라운드-로빈으로 이어갑니다." },
+  { command: "/quest", usage: "/quest ", nameKo: "퀘스트", description: "협동 퀘스트 수행 후 성공/실패를 판정합니다." },
+  { command: "/memechain", usage: "/memechain ", nameKo: "밈 체인", description: "한 줄 밈을 이어가는 체인을 실행합니다." },
+  { command: "/court", usage: "/court ", nameKo: "법정극", description: "역할 기반 법정극 진행 후 판결을 선언합니다." }
+];
+const PLAY_COMMAND_KEYS = [
+  "relay",
+  "pitchbattle",
+  "quizbattle",
+  "debate-lite",
+  "improv",
+  "quest",
+  "memechain",
+  "court",
 ];
 const SUPPORTED_PROVIDER_OPTIONS = ["codex", "gemini", "claude"];
 const SUPPORTED_ROLE_OPTIONS = ["controller", "planner", "executor", "integrator"];
@@ -177,6 +204,19 @@ let coworkBusy = false;
 let coworkPollingTimer = null;
 let coworkLastStatus = "";
 let towerRecoverBusy = false;
+let talkViewerOpen = false;
+let talkViewerEntries = [];
+let talkViewerSession = {
+  status: "idle",
+  mode: "talk",
+  title: "",
+  seed: "",
+  rounds: 0,
+  participants: 0,
+  passCount: 0,
+  failCount: 0,
+  verdict: "",
+};
 const profileModelApplyBusy = new Set();
 let loadedStateFromLegacy = false;
 
@@ -711,6 +751,185 @@ function initTowerPanelToggle() {
     const nextHidden = !towerPanelBody.classList.contains("is-collapsed");
     localStorage.setItem(TOWER_PANEL_COLLAPSE_STORAGE_KEY, nextHidden ? "1" : "0");
     applyTowerPanelVisibility(nextHidden);
+  });
+}
+
+function updateTalkViewerToggleButton() {
+  if (!openTalkViewerBtn) {
+    return;
+  }
+  const running = talkViewerSession.status === "running";
+  openTalkViewerBtn.classList.toggle("is-active", talkViewerOpen || running);
+  const label = talkViewerOpen ? "Talk/Play Viewer 닫기" : running ? "Talk/Play Viewer 보기(실행 중)" : "Talk/Play Viewer 열기";
+  openTalkViewerBtn.title = label;
+  openTalkViewerBtn.setAttribute("aria-label", label);
+}
+
+function setTalkViewerOpen(open) {
+  talkViewerOpen = Boolean(open);
+  if (talkViewerOverlay) {
+    talkViewerOverlay.classList.toggle("hidden", !talkViewerOpen);
+    talkViewerOverlay.setAttribute("aria-hidden", talkViewerOpen ? "false" : "true");
+  }
+  document.body.classList.toggle("talk-viewer-open", talkViewerOpen);
+  updateTalkViewerToggleButton();
+  if (talkViewerOpen) {
+    renderTalkViewer(true);
+  }
+}
+
+function setTalkViewerSession(nextState) {
+  talkViewerSession = {
+    ...talkViewerSession,
+    ...(nextState && typeof nextState === "object" ? nextState : {}),
+  };
+  renderTalkViewerMeta();
+  updateTalkViewerToggleButton();
+}
+
+function clearTalkViewer() {
+  talkViewerEntries = [];
+  talkViewerSession = {
+    status: "idle",
+    mode: "talk",
+    title: "",
+    seed: "",
+    rounds: 0,
+    participants: 0,
+    passCount: 0,
+    failCount: 0,
+    verdict: "",
+  };
+  renderTalkViewerMeta();
+  renderTalkViewer(true);
+  updateTalkViewerToggleButton();
+}
+
+function renderTalkViewerMeta() {
+  if (!talkViewerMeta) {
+    return;
+  }
+  const status = String(talkViewerSession.status || "idle");
+  const mode = String(talkViewerSession.mode || "talk").trim() || "talk";
+  const title = String(talkViewerSession.title || "").trim();
+  if (!talkViewerEntries.length && status === "idle") {
+    talkViewerMeta.textContent = "대화 기록이 없습니다.";
+    return;
+  }
+  const seed = String(talkViewerSession.seed || "").trim();
+  const seedPreview = seed ? ` · "${seed.slice(0, 36)}${seed.length > 36 ? "..." : ""}"` : "";
+  const rounds = Number(talkViewerSession.rounds || 0);
+  const participants = Number(talkViewerSession.participants || 0);
+  const passCount = Number(talkViewerSession.passCount || 0);
+  const failCount = Number(talkViewerSession.failCount || 0);
+  const verdict = String(talkViewerSession.verdict || "").trim() || "-";
+  const titleChunk = title ? `title=${title} · ` : "";
+  const base = `${titleChunk}mode=${mode} · status=${status} · rounds=${rounds} · participants=${participants} · pass=${passCount} · fail=${failCount} · verdict=${verdict}`;
+  talkViewerMeta.textContent = `${base}${seedPreview}`;
+}
+
+function appendTalkViewerEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return;
+  }
+  const text = String(entry.text || "").trim();
+  if (!text) {
+    return;
+  }
+  const speaker = String(entry.speaker || "bot").trim() || "bot";
+  const type = String(entry.type || "bot").trim().toLowerCase();
+  const provider = normalizeProvider(entry.provider);
+  talkViewerEntries.push({
+    speaker,
+    text,
+    type,
+    provider,
+    created_at: Date.now(),
+  });
+  if (talkViewerEntries.length > TALK_VIEWER_MAX_ENTRIES) {
+    talkViewerEntries = talkViewerEntries.slice(talkViewerEntries.length - TALK_VIEWER_MAX_ENTRIES);
+  }
+  renderTalkViewer();
+  renderTalkViewerMeta();
+}
+
+function renderTalkViewer(forceBottom = false) {
+  if (!talkViewerBody) {
+    return;
+  }
+  const shouldFollow = forceBottom || isNearBottom(talkViewerBody);
+  talkViewerBody.innerHTML = "";
+  if (!talkViewerEntries.length) {
+    const empty = document.createElement("div");
+    empty.className = "talk-viewer-empty";
+    empty.textContent = "아직 Talk/Play 로그가 없습니다. /talk 또는 Play 명령을 실행해보세요.";
+    talkViewerBody.appendChild(empty);
+    return;
+  }
+  for (const entry of talkViewerEntries) {
+    const row = document.createElement("div");
+    row.className = "talk-line";
+    if (entry.type === "user") {
+      row.classList.add("is-user");
+    } else if (entry.type === "system") {
+      row.classList.add("is-system");
+    } else if (entry.type === "error") {
+      row.classList.add("is-error");
+    }
+    if (entry.provider) {
+      row.classList.add(`provider-${entry.provider}`);
+    }
+
+    const dot = document.createElement("span");
+    dot.className = "talk-line-dot";
+
+    const speaker = document.createElement("span");
+    speaker.className = "talk-line-speaker";
+    speaker.textContent = entry.speaker;
+
+    const text = document.createElement("span");
+    text.className = "talk-line-text";
+    text.textContent = entry.text;
+
+    row.appendChild(dot);
+    row.appendChild(speaker);
+    row.appendChild(text);
+    talkViewerBody.appendChild(row);
+  }
+  if (shouldFollow) {
+    talkViewerBody.scrollTop = talkViewerBody.scrollHeight;
+  }
+}
+
+function initTalkViewer() {
+  updateTalkViewerToggleButton();
+  renderTalkViewerMeta();
+  renderTalkViewer(true);
+
+  if (openTalkViewerBtn) {
+    openTalkViewerBtn.addEventListener("click", () => {
+      setTalkViewerOpen(!talkViewerOpen);
+    });
+  }
+  if (talkViewerCloseBtn) {
+    talkViewerCloseBtn.addEventListener("click", () => {
+      setTalkViewerOpen(false);
+    });
+  }
+  if (talkViewerBackdrop) {
+    talkViewerBackdrop.addEventListener("click", () => {
+      setTalkViewerOpen(false);
+    });
+  }
+  if (talkViewerClearBtn) {
+    talkViewerClearBtn.addEventListener("click", () => {
+      clearTalkViewer();
+    });
+  }
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && talkViewerOpen) {
+      setTalkViewerOpen(false);
+    }
   });
 }
 
@@ -3005,6 +3224,10 @@ function classifyCommandOutcomeFromTexts(texts, commandType) {
     if (/\bmodel updated:/i.test(joined)) {
       return { done: true, status: "PASS", detail: "model_applied" };
     }
+  } else if (commandType === "new") {
+    if (/\bnew session created:/i.test(joined) || /\bsession reset\./i.test(joined)) {
+      return { done: true, status: "PASS", detail: "session_created" };
+    }
   } else if (commandType === "project") {
     if (/\bproject updated:/i.test(joined)) {
       return { done: true, status: "PASS", detail: "project_applied" };
@@ -3089,23 +3312,48 @@ async function waitForCommandOutcome(profile, baselineMessageId, commandType, ti
   return { done: true, status: "FAIL", detail: "timeout" };
 }
 
-function parseDebateCommand(rawText) {
+function escapeRegex(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseRoundOrchestrationCommand(rawText, config) {
+  const {
+    command,
+    subjectKey = "topic",
+    subjectLabel = "주제",
+    emptyError = "",
+    example = "",
+    defaultRounds = 2,
+    roundsMin = 1,
+    roundsMax = 8,
+    defaultMaxTurnSec = 90,
+    maxTurnMin = 10,
+    maxTurnMax = 240,
+  } = config || {};
+
+  const cmd = String(command || "").trim().replace(/^\/+/, "");
+  if (!cmd) {
+    return null;
+  }
+  const cmdEscaped = escapeRegex(cmd);
   const text = String(rawText || "").trim();
-  if (!/^\/debate(?:\s|$)/i.test(text)) {
+  const commandRe = new RegExp(`^\\/${cmdEscaped}(?:\\s|$)`, "i");
+  if (!commandRe.test(text)) {
     return null;
   }
 
-  let rest = text.replace(/^\/debate\b/i, "").trim();
+  let rest = text.replace(new RegExp(`^\\/${cmdEscaped}\\b`, "i"), "").trim();
   if (!rest) {
-    return { error: "토론 주제를 입력하세요. 예: /debate AI가 개발자를 대체할까?" };
+    const sample = example ? ` 예: /${cmd} ${example}` : "";
+    return { error: emptyError || `${subjectLabel}를 입력하세요.${sample}` };
   }
 
-  let rounds = 3;
-  let maxTurnSec = 90;
+  let rounds = Number(defaultRounds);
+  let maxTurnSec = Number(defaultMaxTurnSec);
   let freshSession = true;
 
   const takeIntOption = (name, min, max) => {
-    const optionRe = new RegExp(`(?:^|\\s)--${name}\\s+(\\d+)(?=\\s|$)`, "i");
+    const optionRe = new RegExp(`(?:^|\\s)--${escapeRegex(name)}\\s+(\\d+)(?=\\s|$)`, "i");
     const match = rest.match(optionRe);
     if (!match) {
       return null;
@@ -3115,23 +3363,23 @@ function parseDebateCommand(rawText) {
     if (!Number.isFinite(value) || value < min || value > max) {
       return { error: `--${name} 값은 ${min}~${max} 범위여야 합니다.` };
     }
-    return value;
+    return Math.trunc(value);
   };
 
-  const roundsValue = takeIntOption("rounds", 1, 10);
+  const roundsValue = takeIntOption("rounds", Number(roundsMin), Number(roundsMax));
   if (roundsValue && typeof roundsValue === "object" && roundsValue.error) {
     return roundsValue;
   }
   if (typeof roundsValue === "number") {
-    rounds = Math.trunc(roundsValue);
+    rounds = roundsValue;
   }
 
-  const maxTurnValue = takeIntOption("max-turn-sec", 10, 300);
+  const maxTurnValue = takeIntOption("max-turn-sec", Number(maxTurnMin), Number(maxTurnMax));
   if (maxTurnValue && typeof maxTurnValue === "object" && maxTurnValue.error) {
     return maxTurnValue;
   }
   if (typeof maxTurnValue === "number") {
-    maxTurnSec = Math.trunc(maxTurnValue);
+    maxTurnSec = maxTurnValue;
   }
 
   if (/(?:^|\s)--keep-session(?:\s|$)/i.test(rest)) {
@@ -3144,16 +3392,362 @@ function parseDebateCommand(rawText) {
     return { error: `알 수 없는 옵션: ${unknownOption[0]}` };
   }
 
-  const topic = rest.replace(/\s+/g, " ").trim();
-  if (!topic) {
-    return { error: "토론 주제를 입력하세요." };
+  const subject = rest.replace(/\s+/g, " ").trim();
+  if (!subject) {
+    return { error: `${subjectLabel}를 입력하세요.` };
   }
-  return {
-    topic,
+
+  const parsed = {
     rounds,
     max_turn_sec: maxTurnSec,
-    fresh_session: freshSession
+    fresh_session: freshSession,
   };
+  parsed[subjectKey] = subject;
+  return parsed;
+}
+
+function parseTalkCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "talk",
+    subjectKey: "seed",
+    subjectLabel: "대화 시작 문장",
+    emptyError: "대화 시작 문장을 입력하세요. 예: /talk 오늘 뭐하고 놀까? --rounds 3",
+    example: "오늘 뭐하고 놀까? --rounds 3",
+    defaultRounds: 3,
+    roundsMin: 1,
+    roundsMax: 12,
+    defaultMaxTurnSec: 60,
+    maxTurnMin: 10,
+    maxTurnMax: 300,
+  });
+}
+
+function normalizeTalkReply(rawText) {
+  const text = String(rawText || "").replace(/\r\n/g, "\n").trim();
+  if (!text) {
+    return "";
+  }
+  const normalized = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => Boolean(line))
+    .join("\n");
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= 340) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 340)}...`;
+}
+
+function looksLikeControlOnlyText(text) {
+  const lowered = String(text || "").toLowerCase();
+  if (!lowered.trim()) {
+    return true;
+  }
+  return (
+    lowered.includes("turn_completed") ||
+    lowered.includes("thread_started") ||
+    lowered.includes("turn_started") ||
+    lowered.includes("command_started") ||
+    lowered.includes("command_completed") ||
+    lowered.includes("bridge_status") ||
+    lowered.includes("new session created:") ||
+    lowered.includes("stop requested.") ||
+    lowered.includes("no active run.")
+  );
+}
+
+function extractTalkReplyFromTexts(texts) {
+  const rows = Array.isArray(texts) ? texts : [];
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const chunk = String(rows[i] || "");
+    const lines = chunk.split(/\r?\n/);
+    for (let j = lines.length - 1; j >= 0; j -= 1) {
+      const line = lines[j];
+      const eventMatch = line.match(EVENT_LINE_RE);
+      if (!eventMatch) {
+        continue;
+      }
+      const eventType = String(eventMatch[3] || "").toLowerCase();
+      const detail = normalizeTalkReply(eventMatch[4] || "");
+      if (eventType === "assistant_message" && detail) {
+        return detail;
+      }
+    }
+  }
+
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const chunk = String(rows[i] || "");
+    const cleaned = chunk
+      .split(/\r?\n/)
+      .map((line) => {
+        const eventMatch = line.match(EVENT_LINE_RE);
+        if (!eventMatch) {
+          return line.trim();
+        }
+        const eventType = String(eventMatch[3] || "").toLowerCase();
+        if (eventType !== "assistant_message") {
+          return "";
+        }
+        return String(eventMatch[4] || "").trim();
+      })
+      .filter((line) => Boolean(line))
+      .join("\n");
+    const normalized = normalizeTalkReply(cleaned);
+    if (normalized && !looksLikeControlOnlyText(normalized)) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function talkSpeakerLabel(profile, index) {
+  const label = String(profile?.label || "").trim();
+  if (label) {
+    return label;
+  }
+  const botId = String(profile?.bot_id || "").trim();
+  if (botId) {
+    return botId;
+  }
+  return `bot-${index + 1}`;
+}
+
+function buildTalkPrompt({ speakerLabel, seed, transcript, roundNo, turnNo, totalTurns }) {
+  const historyLines = (Array.isArray(transcript) ? transcript : [])
+    .slice(-12)
+    .map((entry) => {
+      const speaker = String(entry?.speaker || "unknown").trim() || "unknown";
+      const text = normalizeTalkReply(entry?.text || "");
+      return text ? `${speaker}: ${text}` : "";
+    })
+    .filter((line) => Boolean(line));
+
+  return [
+    "[Talk Mode]",
+    `너는 멀티봇 자유 대화 참가자 "${speakerLabel}"이다.`,
+    "아래 대화를 보고 다음 한 마디를 자연스럽게 이어서 답해라.",
+    "규칙:",
+    "- 한국어로 답변",
+    "- 1~3문장, 과도한 설명/코드/마크다운 금지",
+    "- 이름 prefix를 붙이지 말고 내용만 출력",
+    `사용자 시작 문장: ${seed}`,
+    `현재 턴: ${turnNo}/${totalTurns} (round=${roundNo})`,
+    "",
+    "[대화 기록]",
+    ...historyLines.map((line) => `- ${line}`),
+    "",
+    "지금 바로 다음 답장을 출력해라.",
+  ].join("\n");
+}
+
+function formatTalkFailure(detail) {
+  const normalized = String(detail || "").toLowerCase();
+  if (!normalized || normalized === "error") {
+    return "[응답 실패]";
+  }
+  if (normalized === "timeout") {
+    return "[응답 시간 초과]";
+  }
+  if (normalized === "active_run") {
+    return "[기존 실행이 남아 있어 응답 실패]";
+  }
+  return `[응답 실패: ${normalized}]`;
+}
+
+async function waitForTalkOutcome(profile, baselineMessageId, timeoutSec = 60) {
+  for (let elapsed = 0; elapsed < timeoutSec; elapsed += 1) {
+    const [messagesResp, diagnosticsResp] = await Promise.all([
+      requestJson(`/_mock/messages?token=${encodeURIComponent(profile.token)}&chat_id=${Number(profile.chat_id)}&limit=120`),
+      requestJson(
+        `/_mock/bot_diagnostics?bot_id=${encodeURIComponent(profile.bot_id)}&token=${encodeURIComponent(
+          profile.token
+        )}&chat_id=${Number(profile.chat_id)}&limit=120`
+      ),
+    ]);
+
+    const messages = Array.isArray(messagesResp?.result?.messages) ? messagesResp.result.messages : [];
+    const texts = messages
+      .filter((message) => Number(message.message_id || 0) > baselineMessageId && message.direction === "bot")
+      .map((message) => String(message.text || ""));
+
+    const outcome = classifyOutcomeFromTexts(texts);
+    if (outcome.done) {
+      return {
+        done: true,
+        status: outcome.status,
+        detail: outcome.detail,
+        reply: extractTalkReplyFromTexts(texts),
+      };
+    }
+
+    const diagnostics = diagnosticsResp?.result || {};
+    const runStatus = String(diagnostics?.session?.run_status || "").toLowerCase();
+    if (texts.length > 0 && runStatus === "completed") {
+      return {
+        done: true,
+        status: "PASS",
+        detail: "run_status=completed",
+        reply: extractTalkReplyFromTexts(texts),
+      };
+    }
+    if (runStatus === "error") {
+      const tag = String(diagnostics?.last_error_tag || "error");
+      return { done: true, status: "FAIL", detail: tag, reply: extractTalkReplyFromTexts(texts) };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return { done: true, status: "FAIL", detail: "timeout", reply: "" };
+}
+
+function parseDebateCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "debate",
+    subjectKey: "topic",
+    subjectLabel: "토론 주제",
+    emptyError: "토론 주제를 입력하세요. 예: /debate AI가 개발자를 대체할까?",
+    example: "AI가 개발자를 대체할까?",
+    defaultRounds: 3,
+    roundsMin: 1,
+    roundsMax: 10,
+    defaultMaxTurnSec: 90,
+    maxTurnMin: 10,
+    maxTurnMax: 300,
+  });
+}
+
+function parseRelayCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "relay",
+    subjectKey: "topic",
+    subjectLabel: "릴레이 주제",
+    emptyError: "릴레이 주제를 입력하세요. 예: /relay 퇴근길 지하철에서 생긴 일",
+    example: "퇴근길 지하철에서 생긴 일",
+    defaultRounds: 3,
+  });
+}
+
+function parsePitchbattleCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "pitchbattle",
+    subjectKey: "topic",
+    subjectLabel: "피치 배틀 주제",
+    emptyError: "피치 배틀 주제를 입력하세요. 예: /pitchbattle 주말 사이드 프로젝트 아이디어",
+    example: "주말 사이드 프로젝트 아이디어",
+    defaultRounds: 2,
+  });
+}
+
+function parseQuizbattleCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "quizbattle",
+    subjectKey: "topic",
+    subjectLabel: "퀴즈 배틀 주제",
+    emptyError: "퀴즈 배틀 주제를 입력하세요. 예: /quizbattle 한국사 상식",
+    example: "한국사 상식",
+    defaultRounds: 2,
+  });
+}
+
+function parseDebateLiteCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "debate-lite",
+    subjectKey: "topic",
+    subjectLabel: "토론 주제",
+    emptyError: "경량 토론 주제를 입력하세요. 예: /debate-lite 원격근무 vs 오피스근무",
+    example: "원격근무 vs 오피스근무",
+    defaultRounds: 2,
+  });
+}
+
+function parseImprovCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "improv",
+    subjectKey: "topic",
+    subjectLabel: "즉흥극 상황",
+    emptyError: "즉흥극 상황을 입력하세요. 예: /improv 우주 엘리베이터에서 길을 잃은 팀",
+    example: "우주 엘리베이터에서 길을 잃은 팀",
+    defaultRounds: 3,
+  });
+}
+
+function parseQuestCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "quest",
+    subjectKey: "topic",
+    subjectLabel: "퀘스트 미션",
+    emptyError: "퀘스트 미션을 입력하세요. 예: /quest 30분 내 랜딩 페이지 초안 완성",
+    example: "30분 내 랜딩 페이지 초안 완성",
+    defaultRounds: 3,
+  });
+}
+
+function parseMemechainCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "memechain",
+    subjectKey: "topic",
+    subjectLabel: "밈 체인 주제",
+    emptyError: "밈 체인 주제를 입력하세요. 예: /memechain 재택근무 현실",
+    example: "재택근무 현실",
+    defaultRounds: 3,
+  });
+}
+
+function parseCourtCommand(rawText) {
+  return parseRoundOrchestrationCommand(rawText, {
+    command: "court",
+    subjectKey: "topic",
+    subjectLabel: "사건 주제",
+    emptyError: "법정극 사건을 입력하세요. 예: /court 버그 배포 사고 책임 공방",
+    example: "버그 배포 사고 책임 공방",
+    defaultRounds: 2,
+  });
+}
+
+function parsePlayCommand(rawText) {
+  const parserByKey = {
+    relay: parseRelayCommand,
+    pitchbattle: parsePitchbattleCommand,
+    quizbattle: parseQuizbattleCommand,
+    "debate-lite": parseDebateLiteCommand,
+    improv: parseImprovCommand,
+    quest: parseQuestCommand,
+    memechain: parseMemechainCommand,
+    court: parseCourtCommand,
+  };
+  for (const kind of PLAY_COMMAND_KEYS) {
+    const parser = parserByKey[kind];
+    if (typeof parser !== "function") {
+      continue;
+    }
+    const parsed = parser(rawText);
+    if (parsed !== null) {
+      return { kind, parsed };
+    }
+  }
+  return null;
+}
+
+function parseOrchestrationCommand(rawText) {
+  const talkCommand = parseTalkCommand(rawText);
+  if (talkCommand !== null) {
+    return { kind: "talk", parsed: talkCommand };
+  }
+  const debateCommand = parseDebateCommand(rawText);
+  if (debateCommand !== null) {
+    return { kind: "debate", parsed: debateCommand };
+  }
+  const coworkCommand = parseCoworkCommand(rawText);
+  if (coworkCommand !== null) {
+    return { kind: "cowork", parsed: coworkCommand };
+  }
+  const playCommand = parsePlayCommand(rawText);
+  if (playCommand !== null) {
+    return playCommand;
+  }
+  return null;
 }
 
 function parseCoworkCommand(rawText) {
@@ -3558,6 +4152,694 @@ async function runCoworkFlow(targets, parsedCommand) {
   }
 }
 
+async function runTalkFlow(targets, parsedCommand) {
+  if (!parsedCommand || parsedCommand.error) {
+    const detail = parsedCommand?.error || "talk 명령 파싱 실패";
+    renderParallelResults([{ label: "talk", status: "FAIL", detail }]);
+    appendBubble("meta", detail);
+    return;
+  }
+  if (debateBusy) {
+    renderParallelResults([{ label: "talk", status: "FAIL", detail: "토론 진행 중에는 talk를 시작할 수 없습니다." }]);
+    appendBubble("meta", "토론 진행 중에는 talk를 시작할 수 없습니다.");
+    return;
+  }
+  if (coworkBusy) {
+    renderParallelResults([{ label: "talk", status: "FAIL", detail: "팀워크 실행 중에는 talk를 시작할 수 없습니다." }]);
+    appendBubble("meta", "팀워크 실행 중에는 talk를 시작할 수 없습니다.");
+    return;
+  }
+
+  const rows = [];
+  const updateRows = () => renderParallelResults(rows.slice(-180));
+  const addRow = (label, status, detail) => {
+    rows.push({ label, status, detail });
+    updateRows();
+    return rows.length - 1;
+  };
+  const setRow = (index, status, detail) => {
+    if (index < 0 || index >= rows.length) {
+      return;
+    }
+    rows[index] = { ...rows[index], status, detail };
+    updateRows();
+  };
+
+  const transcript = [{ speaker: "User", text: parsedCommand.seed }];
+  let passCount = 0;
+  let failCount = 0;
+  const totalTurns = parsedCommand.rounds * targets.length;
+  const speakerMeta = new Map(
+    targets.map((profile, index) => {
+      const speaker = talkSpeakerLabel(profile, index);
+      const diagnostics = profileDiagnostics.get(profile.profile_id) || null;
+      const catalogRow = catalogByBotId.get(profile.bot_id);
+      const provider = resolveProfileProvider(profile, diagnostics, catalogRow);
+      return [speaker, { provider }];
+    })
+  );
+
+  clearTalkViewer();
+  setTalkViewerSession({
+    status: "running",
+    mode: "talk",
+    title: "Talk",
+    seed: parsedCommand.seed,
+    rounds: parsedCommand.rounds,
+    participants: targets.length,
+    passCount: 0,
+    failCount: 0,
+    verdict: "-",
+  });
+  appendTalkViewerEntry({ type: "user", speaker: "User", text: parsedCommand.seed });
+  setTalkViewerOpen(true);
+  addRow("User", "PASS", parsedCommand.seed);
+  setParallelSendBusy(true);
+  appendBubble("meta", `talk 시작: rounds=${parsedCommand.rounds}, participants=${targets.length}`);
+
+  try {
+    if (parsedCommand.fresh_session) {
+      for (const [index, profile] of targets.entries()) {
+        const speaker = talkSpeakerLabel(profile, index);
+        const preparingRow = addRow(speaker, "WAIT", "session 준비 중...");
+        try {
+          await stopActiveRunBeforeModelApply(profile);
+        } catch {
+          // no-op: stop 실패는 다음 /new 시도에서 다시 판단한다.
+        }
+        const baseline = await maxMessageIdForProfile(profile);
+        await sendTextToProfile(profile, "/new");
+        const newOutcome = await waitForCommandOutcome(profile, baseline, "new", 25);
+        if (newOutcome.status === "PASS") {
+          setRow(preparingRow, "PASS", "new session");
+          appendTalkViewerEntry({ type: "system", speaker: "System", text: `${speaker} session 준비 완료` });
+        } else {
+          setRow(preparingRow, "FAIL", `new session 실패: ${newOutcome.detail}`);
+          appendTalkViewerEntry({
+            type: "error",
+            speaker: "System",
+            text: `${speaker} session 준비 실패: ${newOutcome.detail}`,
+          });
+        }
+      }
+    }
+
+    for (let roundNo = 1; roundNo <= parsedCommand.rounds; roundNo += 1) {
+      for (let idx = 0; idx < targets.length; idx += 1) {
+        const profile = targets[idx];
+        const speaker = talkSpeakerLabel(profile, idx);
+        const turnNo = ((roundNo - 1) * targets.length) + idx + 1;
+        const rowIndex = addRow(`R${roundNo} ${speaker}`, "WAIT", "thinking...");
+        const prompt = buildTalkPrompt({
+          speakerLabel: speaker,
+          seed: parsedCommand.seed,
+          transcript,
+          roundNo,
+          turnNo,
+          totalTurns,
+        });
+
+        try {
+          let baseline = await maxMessageIdForProfile(profile);
+          await sendTextToProfile(profile, prompt);
+          let outcome = await waitForTalkOutcome(profile, baseline, parsedCommand.max_turn_sec);
+          if (outcome.status === "FAIL" && outcome.detail === "active_run") {
+            setRow(rowIndex, "WAIT", "active run 감지, /stop 후 재시도...");
+            await stopActiveRunBeforeModelApply(profile);
+            baseline = await maxMessageIdForProfile(profile);
+            await sendTextToProfile(profile, prompt);
+            outcome = await waitForTalkOutcome(profile, baseline, parsedCommand.max_turn_sec);
+          }
+
+          if (outcome.status === "PASS") {
+            const reply = normalizeTalkReply(outcome.reply || "") || "(응답 본문 없음)";
+            transcript.push({ speaker, text: reply });
+            passCount += 1;
+            setRow(rowIndex, "PASS", reply);
+            appendTalkViewerEntry({
+              type: "bot",
+              speaker,
+              text: reply,
+              provider: speakerMeta.get(speaker)?.provider || "",
+            });
+          } else {
+            const failure = formatTalkFailure(outcome.detail);
+            transcript.push({ speaker, text: failure });
+            failCount += 1;
+            setRow(rowIndex, "FAIL", failure);
+            appendTalkViewerEntry({
+              type: "error",
+              speaker,
+              text: failure,
+              provider: speakerMeta.get(speaker)?.provider || "",
+            });
+          }
+          setTalkViewerSession({
+            passCount,
+            failCount,
+          });
+        } catch (error) {
+          const failure = `[응답 실패: ${String(error?.message || error)}]`;
+          transcript.push({ speaker, text: failure });
+          failCount += 1;
+          setRow(rowIndex, "FAIL", failure);
+          appendTalkViewerEntry({
+            type: "error",
+            speaker,
+            text: failure,
+            provider: speakerMeta.get(speaker)?.provider || "",
+          });
+          setTalkViewerSession({
+            passCount,
+            failCount,
+          });
+        }
+      }
+    }
+    addRow("talk", failCount > 0 ? "FAIL" : "PASS", `completed · pass=${passCount} fail=${failCount}`);
+    appendTalkViewerEntry({
+      type: "system",
+      speaker: "System",
+      text: `talk 완료 · pass=${passCount} · fail=${failCount}`,
+    });
+    setTalkViewerSession({
+      status: failCount > 0 ? "failed" : "completed",
+      passCount,
+      failCount,
+      verdict: "-",
+    });
+    appendBubble("meta", `talk 완료: pass=${passCount}, fail=${failCount}`);
+    await refresh();
+  } catch (error) {
+    const detail = String(error?.message || error);
+    addRow("talk", "FAIL", detail);
+    appendTalkViewerEntry({
+      type: "error",
+      speaker: "System",
+      text: `talk 중단: ${detail}`,
+    });
+    setTalkViewerSession({
+      status: "failed",
+      passCount,
+      failCount,
+      verdict: "-",
+    });
+    appendBubble("meta", `talk 실행 실패: ${detail}`);
+  } finally {
+    setParallelSendBusy(false);
+  }
+}
+
+const PLAY_MODE_SPECS = Object.freeze({
+  relay: {
+    key: "relay",
+    labelKo: "릴레이",
+    viewerTitle: "Relay",
+    minParticipants: 2,
+    hasVerdict: false,
+    scenarioRule: "이전 발화를 자연스럽게 이어서 짧은 다음 장면을 만든다.",
+  },
+  pitchbattle: {
+    key: "pitchbattle",
+    labelKo: "피치 배틀",
+    viewerTitle: "Pitch Battle",
+    minParticipants: 2,
+    hasVerdict: true,
+    scenarioRule: "각자 핵심 가치와 실행 가능성을 강조해 피치한다.",
+  },
+  quizbattle: {
+    key: "quizbattle",
+    labelKo: "퀴즈 배틀",
+    viewerTitle: "Quiz Battle",
+    minParticipants: 2,
+    hasVerdict: true,
+    scenarioRule: "한 줄 문제/답변 흐름으로 짧고 명확하게 진행한다.",
+  },
+  "debate-lite": {
+    key: "debate-lite",
+    labelKo: "경량 토론",
+    viewerTitle: "Debate Lite",
+    minParticipants: 2,
+    hasVerdict: true,
+    scenarioRule: "찬반 논지를 짧게 제시하고 근거를 한 개 이상 포함한다.",
+  },
+  improv: {
+    key: "improv",
+    labelKo: "즉흥극",
+    viewerTitle: "Improv",
+    minParticipants: 2,
+    hasVerdict: false,
+    scenarioRule: "캐릭터 몰입을 유지하면서 상황을 전진시킨다.",
+  },
+  quest: {
+    key: "quest",
+    labelKo: "퀘스트",
+    viewerTitle: "Quest",
+    minParticipants: 2,
+    hasVerdict: true,
+    scenarioRule: "협동 미션 진행 상태를 짧게 보고하고 다음 액션을 제시한다.",
+  },
+  memechain: {
+    key: "memechain",
+    labelKo: "밈 체인",
+    viewerTitle: "Meme Chain",
+    minParticipants: 2,
+    hasVerdict: false,
+    scenarioRule: "한 줄 밈/드립으로 리듬 있게 이어간다.",
+  },
+  court: {
+    key: "court",
+    labelKo: "법정극",
+    viewerTitle: "Court",
+    minParticipants: 3,
+    hasVerdict: true,
+    scenarioRule: "검사/변호/증인 관점처럼 역할 분담된 논리를 유지한다.",
+  },
+});
+
+function playModeSpec(modeKey) {
+  return PLAY_MODE_SPECS[String(modeKey || "").trim().toLowerCase()] || null;
+}
+
+function buildPlayPrompt({ modeSpec, speakerLabel, topic, transcript, roundNo, turnNo, totalTurns }) {
+  const historyLines = (Array.isArray(transcript) ? transcript : [])
+    .slice(-12)
+    .map((entry) => {
+      const speaker = String(entry?.speaker || "unknown").trim() || "unknown";
+      const text = normalizeTalkReply(entry?.text || "");
+      return text ? `${speaker}: ${text}` : "";
+    })
+    .filter((line) => Boolean(line));
+
+  return [
+    `[${modeSpec.viewerTitle}]`,
+    `너는 "${speakerLabel}" 참가자다.`,
+    `주제: ${topic}`,
+    `룰: ${modeSpec.scenarioRule}`,
+    "출력 규칙:",
+    "- 한국어, 1~3문장",
+    "- 이름 prefix/마크다운/코드블록 금지",
+    `현재 턴: ${turnNo}/${totalTurns} (round=${roundNo})`,
+    "",
+    "[대화 기록]",
+    ...historyLines.map((line) => `- ${line}`),
+    "",
+    "지금 바로 다음 발화만 출력해라.",
+  ].join("\n");
+}
+
+function buildPlayVerdictPrompt({ modeSpec, judgeLabel, topic, transcript }) {
+  const historyLines = (Array.isArray(transcript) ? transcript : [])
+    .slice(-18)
+    .map((entry) => {
+      const speaker = String(entry?.speaker || "unknown").trim() || "unknown";
+      const text = normalizeTalkReply(entry?.text || "");
+      return text ? `${speaker}: ${text}` : "";
+    })
+    .filter((line) => Boolean(line));
+
+  let verdictRule = "반드시 첫 줄에 WINNER: <speaker> 형식으로 출력하고 다음 줄에 VERDICT: <한 줄 사유>를 출력하라.";
+  if (modeSpec.key === "quest") {
+    verdictRule = "반드시 첫 줄에 RESULT: SUCCESS 또는 RESULT: FAIL 중 하나만 출력하고 다음 줄에 VERDICT: <한 줄 사유>를 출력하라.";
+  } else if (modeSpec.key === "court") {
+    verdictRule = "반드시 첫 줄에 VERDICT: <유죄|무죄|기각 등> 형식으로 출력하고 다음 줄에 WINNER: <speaker 또는 side>를 출력하라.";
+  }
+
+  return [
+    `[${modeSpec.viewerTitle} Verdict]`,
+    `너는 최종 판정자 "${judgeLabel}"다.`,
+    `주제: ${topic}`,
+    verdictRule,
+    "출력은 최대 2~3줄로 간결하게 유지한다.",
+    "",
+    "[기록]",
+    ...historyLines.map((line) => `- ${line}`),
+    "",
+    "지금 최종 판정을 출력해라.",
+  ].join("\n");
+}
+
+function extractPlayVerdictFromReply(modeKey, rawText) {
+  const text = normalizeTalkReply(rawText || "");
+  if (!text) {
+    return "";
+  }
+  const resultMatch = text.match(/(?:^|\n)\s*RESULT\s*:\s*(SUCCESS|FAIL)\b/i);
+  const winnerMatch = text.match(/(?:^|\n)\s*WINNER\s*:\s*([^\n]+)/i);
+  const verdictMatch = text.match(/(?:^|\n)\s*VERDICT\s*:\s*([^\n]+)/i);
+  const mode = String(modeKey || "").trim().toLowerCase();
+
+  if (mode === "quest" && resultMatch) {
+    return `RESULT: ${String(resultMatch[1]).toUpperCase()}`;
+  }
+  if (mode === "court") {
+    if (verdictMatch) {
+      return `VERDICT: ${String(verdictMatch[1]).trim()}`;
+    }
+    if (winnerMatch) {
+      return `WINNER: ${String(winnerMatch[1]).trim()}`;
+    }
+    if (resultMatch) {
+      return `RESULT: ${String(resultMatch[1]).toUpperCase()}`;
+    }
+    return "";
+  }
+  if (winnerMatch) {
+    return `WINNER: ${String(winnerMatch[1]).trim()}`;
+  }
+  if (verdictMatch) {
+    return `VERDICT: ${String(verdictMatch[1]).trim()}`;
+  }
+  if (resultMatch) {
+    return `RESULT: ${String(resultMatch[1]).toUpperCase()}`;
+  }
+  return "";
+}
+
+function buildTalkSpeakerMeta(targets) {
+  return new Map(
+    (Array.isArray(targets) ? targets : []).map((profile, index) => {
+      const speaker = talkSpeakerLabel(profile, index);
+      const diagnostics = profileDiagnostics.get(profile.profile_id) || null;
+      const catalogRow = catalogByBotId.get(profile.bot_id);
+      const provider = resolveProfileProvider(profile, diagnostics, catalogRow);
+      return [speaker, { provider }];
+    })
+  );
+}
+
+async function runPlayTurn(profile, prompt, maxTurnSec, rowLabel, speakerMeta) {
+  const rowSpeaker = String(rowLabel || "")
+    .replace(/^R\d+\s+/i, "")
+    .replace(/^Judge\s+/i, "")
+    .trim();
+  const speaker = rowSpeaker || String(profile?.label || profile?.bot_id || "bot");
+  const provider = speakerMeta instanceof Map ? String(speakerMeta.get(speaker)?.provider || "") : "";
+
+  try {
+    let baseline = await maxMessageIdForProfile(profile);
+    await sendTextToProfile(profile, prompt);
+    let outcome = await waitForTalkOutcome(profile, baseline, maxTurnSec);
+    if (outcome.status === "FAIL" && outcome.detail === "active_run") {
+      await stopActiveRunBeforeModelApply(profile);
+      baseline = await maxMessageIdForProfile(profile);
+      await sendTextToProfile(profile, prompt);
+      outcome = await waitForTalkOutcome(profile, baseline, maxTurnSec);
+    }
+    if (outcome.status === "PASS") {
+      const reply = normalizeTalkReply(outcome.reply || "") || "(응답 본문 없음)";
+      return { status: "PASS", speaker, provider, reply, detail: reply };
+    }
+    const failure = formatTalkFailure(outcome.detail);
+    return { status: "FAIL", speaker, provider, reply: failure, detail: failure };
+  } catch (error) {
+    const failure = `[응답 실패: ${String(error?.message || error)}]`;
+    return { status: "FAIL", speaker, provider, reply: failure, detail: failure };
+  }
+}
+
+async function prepareFreshSessionsIfNeeded(targets, freshSession, modeLabel, addRow, setRow) {
+  if (!freshSession) {
+    return;
+  }
+  for (const [index, profile] of targets.entries()) {
+    const speaker = talkSpeakerLabel(profile, index);
+    const preparingRow = addRow(speaker, "WAIT", "session 준비 중...");
+    try {
+      await stopActiveRunBeforeModelApply(profile);
+    } catch {
+      // no-op: stop 실패는 다음 /new 시도에서 다시 판단한다.
+    }
+    const baseline = await maxMessageIdForProfile(profile);
+    await sendTextToProfile(profile, "/new");
+    const newOutcome = await waitForCommandOutcome(profile, baseline, "new", 25);
+    if (newOutcome.status === "PASS") {
+      setRow(preparingRow, "PASS", "new session");
+      appendTalkViewerEntry({ type: "system", speaker: "System", text: `${speaker} session 준비 완료 (${modeLabel})` });
+    } else {
+      setRow(preparingRow, "FAIL", `new session 실패: ${newOutcome.detail}`);
+      appendTalkViewerEntry({
+        type: "error",
+        speaker: "System",
+        text: `${speaker} session 준비 실패: ${newOutcome.detail}`,
+      });
+    }
+  }
+}
+
+function finalizePlayFlow(modeSpec, addRow, passCount, failCount, verdict) {
+  const hasVerdict = Boolean(modeSpec?.hasVerdict);
+  const verdictText = hasVerdict ? String(verdict || "[판정 실패]") : "-";
+  const summaryDetail = hasVerdict
+    ? `completed · pass=${passCount} fail=${failCount} · verdict=${verdictText}`
+    : `completed · pass=${passCount} fail=${failCount}`;
+  addRow(modeSpec.key, failCount > 0 ? "FAIL" : "PASS", summaryDetail);
+  appendTalkViewerEntry({
+    type: "system",
+    speaker: "System",
+    text: hasVerdict
+      ? `${modeSpec.viewerTitle} 완료 · pass=${passCount} · fail=${failCount} · ${verdictText}`
+      : `${modeSpec.viewerTitle} 완료 · pass=${passCount} · fail=${failCount}`,
+  });
+  setTalkViewerSession({
+    status: failCount > 0 ? "failed" : "completed",
+    passCount,
+    failCount,
+    verdict: verdictText,
+  });
+  appendBubble("meta", hasVerdict
+    ? `${modeSpec.labelKo} 완료: pass=${passCount}, fail=${failCount}, verdict=${verdictText}`
+    : `${modeSpec.labelKo} 완료: pass=${passCount}, fail=${failCount}`);
+}
+
+async function runPlayFlow(targets, parsedCommand, modeKey) {
+  const modeSpec = playModeSpec(modeKey);
+  if (!modeSpec) {
+    renderParallelResults([{ label: "play", status: "FAIL", detail: `unknown mode: ${String(modeKey || "")}` }]);
+    appendBubble("meta", `unknown play mode: ${String(modeKey || "")}`);
+    return;
+  }
+  if (!parsedCommand || parsedCommand.error) {
+    const detail = parsedCommand?.error || `${modeSpec.labelKo} 명령 파싱 실패`;
+    renderParallelResults([{ label: modeSpec.key, status: "FAIL", detail }]);
+    appendBubble("meta", detail);
+    return;
+  }
+  if (targets.length < Number(modeSpec.minParticipants || 2)) {
+    const detail = `${modeSpec.labelKo}는 ${modeSpec.minParticipants}개 이상의 봇 선택이 필요합니다.`;
+    renderParallelResults([{ label: modeSpec.key, status: "FAIL", detail }]);
+    appendBubble("meta", detail);
+    return;
+  }
+  if (debateBusy) {
+    const detail = "토론 진행 중에는 Play 명령을 시작할 수 없습니다.";
+    renderParallelResults([{ label: modeSpec.key, status: "FAIL", detail }]);
+    appendBubble("meta", detail);
+    return;
+  }
+  if (coworkBusy) {
+    const detail = "팀워크 실행 중에는 Play 명령을 시작할 수 없습니다.";
+    renderParallelResults([{ label: modeSpec.key, status: "FAIL", detail }]);
+    appendBubble("meta", detail);
+    return;
+  }
+
+  const rows = [];
+  const updateRows = () => renderParallelResults(rows.slice(-180));
+  const addRow = (label, status, detail) => {
+    rows.push({ label, status, detail });
+    updateRows();
+    return rows.length - 1;
+  };
+  const setRow = (index, status, detail) => {
+    if (index < 0 || index >= rows.length) {
+      return;
+    }
+    rows[index] = { ...rows[index], status, detail };
+    updateRows();
+  };
+
+  const topic = String(parsedCommand.topic || "").trim();
+  const transcript = [{ speaker: "User", text: topic }];
+  const speakerMeta = buildTalkSpeakerMeta(targets);
+  let passCount = 0;
+  let failCount = 0;
+  let verdict = modeSpec.hasVerdict ? "[판정 실패]" : "-";
+  const totalTurns = (Number(parsedCommand.rounds) * targets.length) + (modeSpec.hasVerdict ? 1 : 0);
+
+  clearTalkViewer();
+  setTalkViewerSession({
+    status: "running",
+    mode: modeSpec.key,
+    title: modeSpec.viewerTitle,
+    seed: topic,
+    rounds: Number(parsedCommand.rounds || 0),
+    participants: targets.length,
+    passCount: 0,
+    failCount: 0,
+    verdict: modeSpec.hasVerdict ? "pending" : "-",
+  });
+  appendTalkViewerEntry({ type: "user", speaker: "User", text: topic });
+  setTalkViewerOpen(true);
+  addRow("User", "PASS", topic);
+  setParallelSendBusy(true);
+  appendBubble("meta", `${modeSpec.labelKo} 시작: rounds=${parsedCommand.rounds}, participants=${targets.length}`);
+
+  try {
+    await prepareFreshSessionsIfNeeded(targets, Boolean(parsedCommand.fresh_session), modeSpec.viewerTitle, addRow, setRow);
+
+    for (let roundNo = 1; roundNo <= Number(parsedCommand.rounds || 0); roundNo += 1) {
+      for (let idx = 0; idx < targets.length; idx += 1) {
+        const profile = targets[idx];
+        const speaker = talkSpeakerLabel(profile, idx);
+        const turnNo = ((roundNo - 1) * targets.length) + idx + 1;
+        const rowLabel = `R${roundNo} ${speaker}`;
+        const rowIndex = addRow(rowLabel, "WAIT", "thinking...");
+        const prompt = buildPlayPrompt({
+          modeSpec,
+          speakerLabel: speaker,
+          topic,
+          transcript,
+          roundNo,
+          turnNo,
+          totalTurns,
+        });
+        const turn = await runPlayTurn(profile, prompt, Number(parsedCommand.max_turn_sec || 90), rowLabel, speakerMeta);
+        if (turn.status === "PASS") {
+          passCount += 1;
+          transcript.push({ speaker, text: turn.reply });
+          setRow(rowIndex, "PASS", turn.detail);
+          appendTalkViewerEntry({
+            type: "bot",
+            speaker,
+            text: turn.reply,
+            provider: turn.provider,
+          });
+        } else {
+          failCount += 1;
+          transcript.push({ speaker, text: turn.reply });
+          setRow(rowIndex, "FAIL", turn.detail);
+          appendTalkViewerEntry({
+            type: "error",
+            speaker,
+            text: turn.reply,
+            provider: turn.provider,
+          });
+        }
+        setTalkViewerSession({ passCount, failCount });
+      }
+    }
+
+    if (modeSpec.hasVerdict) {
+      const judge = targets[0];
+      const judgeSpeaker = talkSpeakerLabel(judge, 0);
+      const judgeRowLabel = `Judge ${judgeSpeaker}`;
+      const rowIndex = addRow(judgeRowLabel, "WAIT", "verdict...");
+      const verdictPrompt = buildPlayVerdictPrompt({
+        modeSpec,
+        judgeLabel: judgeSpeaker,
+        topic,
+        transcript,
+      });
+      const turn = await runPlayTurn(
+        judge,
+        verdictPrompt,
+        Number(parsedCommand.max_turn_sec || 90),
+        judgeRowLabel,
+        speakerMeta
+      );
+      if (turn.status === "PASS") {
+        passCount += 1;
+        transcript.push({ speaker: judgeSpeaker, text: turn.reply });
+        setRow(rowIndex, "PASS", turn.reply);
+        appendTalkViewerEntry({
+          type: "bot",
+          speaker: judgeSpeaker,
+          text: turn.reply,
+          provider: turn.provider,
+        });
+        const extractedVerdict = extractPlayVerdictFromReply(modeSpec.key, turn.reply);
+        if (extractedVerdict) {
+          verdict = extractedVerdict;
+          addRow("verdict", "PASS", verdict);
+        } else {
+          verdict = "[판정 실패]";
+          addRow("verdict", "PASS", verdict);
+          appendTalkViewerEntry({
+            type: "system",
+            speaker: "System",
+            text: "판정 파싱 실패: 형식(WINNER/VERDICT/RESULT)을 찾지 못했습니다.",
+          });
+        }
+      } else {
+        failCount += 1;
+        setRow(rowIndex, "FAIL", turn.reply);
+        appendTalkViewerEntry({
+          type: "error",
+          speaker: judgeSpeaker,
+          text: turn.reply,
+          provider: turn.provider,
+        });
+        verdict = "[판정 실패]";
+        addRow("verdict", "PASS", verdict);
+      }
+      setTalkViewerSession({ passCount, failCount, verdict });
+    }
+
+    finalizePlayFlow(modeSpec, addRow, passCount, failCount, verdict);
+    await refresh();
+  } catch (error) {
+    const detail = String(error?.message || error);
+    addRow(modeSpec.key, "FAIL", detail);
+    appendTalkViewerEntry({
+      type: "error",
+      speaker: "System",
+      text: `${modeSpec.viewerTitle} 중단: ${detail}`,
+    });
+    setTalkViewerSession({
+      status: "failed",
+      passCount,
+      failCount,
+      verdict: modeSpec.hasVerdict ? verdict : "-",
+    });
+    appendBubble("meta", `${modeSpec.labelKo} 실행 실패: ${detail}`);
+  } finally {
+    setParallelSendBusy(false);
+  }
+}
+
+async function runRelayFlow(targets, parsedCommand) {
+  await runPlayFlow(targets, parsedCommand, "relay");
+}
+
+async function runPitchbattleFlow(targets, parsedCommand) {
+  await runPlayFlow(targets, parsedCommand, "pitchbattle");
+}
+
+async function runQuizbattleFlow(targets, parsedCommand) {
+  await runPlayFlow(targets, parsedCommand, "quizbattle");
+}
+
+async function runDebateLiteFlow(targets, parsedCommand) {
+  await runPlayFlow(targets, parsedCommand, "debate-lite");
+}
+
+async function runImprovFlow(targets, parsedCommand) {
+  await runPlayFlow(targets, parsedCommand, "improv");
+}
+
+async function runQuestFlow(targets, parsedCommand) {
+  await runPlayFlow(targets, parsedCommand, "quest");
+}
+
+async function runMemechainFlow(targets, parsedCommand) {
+  await runPlayFlow(targets, parsedCommand, "memechain");
+}
+
+async function runCourtFlow(targets, parsedCommand) {
+  await runPlayFlow(targets, parsedCommand, "court");
+}
+
 async function runParallelSend() {
   const targets = uiState.profiles.filter((profile) => profile.selected_for_parallel !== false);
   if (targets.length < 2) {
@@ -3589,15 +4871,52 @@ async function runParallelSend() {
     parallelMessageInput.value = text;
   }
 
-  const debateCommand = parseDebateCommand(text);
-  if (debateCommand !== null) {
-    await runDebateFlow(targets, debateCommand);
-    return;
-  }
-  const coworkCommand = parseCoworkCommand(text);
-  if (coworkCommand !== null) {
-    await runCoworkFlow(targets, coworkCommand);
-    return;
+  const orchestration = parseOrchestrationCommand(text);
+  if (orchestration !== null) {
+    if (orchestration.kind === "talk") {
+      await runTalkFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "debate") {
+      await runDebateFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "cowork") {
+      await runCoworkFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "relay") {
+      await runRelayFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "pitchbattle") {
+      await runPitchbattleFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "quizbattle") {
+      await runQuizbattleFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "debate-lite") {
+      await runDebateLiteFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "improv") {
+      await runImprovFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "quest") {
+      await runQuestFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "memechain") {
+      await runMemechainFlow(targets, orchestration.parsed);
+      return;
+    }
+    if (orchestration.kind === "court") {
+      await runCourtFlow(targets, orchestration.parsed);
+      return;
+    }
   }
 
   const results = targets.map((profile) => ({
@@ -3841,6 +5160,16 @@ async function handleSendCurrentMessage() {
   }
   if (!text) {
     appendBubble("meta", "message is required");
+    return;
+  }
+
+  if (parseOrchestrationCommand(text) !== null) {
+    if (parallelMessageInput && !parallelMessageInput.value.trim()) {
+      parallelMessageInput.value = text;
+    }
+    await runParallelSend();
+    messageInput.value = "";
+    hideCommandSuggest();
     return;
   }
 
@@ -4319,6 +5648,7 @@ initParallelResultsToggle();
 initDebatePanelToggle();
 initCoworkPanelToggle();
 initTowerPanelToggle();
+initTalkViewer();
 hydrateInputs().then(async () => {
   updateEssentialToggleButton();
   await recoverActiveDebate();
