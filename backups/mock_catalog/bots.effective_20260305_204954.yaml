@@ -1,0 +1,31 @@
+bots:
+- bot_id: bot-a
+  name: Bot A
+  mode: embedded
+  telegram_token: mock_token_a
+  adapter: codex
+  default_role: controller
+  webhook:
+    path_secret: bot-a-path
+    secret_token: bot-a-secret
+  database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/.runlogs/local-multibot/state/bot-a.db
+- bot_id: bot-b
+  name: Bot B
+  mode: embedded
+  telegram_token: mock_token_b
+  adapter: codex
+  default_role: planner
+  webhook:
+    path_secret: bot-b-path
+    secret_token: bot-b-secret
+  database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/.runlogs/local-multibot/state/bot-b.db
+- bot_id: bot-c
+  name: Bot C
+  mode: embedded
+  telegram_token: mock_token_c
+  adapter: codex
+  default_role: integrator
+  webhook:
+    path_secret: bot-c-path
+    secret_token: bot-c-secret
+  database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/.runlogs/local-multibot/state/bot-c.db

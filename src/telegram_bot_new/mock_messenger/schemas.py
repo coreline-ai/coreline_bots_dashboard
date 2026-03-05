@@ -55,6 +55,11 @@ class BotCatalogRoleUpdateRequest(BaseModel):
     role: CoworkRole
 
 
+class BotCatalogNameUpdateRequest(BaseModel):
+    bot_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+
 class ControlTowerRecoverRequest(BaseModel):
     bot_id: str = Field(min_length=1)
     token: Optional[str] = None

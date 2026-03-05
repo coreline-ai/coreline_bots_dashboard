@@ -734,6 +734,73 @@ def test_mock_bot_catalog_add_reuses_deleted_alpha_slot(tmp_path: Path) -> None:
     store.close()
 
 
+def test_mock_bot_catalog_add_persists_into_source_config_for_effective_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    config_dir = workspace / "config"
+    runtime_dir = workspace / ".runlogs" / "simulated"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    source_config = config_dir / "bots.multibot.yaml"
+    _write_bots_yaml(source_config)
+
+    source_payload = yaml.safe_load(source_config.read_text(encoding="utf-8")) or {}
+    effective_config = runtime_dir / "bots.effective.yaml"
+    effective_config.write_text(yaml.safe_dump(source_payload, sort_keys=False), encoding="utf-8")
+
+    monkeypatch.chdir(workspace)
+    store = MockMessengerStore(
+        db_path=str(workspace / "catalog-add-sync.db"),
+        data_dir=str(workspace / "catalog-add-sync-data"),
+    )
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(effective_config),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        created = client.post("/_mock/bot_catalog/add", json={"adapter": "codex"})
+        assert created.status_code == 200
+        payload = created.json()
+        assert payload["ok"] is True
+        assert payload["result"]["bot"]["bot_id"] == "bot-d"
+
+    store.close()
+
+    source_after = yaml.safe_load(source_config.read_text(encoding="utf-8")) or {}
+    source_ids = [str(item.get("bot_id")) for item in list(source_after.get("bots") or []) if isinstance(item, dict)]
+    assert "bot-d" in source_ids
+
+    # Simulate local-multibot restart regeneration: effective config is rebuilt from source config.
+    effective_config.write_text(
+        yaml.safe_dump({"bots": list(source_after.get("bots") or [])}, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    store_restarted = MockMessengerStore(
+        db_path=str(workspace / "catalog-add-sync-restarted.db"),
+        data_dir=str(workspace / "catalog-add-sync-restarted-data"),
+    )
+    app_restarted = create_app(
+        store=store_restarted,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(effective_config),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app_restarted) as client:
+        catalog = client.get("/_mock/bot_catalog")
+        assert catalog.status_code == 200
+        ids_after_restart = [row["bot_id"] for row in catalog.json()["result"]["bots"]]
+        assert "bot-d" in ids_after_restart
+    store_restarted.close()
+
+
 def test_mock_bot_catalog_delete_endpoint(tmp_path: Path) -> None:
     store = MockMessengerStore(
         db_path=str(tmp_path / "catalog-delete.db"),
@@ -840,6 +907,59 @@ def test_mock_bot_catalog_role_update_for_three_bots(tmp_path: Path) -> None:
             assert payload["ok"] is True
             assert payload["result"]["bot"]["bot_id"] == bot_id
             assert payload["result"]["bot"]["default_role"] == role
+    store.close()
+
+
+def test_mock_bot_catalog_name_update_endpoint(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-name.db"),
+        data_dir=str(tmp_path / "catalog-name-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        response = client.post("/_mock/bot_catalog/name", json={"bot_id": "bot-a", "name": "Alpha Bot"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["result"]["bot"]["bot_id"] == "bot-a"
+        assert payload["result"]["bot"]["name"] == "Alpha Bot"
+
+        catalog = client.get("/_mock/bot_catalog")
+        assert catalog.status_code == 200
+        bots = catalog.json()["result"]["bots"]
+        selected = next((row for row in bots if row["bot_id"] == "bot-a"), None)
+        assert selected is not None
+        assert selected["name"] == "Alpha Bot"
+    store.close()
+
+
+def test_mock_bot_catalog_name_update_endpoint_rejects_blank_name(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "catalog-name-blank.db"),
+        data_dir=str(tmp_path / "catalog-name-blank-data"),
+    )
+    bots_yaml = tmp_path / "bots.yaml"
+    _write_bots_yaml(bots_yaml)
+
+    app = create_app(
+        store=store,
+        allow_get_updates_with_webhook=False,
+        bots_config_path=str(bots_yaml),
+        embedded_host="127.0.0.1",
+        embedded_base_port=8600,
+    )
+    with TestClient(app) as client:
+        response = client.post("/_mock/bot_catalog/name", json={"bot_id": "bot-a", "name": "   "})
+        assert response.status_code == 400
     store.close()
 
 

@@ -1,6 +1,6 @@
 bots:
 - bot_id: bot-a
-  name: Bot A
+  name: 코덱스5.3
   mode: embedded
   telegram_token: mock_token_a
   adapter: codex
@@ -9,7 +9,7 @@ bots:
     path_secret: bot-a-path
     secret_token: bot-a-secret
 - bot_id: bot-b
-  name: Bot B
+  name: 제미나이
   mode: embedded
   telegram_token: mock_token_b
   adapter: codex
@@ -18,7 +18,7 @@ bots:
     path_secret: bot-b-path
     secret_token: bot-b-secret
 - bot_id: bot-c
-  name: Bot C
+  name: 클로드
   mode: embedded
   telegram_token: mock_token_c
   adapter: codex
@@ -26,3 +26,23 @@ bots:
   webhook:
     path_secret: bot-c-path
     secret_token: bot-c-secret
+- bot_id: bot-d
+  name: 코덱스5.3S
+  mode: embedded
+  telegram_token: mock_token_d
+  adapter: codex
+  default_role: implementer
+  database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/config/state/bot-d.db
+  webhook:
+    path_secret: bot-d-path
+    secret_token: bot-d-secret
+- bot_id: bot-e
+  name: 코덱스5.2
+  mode: embedded
+  telegram_token: mock_token_e
+  adapter: codex
+  default_role: implementer
+  database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/config/state/bot-e.db
+  webhook:
+    path_secret: bot-e-path
+    secret_token: bot-e-secret

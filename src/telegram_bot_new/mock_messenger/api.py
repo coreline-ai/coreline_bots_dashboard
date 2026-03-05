@@ -16,6 +16,7 @@ from telegram_bot_new.mock_messenger.bot_catalog import (
     create_dynamic_embedded_bot,
     delete_bot_from_catalog,
     set_bot_default_role,
+    set_bot_name,
 )
 from telegram_bot_new.mock_messenger.cowork import CoworkOrchestrator
 from telegram_bot_new.mock_messenger.debate import DebateOrchestrator
@@ -25,10 +26,15 @@ from telegram_bot_new.mock_messenger.routes import (
     register_orchestration_routes,
     register_ui_routes,
 )
-from telegram_bot_new.mock_messenger.runtime_profile import explain_unknown_bot_id, infer_runtime_profile
+from telegram_bot_new.mock_messenger.runtime_profile import (
+    explain_unknown_bot_id,
+    infer_runtime_profile,
+    resolve_source_config_path,
+)
 from telegram_bot_new.mock_messenger.schemas import (
     BotCatalogAddRequest,
     BotCatalogDeleteRequest,
+    BotCatalogNameUpdateRequest,
     BotCatalogRoleUpdateRequest,
     MockClearMessagesRequest,
     MockSendRequest,
@@ -188,6 +194,78 @@ def create_app(
             runtime_profile=_infer_runtime_profile(),
         )
 
+    def _secondary_catalog_path() -> Path | None:
+        primary = Path(bots_config_path).expanduser().resolve()
+        source = resolve_source_config_path(bots_config_path=primary)
+        if source is None:
+            return None
+        secondary = Path(source).expanduser().resolve()
+        if secondary == primary:
+            return None
+        return secondary
+
+    def _mirror_add_to_secondary_if_needed(created_entry: dict[str, Any]) -> None:
+        secondary = _secondary_catalog_path()
+        if secondary is None:
+            return
+        created_bot_id = str(created_entry.get("bot_id") or "").strip()
+        created_token = str(created_entry.get("telegram_token") or "").strip()
+        created_name = str(created_entry.get("name") or "").strip()
+        created_adapter = str(created_entry.get("adapter") or "codex").strip() or "codex"
+        mirrored = create_dynamic_embedded_bot(
+            bots_config_path=secondary,
+            adapter=created_adapter,
+            bot_id=created_bot_id,
+            token=created_token,
+            name=created_name,
+        )
+        mirrored_bot_id = str(mirrored.get("bot_id") or "").strip()
+        mirrored_token = str(mirrored.get("telegram_token") or "").strip()
+        if mirrored_bot_id != created_bot_id or mirrored_token != created_token:
+            raise ValueError(
+                "secondary catalog sync mismatch: "
+                f"expected ({created_bot_id}, {created_token}) "
+                f"but got ({mirrored_bot_id}, {mirrored_token})"
+            )
+
+    def _mirror_delete_to_secondary_if_needed(bot_id: str) -> None:
+        secondary = _secondary_catalog_path()
+        if secondary is None:
+            return
+        removed = delete_bot_from_catalog(bots_config_path=secondary, bot_id=bot_id)
+        if removed is None:
+            LOGGER.warning("secondary catalog missing bot during delete sync bot_id=%s path=%s", bot_id, secondary)
+            return
+        cleanup_deleted_bot_state_files(
+            bots_config_path=secondary,
+            bot_id=bot_id,
+            bot_entry=removed,
+        )
+
+    def _mirror_role_to_secondary_if_needed(bot_id: str, role: str) -> None:
+        secondary = _secondary_catalog_path()
+        if secondary is None:
+            return
+        updated = set_bot_default_role(
+            bots_config_path=secondary,
+            bot_id=bot_id,
+            role=role,
+        )
+        if not updated:
+            LOGGER.warning("secondary catalog missing bot during role sync bot_id=%s path=%s", bot_id, secondary)
+
+    def _mirror_name_to_secondary_if_needed(bot_id: str, name: str) -> None:
+        secondary = _secondary_catalog_path()
+        if secondary is None:
+            return
+        updated = set_bot_name(
+            bots_config_path=secondary,
+            bot_id=bot_id,
+            name=name,
+        )
+        if not updated:
+            LOGGER.warning("secondary catalog missing bot during name sync bot_id=%s path=%s", bot_id, secondary)
+
     @app.get("/_mock/runtime_profile")
     async def get_runtime_profile() -> dict[str, Any]:
         return {"ok": True, "result": _infer_runtime_profile()}
@@ -242,6 +320,7 @@ def create_app(
     @app.post("/_mock/bot_catalog/add")
     async def add_bot_catalog_entry(request: BotCatalogAddRequest = Body(default_factory=BotCatalogAddRequest)) -> dict[str, Any]:
         async with catalog_mutation_lock:
+            created: dict[str, Any] | None = None
             try:
                 created = create_dynamic_embedded_bot(
                     bots_config_path=bots_config_path,
@@ -250,7 +329,11 @@ def create_app(
                     token=request.token,
                     name=request.name,
                 )
+                _mirror_add_to_secondary_if_needed(created)
             except ValueError as error:
+                created_id = str((created or {}).get("bot_id") or "").strip()
+                if created_id:
+                    delete_bot_from_catalog(bots_config_path=bots_config_path, bot_id=created_id)
                 raise HTTPException(status_code=400, detail=str(error)) from error
             bots = build_bot_catalog(
                 bots_config_path=bots_config_path,
@@ -285,6 +368,7 @@ def create_app(
             removed_entry = delete_bot_from_catalog(bots_config_path=bots_config_path, bot_id=request.bot_id)
             if removed_entry is None:
                 raise HTTPException(status_code=404, detail=_unknown_bot_detail(request.bot_id))
+            _mirror_delete_to_secondary_if_needed(request.bot_id)
             stop_wait = await _wait_embedded_process_stopped_if_needed(
                 embedded_url=str((deleted_row or {}).get("embedded_url") or "").strip(),
                 bots_config_path=bots_config_path,
@@ -328,6 +412,35 @@ def create_app(
             )
             if not updated:
                 raise HTTPException(status_code=404, detail=_unknown_bot_detail(request.bot_id))
+            _mirror_role_to_secondary_if_needed(request.bot_id, request.role)
+            bots = build_bot_catalog(
+                bots_config_path=bots_config_path,
+                embedded_host=embedded_host,
+                embedded_base_port=embedded_base_port,
+            )
+        selected = next((row for row in bots if str(row.get("bot_id") or "") == request.bot_id), None)
+        return {
+            "ok": True,
+            "result": {
+                "bot": selected,
+                "total_bots": len(bots),
+            },
+        }
+
+    @app.post("/_mock/bot_catalog/name")
+    async def update_bot_catalog_name(request: BotCatalogNameUpdateRequest) -> dict[str, Any]:
+        normalized_name = str(request.name or "").strip()
+        if not normalized_name:
+            raise HTTPException(status_code=400, detail="name is required")
+        async with catalog_mutation_lock:
+            updated = set_bot_name(
+                bots_config_path=bots_config_path,
+                bot_id=request.bot_id,
+                name=normalized_name,
+            )
+            if not updated:
+                raise HTTPException(status_code=404, detail=_unknown_bot_detail(request.bot_id))
+            _mirror_name_to_secondary_if_needed(request.bot_id, normalized_name)
             bots = build_bot_catalog(
                 bots_config_path=bots_config_path,
                 embedded_host=embedded_host,

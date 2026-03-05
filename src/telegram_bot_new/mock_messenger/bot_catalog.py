@@ -236,6 +236,33 @@ def set_bot_default_role(*, bots_config_path: str | Path, bot_id: str, role: str
     return True
 
 
+def set_bot_name(*, bots_config_path: str | Path, bot_id: str, name: str) -> bool:
+    target = str(bot_id or "").strip()
+    normalized_name = str(name or "").strip()
+    if not target or not normalized_name:
+        return False
+
+    config_path = Path(bots_config_path).expanduser().resolve()
+    raw = _read_bots_file_raw(config_path)
+    bots = list(raw.get("bots") or [])
+
+    updated = False
+    for item in bots:
+        if not isinstance(item, dict):
+            continue
+        current_id = str(item.get("bot_id") or "").strip()
+        if current_id != target:
+            continue
+        item["name"] = normalized_name
+        updated = True
+        break
+    if not updated:
+        return False
+    raw["bots"] = bots
+    _write_bots_file_raw(config_path, raw)
+    return True
+
+
 def _read_bots_file_raw(path: Path) -> dict[str, Any]:
     if path.exists():
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
