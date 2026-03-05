@@ -6,6 +6,8 @@ const userIdInput = document.getElementById("user-id-input");
 const sessionProjectSelect = document.getElementById("session-project-select");
 const sessionSkillSelect = document.getElementById("session-skill-select");
 const sessionRoleSelect = document.getElementById("session-role-select");
+const sessionBotNameInput = document.getElementById("session-bot-name-input");
+const sessionBotNameSaveBtn = document.getElementById("session-bot-name-save-btn");
 const botIdInput = document.getElementById("bot-id-input");
 const messageInput = document.getElementById("message-input");
 const webhookUrlInput = document.getElementById("webhook-url-input");
@@ -373,6 +375,14 @@ function resolveProfileRole(profile, catalogRow) {
     return defaultRole;
   }
   return "implementer";
+}
+
+function resolveProfileBotName(profile, catalogRow) {
+  const nameFromCatalog = String(catalogRow?.name || "").trim();
+  if (nameFromCatalog) {
+    return nameFromCatalog;
+  }
+  return String(profile?.bot_id || "").trim();
 }
 
 function parseUnsafeUntil(value) {
@@ -1627,8 +1637,33 @@ function setProfileModelApplyBusy(profileId, busy) {
   renderSessionProjectControl();
 }
 
+function renderSessionBotNameControl() {
+  if (!sessionBotNameInput) {
+    return;
+  }
+  const profile = currentProfile();
+  if (!profile) {
+    sessionBotNameInput.value = "";
+    sessionBotNameInput.disabled = true;
+    if (sessionBotNameSaveBtn) {
+      sessionBotNameSaveBtn.disabled = true;
+    }
+    return;
+  }
+  const catalogRow = catalogByBotId.get(profile.bot_id);
+  const botName = resolveProfileBotName(profile, catalogRow);
+  const applying = isProfileModelApplyBusy(profile.profile_id);
+  const disabled = !profile.bot_id || applying || parallelSendBusy || debateBusy || coworkBusy;
+  sessionBotNameInput.value = botName;
+  sessionBotNameInput.disabled = disabled;
+  if (sessionBotNameSaveBtn) {
+    sessionBotNameSaveBtn.disabled = disabled;
+  }
+}
+
 function renderSessionProjectControl() {
   renderSessionSkillRoleControls();
+  renderSessionBotNameControl();
   if (!sessionProjectSelect) {
     return;
   }
@@ -1918,6 +1953,57 @@ async function applyProfileRole(profile, role) {
     saveState();
     appendBubble("meta", `${profile.label}: role 변경 실패: ${error.message}`);
     renderBotList(true);
+    return false;
+  } finally {
+    setProfileModelApplyBusy(profileId, false);
+  }
+}
+
+async function applyProfileBotName(profile, botName) {
+  const profileId = String(profile?.profile_id || "");
+  if (!profileId || isProfileModelApplyBusy(profileId)) {
+    return false;
+  }
+  const nextName = String(botName || "").trim();
+  if (!nextName) {
+    appendBubble("meta", `${profile.label}: 이름은 비워둘 수 없습니다.`);
+    return false;
+  }
+  const previousLabel = String(profile.label || "");
+  const previousCatalogName = resolveProfileBotName(profile, catalogByBotId.get(profile.bot_id));
+  setProfileModelApplyBusy(profileId, true);
+  try {
+    const response = await requestJson("/_mock/bot_catalog/name", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: String(profile.bot_id || ""),
+        name: nextName,
+      }),
+    });
+    const bot = response?.result?.bot || null;
+    const resolvedName = String(bot?.name || nextName).trim() || nextName;
+    const previousAutoLabel = `${previousCatalogName} 기본`;
+    const nextAutoLabel = `${resolvedName} 기본`;
+    for (const item of uiState.profiles) {
+      if (String(item?.bot_id || "") !== String(profile.bot_id || "")) {
+        continue;
+      }
+      if (item.profile_id === profileId || String(item.label || "").trim() === previousAutoLabel) {
+        item.label = nextAutoLabel;
+      }
+    }
+    await loadCatalog();
+    saveState();
+    hydrateProfileDialog();
+    renderBotList(true);
+    renderSessionProjectControl();
+    return true;
+  } catch (error) {
+    profile.label = previousLabel;
+    saveState();
+    appendBubble("meta", `${profile.label}: 이름 변경 실패: ${error.message}`);
+    renderBotList(true);
+    renderSessionProjectControl();
     return false;
   } finally {
     setProfileModelApplyBusy(profileId, false);
@@ -3466,23 +3552,53 @@ function looksLikeControlOnlyText(text) {
   );
 }
 
+function stripEventChunkMarker(text) {
+  const source = String(text || "").trim();
+  if (!source) {
+    return "";
+  }
+  return source.replace(/^\(\d+\/\d+\)\s*/, "").trim();
+}
+
 function extractTalkReplyFromTexts(texts) {
   const rows = Array.isArray(texts) ? texts : [];
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const chunk = String(rows[i] || "");
-    const lines = chunk.split(/\r?\n/);
-    for (let j = lines.length - 1; j >= 0; j -= 1) {
-      const line = lines[j];
-      const eventMatch = line.match(EVENT_LINE_RE);
-      if (!eventMatch) {
+  const assistantParts = [];
+  for (const row of rows) {
+    const parsed = parseEventEnvelope(String(row || ""));
+    if (!parsed.hasEventLines || !Array.isArray(parsed.assistantParts) || parsed.assistantParts.length === 0) {
+      continue;
+    }
+    for (const rawPart of parsed.assistantParts) {
+      const part = stripEventChunkMarker(rawPart);
+      if (!part) {
         continue;
       }
-      const eventType = String(eventMatch[3] || "").toLowerCase();
-      const detail = normalizeTalkReply(eventMatch[4] || "");
-      if (eventType === "assistant_message" && detail) {
-        return detail;
+      if (assistantParts.length === 0) {
+        assistantParts.push(part);
+        continue;
       }
+      const lastIndex = assistantParts.length - 1;
+      const last = String(assistantParts[lastIndex] || "");
+      if (!last) {
+        assistantParts[lastIndex] = part;
+        continue;
+      }
+      if (part === last) {
+        continue;
+      }
+      if (part.startsWith(last)) {
+        assistantParts[lastIndex] = part;
+        continue;
+      }
+      if (last.startsWith(part)) {
+        continue;
+      }
+      assistantParts.push(part);
     }
+  }
+  const merged = normalizeTalkReply(assistantParts.join("\n"));
+  if (merged && !looksLikeControlOnlyText(merged)) {
+    return merged;
   }
 
   for (let i = rows.length - 1; i >= 0; i -= 1) {
@@ -3498,7 +3614,7 @@ function extractTalkReplyFromTexts(texts) {
         if (eventType !== "assistant_message") {
           return "";
         }
-        return String(eventMatch[4] || "").trim();
+        return stripEventChunkMarker(eventMatch[4] || "");
       })
       .filter((line) => Boolean(line))
       .join("\n");
@@ -5596,6 +5712,48 @@ if (profileForm) {
     refresh();
   });
 });
+
+async function submitSessionBotNameChange() {
+  if (!sessionBotNameInput) {
+    return;
+  }
+  const profile = currentProfile();
+  if (!profile) {
+    renderSessionProjectControl();
+    return;
+  }
+  const catalogRow = catalogByBotId.get(profile.bot_id);
+  const currentName = resolveProfileBotName(profile, catalogRow);
+  const nextName = String(sessionBotNameInput.value || "").trim();
+  if (!nextName) {
+    sessionBotNameInput.value = currentName;
+    appendBubble("meta", "bot 이름은 비워둘 수 없습니다.");
+    return;
+  }
+  if (nextName === currentName) {
+    return;
+  }
+  const ok = await applyProfileBotName(profile, nextName);
+  if (!ok) {
+    renderSessionProjectControl();
+  }
+}
+
+if (sessionBotNameSaveBtn) {
+  sessionBotNameSaveBtn.addEventListener("click", () => {
+    void submitSessionBotNameChange();
+  });
+}
+
+if (sessionBotNameInput) {
+  sessionBotNameInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    void submitSessionBotNameChange();
+  });
+}
 
 if (sessionProjectSelect) {
   sessionProjectSelect.addEventListener("change", async () => {

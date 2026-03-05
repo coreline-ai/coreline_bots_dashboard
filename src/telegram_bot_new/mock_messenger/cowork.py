@@ -225,6 +225,7 @@ class CoworkOrchestrator:
             self._validate_scenario_contract(scenario=scenario)
             self._scenario_cache[cowork_id] = dict(scenario)
             self._project_meta_cache[cowork_id] = {"project_id": str(scenario.get("project_id") or cowork_id)}
+            self._ensure_artifact_workspace(cowork_id)
             self._active_tasks[cowork_id] = asyncio.create_task(self._run_cowork(cowork_id), name=f"cowork:{cowork_id}")
 
         snapshot = self.get_cowork_snapshot(cowork_id)
@@ -413,10 +414,14 @@ class CoworkOrchestrator:
                 self._store.finish_cowork(cowork_id=cowork_id, status="failed", error_summary="participants must be >= 2")
                 return
             self._store.set_cowork_running(cowork_id=cowork_id)
+            artifact_dir = self._ensure_artifact_workspace(cowork_id)
 
             if cowork.get("fresh_session"):
                 await self._broadcast_control_command(participants, "/new")
             await self._broadcast_control_command(participants, "/stop")
+            if self._cool_down_sec > 0:
+                await asyncio.sleep(self._cool_down_sec)
+            await self._broadcast_project_command(participants, artifact_dir)
             if self._cool_down_sec > 0:
                 await asyncio.sleep(self._cool_down_sec)
 
@@ -565,12 +570,14 @@ class CoworkOrchestrator:
         if self._is_stop_requested(cowork_id):
             self._store.finish_cowork(cowork_id=cowork_id, status="stopped")
             return None
+        artifact_dir = self._artifact_dir(cowork_id)
         scenario = self._scenario_for_cowork(cowork_id=cowork_id, task_text=task_text)
         prompt_text = self._build_planning_prompt(
             task_text=task_text,
             participants=participants,
             planner=planner,
             scenario=scenario,
+            artifact_dir=artifact_dir,
         )
         stage_id = self._store.insert_cowork_stage_start(
             cowork_id=cowork_id,
@@ -605,6 +612,7 @@ class CoworkOrchestrator:
                     scenario=scenario,
                     feedback_reasons=feedback_reasons,
                     round_no=round_no,
+                    artifact_dir=artifact_dir,
                 )
             )
             outcome = await self._run_turn_with_recovery(
@@ -721,6 +729,7 @@ class CoworkOrchestrator:
         if self._is_stop_requested(cowork_id):
             self._store.finish_cowork(cowork_id=cowork_id, status="stopped")
             return None
+        artifact_dir = self._artifact_dir(cowork_id)
         planning_meta = self._planning_meta_cache.get(cowork_id, {})
         design_doc_path = Path(str(planning_meta.get("design_doc_path") or "design_spec.md")).name
         qa_plan_path = Path(str(planning_meta.get("qa_plan_path") or "qa_test_plan.md")).name
@@ -795,6 +804,7 @@ class CoworkOrchestrator:
                         plan=plan,
                         assignee=assignee,
                         owner_role=owner_role,
+                        artifact_dir=artifact_dir,
                         design_doc_path=design_doc_path,
                         qa_plan_path=qa_plan_path,
                         design_doc_excerpt=design_doc_excerpt,
@@ -963,10 +973,12 @@ class CoworkOrchestrator:
             self._store.finish_cowork(cowork_id=cowork_id, status="stopped")
             return None
 
+        artifact_dir = self._artifact_dir(cowork_id)
         prompt_text = self._build_integration_prompt(
             task_text=task_text,
             integrator=integrator,
             execution_rows=execution_rows,
+            artifact_dir=artifact_dir,
         )
         stage_id = self._store.insert_cowork_stage_start(
             cowork_id=cowork_id,
@@ -1026,11 +1038,13 @@ class CoworkOrchestrator:
             self._store.finish_cowork(cowork_id=cowork_id, status="stopped")
             return None
 
+        artifact_dir = self._artifact_dir(cowork_id)
         prompt_text = self._build_finalization_prompt(
             task_text=task_text,
             controller=controller,
             integration_text=integration_text,
             execution_rows=execution_rows,
+            artifact_dir=artifact_dir,
         )
         stage_id = self._store.insert_cowork_stage_start(
             cowork_id=cowork_id,
@@ -1086,6 +1100,10 @@ class CoworkOrchestrator:
                 await self._send_participant_message(participant, command)
             except Exception:
                 continue
+
+    async def _broadcast_project_command(self, participants: list[dict[str, Any]], artifact_dir: Path) -> None:
+        command = f"/project {artifact_dir}"
+        await self._broadcast_control_command(participants, command)
 
     async def _send_participant_message(self, participant: dict[str, Any], text: str) -> None:
         token = str(participant.get("token") or "")
@@ -2003,12 +2021,14 @@ class CoworkOrchestrator:
         participants: list[dict[str, Any]],
         planner: dict[str, Any],
         scenario: dict[str, Any] | None = None,
+        artifact_dir: str | Path | None = None,
     ) -> str:
         actor = str(planner.get("label") or planner.get("bot_id") or "Planner")
         roster = ", ".join(
             f"{str(row.get('label') or row.get('bot_id'))}:{str(row.get('role') or 'implementer')}" for row in participants
         )
         normalized_scenario = dict(scenario) if isinstance(scenario, dict) and scenario else self._extract_scenario_inputs(task_text)
+        artifact_contract = self._build_artifact_contract_block(artifact_dir)
         return (
             "당신은 멀티봇 협업의 Planner입니다.\n"
             f"요청: {task_text}\n"
@@ -2027,6 +2047,7 @@ class CoworkOrchestrator:
             f"- constraints: {', '.join(normalized_scenario['constraints'])}\n"
             f"- deadline: {normalized_scenario['deadline']}\n"
             f"- priority: {normalized_scenario['priority']}\n\n"
+            f"{artifact_contract}"
             "[계약]\n"
             "1) 산출물은 Implementer/QA가 즉시 수행 가능한 작업으로 분해합니다.\n"
             "2) 작업은 id/owner_role/parallel_group/dependencies/artifacts/estimated_hours를 반드시 포함합니다.\n"
@@ -2078,6 +2099,7 @@ class CoworkOrchestrator:
         scenario: dict[str, Any] | None,
         feedback_reasons: list[str],
         round_no: int,
+        artifact_dir: str | Path | None = None,
     ) -> str:
         feedback = "\n".join(f"- {row}" for row in feedback_reasons[:8]) or "- 스키마/검토 기준 미충족"
         base = self._build_planning_prompt(
@@ -2085,6 +2107,7 @@ class CoworkOrchestrator:
             participants=participants,
             planner=planner,
             scenario=scenario,
+            artifact_dir=artifact_dir,
         )
         return (
             f"{base}\n\n"
@@ -2285,6 +2308,7 @@ class CoworkOrchestrator:
         task_no: int,
         plan: dict[str, Any],
         assignee: dict[str, Any],
+        artifact_dir: str | Path | None = None,
         design_doc_path: str | None = None,
         qa_plan_path: str | None = None,
         design_doc_excerpt: str | None = None,
@@ -2304,6 +2328,7 @@ class CoworkOrchestrator:
         planning_excerpt = str(planning_context_excerpt or "").strip().replace("\n", " ")
         if len(planning_excerpt) > 260:
             planning_excerpt = f"{planning_excerpt[:260]}..."
+        artifact_contract = self._build_artifact_contract_block(artifact_dir)
         return (
             "당신은 멀티봇 협업의 Implementer입니다.\n"
             "Legacy alias: Executor\n"
@@ -2322,6 +2347,7 @@ class CoworkOrchestrator:
             f"- 계획 컨텍스트: {planning_excerpt or '요약 없음'}\n"
             f"- 설계 핵심: {design_excerpt or '요약 없음'}\n"
             f"- QA 핵심: {qa_excerpt or '요약 없음'}\n\n"
+            f"{artifact_contract}"
             "[계약]\n"
             "1) 승인된 설계문서를 기준으로 goal/done_criteria에 직접 대응되는 결과만 제출합니다.\n"
             "2) 근거 없는 완료 선언을 금지합니다.\n"
@@ -2347,6 +2373,7 @@ class CoworkOrchestrator:
         plan: dict[str, Any],
         assignee: dict[str, Any],
         owner_role: str,
+        artifact_dir: str | Path | None = None,
         design_doc_path: str | None = None,
         qa_plan_path: str | None = None,
         design_doc_excerpt: str | None = None,
@@ -2365,6 +2392,7 @@ class CoworkOrchestrator:
         planning_excerpt = str(planning_context_excerpt or "").strip().replace("\n", " ")
         if len(planning_excerpt) > 260:
             planning_excerpt = f"{planning_excerpt[:260]}..."
+        artifact_contract = self._build_artifact_contract_block(artifact_dir)
         if normalized_owner == "qa":
             return (
                 "당신은 멀티봇 협업의 QA입니다.\n"
@@ -2381,6 +2409,7 @@ class CoworkOrchestrator:
                 f"- 계획 컨텍스트: {planning_excerpt or '요약 없음'}\n"
                 f"- 설계 핵심: {design_excerpt or '요약 없음'}\n"
                 f"- QA 핵심: {qa_excerpt or '요약 없음'}\n\n"
+                f"{artifact_contract}"
                 "[출력 형식]\n"
                 "QA결론: (PASS 또는 FAIL)\n"
                 "결함요약: (없으면 '없음')\n"
@@ -2405,6 +2434,7 @@ class CoworkOrchestrator:
                 f"- 계획 컨텍스트: {planning_excerpt or '요약 없음'}\n"
                 f"- 설계 핵심: {design_excerpt or '요약 없음'}\n"
                 f"- QA 핵심: {qa_excerpt or '요약 없음'}\n\n"
+                f"{artifact_contract}"
                 "[출력 형식]\n"
                 "게이트결론: (APPROVED 또는 REJECTED)\n"
                 "게이트체크리스트: ...\n"
@@ -2416,6 +2446,7 @@ class CoworkOrchestrator:
             task_no=task_no,
             plan=plan,
             assignee=assignee,
+            artifact_dir=artifact_dir,
             design_doc_path=design_ref,
             qa_plan_path=qa_ref,
             design_doc_excerpt=design_excerpt,
@@ -2443,14 +2474,17 @@ class CoworkOrchestrator:
         task_text: str,
         integrator: dict[str, Any],
         execution_rows: list[dict[str, Any]],
+        artifact_dir: str | Path | None = None,
     ) -> str:
         execution_summary = self._build_execution_summary(execution_rows)
+        artifact_contract = self._build_artifact_contract_block(artifact_dir)
         return (
             "당신은 멀티봇 협업의 Integrator입니다. (QA 역할)\n"
             f"원본 요청: {task_text}\n"
             f"담당자: {str(integrator.get('label') or integrator.get('bot_id') or '')}\n\n"
             "실행 결과 요약:\n"
             f"{execution_summary}\n\n"
+            f"{artifact_contract}"
             "[계약]\n"
             "1) 구현 결과를 QA 관점으로 PASS/FAIL 판정합니다.\n"
             "2) 결함이 있으면 재현절차와 수정요청을 반드시 작성합니다.\n"
@@ -2472,11 +2506,13 @@ class CoworkOrchestrator:
         controller: dict[str, Any],
         integration_text: str,
         execution_rows: list[dict[str, Any]],
+        artifact_dir: str | Path | None = None,
     ) -> str:
         execution_summary = self._build_execution_summary(execution_rows)
         clipped_integration = integration_text.strip()
         if len(clipped_integration) > 1800:
             clipped_integration = f"{clipped_integration[:1800]}..."
+        artifact_contract = self._build_artifact_contract_block(artifact_dir)
         return (
             "당신은 멀티봇 협업의 Controller입니다.\n"
             f"원본 요청: {task_text}\n"
@@ -2485,6 +2521,7 @@ class CoworkOrchestrator:
             f"{clipped_integration}\n\n"
             "실행 결과 요약:\n"
             f"{execution_summary}\n\n"
+            f"{artifact_contract}"
             "[계약]\n"
             "1) 최종결론에 실행 가능/불가/조건부 여부를 명시합니다.\n"
             "2) 실행체크리스트는 검증 가능한 항목으로 작성합니다.\n"
@@ -3002,6 +3039,23 @@ class CoworkOrchestrator:
     def _artifact_dir(self, cowork_id: str) -> Path:
         return self._artifact_root / self._project_id_for_cowork(cowork_id) / cowork_id
 
+    def _ensure_artifact_workspace(self, cowork_id: str) -> Path:
+        root = self._artifact_dir(cowork_id)
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    @staticmethod
+    def _build_artifact_contract_block(artifact_dir: str | Path | None) -> str:
+        normalized = str(artifact_dir or "").strip()
+        if not normalized:
+            return ""
+        return (
+            "[산출물 경로 계약]\n"
+            f"- 이번 코워크 결과 경로: {normalized}\n"
+            "- 새 파일/수정 파일은 위 경로 기준으로 생성합니다.\n"
+            "- 상대 경로를 사용할 때도 위 경로를 기준으로 해석합니다.\n\n"
+        )
+
     def _artifact_read_dir(self, cowork_id: str) -> Path:
         preferred = self._artifact_dir(cowork_id)
         if preferred.is_dir():
@@ -3036,8 +3090,7 @@ class CoworkOrchestrator:
         snapshot = self.get_cowork_snapshot(cowork_id)
         if snapshot is None:
             return
-        root = self._artifact_dir(cowork_id)
-        root.mkdir(parents=True, exist_ok=True)
+        root = self._ensure_artifact_workspace(cowork_id)
 
         result_json = root / "result.json"
         result_json.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -29,6 +29,7 @@ def _build_orchestrator(tmp_path: Path) -> tuple[CoworkOrchestrator, MockMesseng
 def test_cowork_stage_prompts_include_contract_sections(tmp_path: Path) -> None:
     orchestrator, store = _build_orchestrator(tmp_path)
     try:
+        artifact_dir = tmp_path / "result" / "project-a" / "cowork-1"
         participants = [
             {"label": "Bot A", "bot_id": "bot-a", "role": "planner"},
             {"label": "Bot B", "bot_id": "bot-b", "role": "executor"},
@@ -39,29 +40,37 @@ def test_cowork_stage_prompts_include_contract_sections(tmp_path: Path) -> None:
             task_text="꽃집 랜더링 페이지 구현",
             participants=participants,
             planner=participants[0],
+            artifact_dir=artifact_dir,
         )
         execution = orchestrator._build_execution_prompt(
             task_text="꽃집 랜더링 페이지 구현",
             task_no=1,
             plan={"title": "UI 구현", "goal": "화면 구현", "done_criteria": "링크 제공", "risk": "누락"},
             assignee=participants[1],
+            artifact_dir=artifact_dir,
         )
         integration = orchestrator._build_integration_prompt(
             task_text="꽃집 랜더링 페이지 구현",
             integrator=participants[2],
             execution_rows=[],
+            artifact_dir=artifact_dir,
         )
         finalization = orchestrator._build_finalization_prompt(
             task_text="꽃집 랜더링 페이지 구현",
             controller=participants[3],
             integration_text="통합요약: 완료",
             execution_rows=[],
+            artifact_dir=artifact_dir,
         )
 
         assert "[계약]" in planning and "[출력 규격]" in planning
         assert "[계약]" in execution and "증빙:" in execution and "[출력 형식]" in execution
         assert "[계약]" in integration and "QA승인:" in integration and "[출력 형식]" in integration
         assert "[계약]" in finalization and "증빙요약:" in finalization and "[출력 형식]" in finalization
+        assert str(artifact_dir) in planning
+        assert str(artifact_dir) in execution
+        assert str(artifact_dir) in integration
+        assert str(artifact_dir) in finalization
     finally:
         store.close()
 

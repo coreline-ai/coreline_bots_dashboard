@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,107 @@ def _plan_task_line(
         },
         ensure_ascii=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_cowork_start_creates_artifact_workspace_and_sets_project_command(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-project-sync.db"),
+        data_dir=str(tmp_path / "cowork-project-sync-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+
+        lowered = text.lower()
+        if "검토 대상 planning_tasks" in text:
+            body = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+        elif "planner" in lowered:
+            body = "\n".join(
+                [
+                    _plan_task_line(task_id="T1", title="요구 분석", goal="요구 정리", done_criteria="요구 목록 작성", risk="누락"),
+                    _plan_task_line(task_id="T2", title="구현", goal="기능 구현", done_criteria="동작 확인", risk="회귀", parallel_group="G2"),
+                ]
+            )
+        elif "integrator" in lowered:
+            body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        elif "qa 리포트" in lowered:
+            body = (
+                "최종결론: 실행 가능\n"
+                "실행체크리스트: 검증 완료\n"
+                "실행링크: 없음\n"
+                "증빙요약: 로그 확인\n"
+                "즉시실행항목(Top3): 1) 테스트 2) 리뷰 3) 배포"
+            )
+        else:
+            body = "결과요약: 완료\n검증: 충족\n실행링크: 없음\n증빙: 로그\n테스트요청: 없음\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(store=store, send_user_message=sender, poll_interval_sec=0.02, cool_down_sec=0.0)
+    req = _make_request(task="프로젝트 경로 동기화 테스트")
+    participants = [
+        {
+            "profile_id": "p-a",
+            "label": "Bot A",
+            "bot_id": "bot-a",
+            "token": "token-a",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "controller",
+            "adapter": "codex",
+        },
+        {
+            "profile_id": "p-b",
+            "label": "Bot B",
+            "bot_id": "bot-b",
+            "token": "token-b",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "planner",
+            "adapter": "codex",
+        },
+        {
+            "profile_id": "p-c",
+            "label": "Bot C",
+            "bot_id": "bot-c",
+            "token": "token-c",
+            "chat_id": 1001,
+            "user_id": 9001,
+            "role": "implementer",
+            "adapter": "codex",
+        },
+    ]
+    artifact_dir: Path | None = None
+    project_dir = Path.cwd() / "result" / "test-project"
+    try:
+        started = await orchestrator.start_cowork(request=req, participants=participants)
+        cowork_id = str(started["cowork_id"])
+        artifact_dir = Path.cwd() / "result" / "test-project" / cowork_id
+        assert artifact_dir.is_dir()
+
+        done = await _wait_terminal(orchestrator, cowork_id)
+        assert done["status"] == "completed"
+
+        project_command = f"/project {artifact_dir}"
+        for row in participants:
+            messages = store.get_messages(token=str(row["token"]), chat_id=int(row["chat_id"]), limit=50)
+            assert any(
+                message.get("direction") == "user" and str(message.get("text") or "") == project_command
+                for message in messages
+            )
+        assert (artifact_dir / "result.json").is_file()
+    finally:
+        await orchestrator.shutdown()
+        store.close()
+        if artifact_dir is not None and artifact_dir.exists():
+            shutil.rmtree(artifact_dir, ignore_errors=True)
+        if project_dir.exists() and not any(project_dir.iterdir()):
+            project_dir.rmdir()
 
 
 @pytest.mark.asyncio
