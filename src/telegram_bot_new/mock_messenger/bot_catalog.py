@@ -13,7 +13,17 @@ from telegram_bot_new.settings import GlobalSettings, get_global_settings, load_
 
 EVENT_LINE_RE = re.compile(r"^\[(\d+|~)\]\[(\d{2}:\d{2}:\d{2})\]\[([a-z_]+)\]\s?(.*)$", re.IGNORECASE)
 SUPPORTED_AGENTS = ("codex", "gemini", "claude", "echo")
-SUPPORTED_COWORK_ROLES = ("controller", "planner", "executor", "integrator")
+SUPPORTED_COWORK_ROLES = ("controller", "planner", "implementer", "qa", "executor", "integrator")
+ROLE_ALIASES = {"executor": "implementer", "integrator": "qa"}
+
+
+def _normalize_cowork_role(role: str) -> str:
+    normalized = str(role or "").strip().lower()
+    if normalized in ROLE_ALIASES:
+        return ROLE_ALIASES[normalized]
+    if normalized in {"controller", "planner", "implementer", "qa"}:
+        return normalized
+    return "implementer"
 
 
 def mask_token(token: str) -> str:
@@ -42,7 +52,7 @@ def build_bot_catalog(
         if not bot_id:
             continue
         raw_role = str(item.get("default_role") or "").strip().lower()
-        role_by_bot_id[bot_id] = raw_role if raw_role in SUPPORTED_COWORK_ROLES else "executor"
+        role_by_bot_id[bot_id] = _normalize_cowork_role(raw_role)
 
     try:
         bots = load_bots_config(config_path, settings, allow_env_fallback=False)
@@ -64,7 +74,7 @@ def build_bot_catalog(
                 "mode": bot.mode,
                 "token": bot.telegram_token,
                 "token_masked": mask_token(bot.telegram_token),
-                "default_role": role_by_bot_id.get(str(bot.bot_id), "executor"),
+                "default_role": role_by_bot_id.get(str(bot.bot_id), "implementer"),
                 "default_adapter": bot.adapter,
                 "default_models": {
                     "codex": bot.codex.model,
@@ -139,7 +149,7 @@ def create_dynamic_embedded_bot(
         "mode": "embedded",
         "telegram_token": resolved_token,
         "adapter": adapter if adapter in SUPPORTED_AGENTS else "codex",
-        "default_role": "executor",
+        "default_role": "implementer",
         "database_url": _build_dynamic_bot_database_url(config_path, resolved_bot_id),
         "webhook": {
             "path_secret": f"{resolved_bot_id}-path",
@@ -201,8 +211,8 @@ def cleanup_deleted_bot_state_files(
 
 def set_bot_default_role(*, bots_config_path: str | Path, bot_id: str, role: str) -> bool:
     target = str(bot_id or "").strip()
-    normalized_role = str(role or "").strip().lower()
-    if not target or normalized_role not in SUPPORTED_COWORK_ROLES:
+    normalized_role = _normalize_cowork_role(role)
+    if not target:
         return False
 
     config_path = Path(bots_config_path).expanduser().resolve()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -38,7 +39,7 @@ def _write_bots_yaml(path: Path) -> None:
                 "    mode: embedded",
                 "    telegram_token: mock_token_c",
                 "    adapter: claude",
-                "    default_role: executor",
+                "    default_role: implementer",
                 "    webhook:",
                 "      path_secret: bot-c-path",
                 "      secret_token: bot-c-secret",
@@ -93,6 +94,39 @@ def _wait_cowork_terminal(client: TestClient, cowork_id: str, timeout_sec: float
     return last
 
 
+def _plan_task_line(*, task_id: str, title: str, goal: str, done_criteria: str, risk: str, parallel_group: str = "G1") -> str:
+    return json.dumps(
+        {
+            "id": task_id,
+            "title": title,
+            "goal": goal,
+            "done_criteria": done_criteria,
+            "risk": risk,
+            "owner_role": "implementer",
+            "parallel_group": parallel_group,
+            "dependencies": [],
+            "artifacts": ["design_spec.md"],
+            "estimated_hours": 1.0,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _scenario_payload(task: str) -> dict[str, Any]:
+    return {
+        "project_id": "mock-cowork-api",
+        "objective": task,
+        "brand_tone": "실무형",
+        "target_audience": "개발/운영 담당자",
+        "core_cta": "즉시 실행",
+        "required_sections": ["planning", "implementation", "qa", "final"],
+        "forbidden_elements": ["근거 없는 완료 선언"],
+        "constraints": ["검증 가능한 증빙 필수"],
+        "deadline": "2026-03-31",
+        "priority": "P1",
+    }
+
+
 def _make_client(
     tmp_path: Path,
     *,
@@ -127,8 +161,21 @@ def test_cowork_start_active_stop_and_complete_flow(tmp_path: Path) -> None:
             if "planner" in lowered:
                 reply = "\n".join(
                     [
-                        '{"title":"요구사항 정리","goal":"요구사항 구조화","done_criteria":"핵심 조건 3개","risk":"누락 가능성"}',
-                        '{"title":"API 설계","goal":"엔드포인트 제안","done_criteria":"스키마 정의","risk":"호환성"}',
+                        _plan_task_line(
+                            task_id="T1",
+                            title="요구사항 정리",
+                            goal="요구사항 구조화",
+                            done_criteria="핵심 조건 3개",
+                            risk="누락 가능성",
+                        ),
+                        _plan_task_line(
+                            task_id="T2",
+                            title="API 설계",
+                            goal="엔드포인트 제안",
+                            done_criteria="스키마 정의",
+                            risk="호환성",
+                            parallel_group="G2",
+                        ),
                     ]
                 )
             elif "integrator" in lowered:
@@ -155,6 +202,7 @@ def test_cowork_start_active_stop_and_complete_flow(tmp_path: Path) -> None:
                 "max_turn_sec": 10,
                 "fresh_session": True,
                 "keep_partial_on_error": True,
+                "scenario": _scenario_payload("대시보드 기능 개선"),
             },
         )
         assert started.status_code == 200
@@ -191,6 +239,7 @@ def test_cowork_start_rejects_duplicate_active(tmp_path: Path) -> None:
                 "max_parallel": 2,
                 "max_turn_sec": 10,
                 "fresh_session": True,
+                "scenario": _scenario_payload("first task"),
             },
         )
         assert first.status_code == 200
@@ -204,6 +253,7 @@ def test_cowork_start_rejects_duplicate_active(tmp_path: Path) -> None:
                 "max_parallel": 2,
                 "max_turn_sec": 10,
                 "fresh_session": True,
+                "scenario": _scenario_payload("second task"),
             },
         )
         assert second.status_code == 409
@@ -229,6 +279,7 @@ def test_cowork_validation_and_role_update_endpoint(tmp_path: Path) -> None:
                 "profiles": _profiles_payload()[:1],
                 "max_parallel": 2,
                 "max_turn_sec": 10,
+                "scenario": _scenario_payload("invalid"),
             },
         )
         assert too_few.status_code in {400, 422}
@@ -242,14 +293,15 @@ def test_cowork_validation_and_role_update_endpoint(tmp_path: Path) -> None:
                 "profiles": bad_profiles,
                 "max_parallel": 2,
                 "max_turn_sec": 10,
+                "scenario": _scenario_payload("invalid"),
             },
         )
         assert mismatch.status_code == 400
         assert "token mismatch" in mismatch.json()["detail"]
 
-        role_update = client.post("/_mock/bot_catalog/role", json={"bot_id": "bot-b", "role": "integrator"})
+        role_update = client.post("/_mock/bot_catalog/role", json={"bot_id": "bot-b", "role": "qa"})
         assert role_update.status_code == 200
-        assert role_update.json()["result"]["bot"]["default_role"] == "integrator"
+        assert role_update.json()["result"]["bot"]["default_role"] == "qa"
 
         missing_role = client.post("/_mock/bot_catalog/role", json={"bot_id": "bot-x", "role": "planner"})
         assert missing_role.status_code == 404

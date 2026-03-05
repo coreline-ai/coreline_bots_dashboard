@@ -1070,7 +1070,7 @@ class MockMessengerStore:
                         str(participant.get("token") or ""),
                         str(participant.get("chat_id") or ""),
                         str(participant.get("user_id") or ""),
-                        str(participant.get("role") or "executor"),
+                        str(participant.get("role") or "implementer"),
                         str(participant.get("adapter") or "") or None,
                         now_ms,
                     ),

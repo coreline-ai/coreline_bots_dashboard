@@ -102,8 +102,9 @@ const COWORK_PANEL_COLLAPSE_STORAGE_KEY = "mock_messenger_cowork_panel_hidden";
 const TOWER_PANEL_COLLAPSE_STORAGE_KEY = "mock_messenger_tower_panel_hidden";
 const FIXED_THEME = "light";
 const SCROLL_BOTTOM_THRESHOLD = 24;
-const AUTO_REFRESH_INTERVAL_MS = 1000;
-const SIDEBAR_DIAGNOSTICS_REFRESH_MS = 5000;
+const AUTO_REFRESH_INTERVAL_MS = 2000;
+const SIDEBAR_DIAGNOSTICS_REFRESH_MS = 12000;
+const ORCHESTRATION_STATUS_POLL_INTERVAL_MS = 1500;
 const TALK_VIEWER_MAX_ENTRIES = 500;
 const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const EVENT_LINE_RE = /^\[(\d+|~)\]\[(\d{2}:\d{2}:\d{2})\]\[([a-z_]+)\]\s?(.*)$/i;
@@ -156,7 +157,7 @@ const PLAY_COMMAND_KEYS = [
   "court",
 ];
 const SUPPORTED_PROVIDER_OPTIONS = ["codex", "gemini", "claude"];
-const SUPPORTED_ROLE_OPTIONS = ["controller", "planner", "executor", "integrator"];
+const SUPPORTED_ROLE_OPTIONS = ["controller", "planner", "implementer", "qa"];
 const FALLBACK_AVAILABLE_MODELS = {
   codex: [
     "gpt-5.3-codex",
@@ -350,10 +351,16 @@ function resolveProfileProject(profile, diagnostics) {
 
 function normalizeRole(value) {
   const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "executor") {
+    return "implementer";
+  }
+  if (normalized === "integrator") {
+    return "qa";
+  }
   if (SUPPORTED_ROLE_OPTIONS.includes(normalized)) {
     return normalized;
   }
-  return "executor";
+  return "implementer";
 }
 
 function resolveProfileRole(profile, catalogRow) {
@@ -365,7 +372,7 @@ function resolveProfileRole(profile, catalogRow) {
   if (defaultRole) {
     return defaultRole;
   }
-  return "executor";
+  return "implementer";
 }
 
 function parseUnsafeUntil(value) {
@@ -949,7 +956,7 @@ function upsertCurrentProfileFromInputs() {
     profile.selected_model = "";
     profile.selected_skill = "";
     profile.selected_project = "";
-    profile.selected_role = "executor";
+    profile.selected_role = "implementer";
   }
   saveState();
 }
@@ -1328,7 +1335,7 @@ function renderCoworkPanel(snapshot) {
   }
   if (coworkCurrentStage) {
     const actorText = currentActor
-      ? `${String(currentActor.label || currentActor.bot_id || "bot")} (${String(currentActor.role || "executor")})`
+      ? `${String(currentActor.label || currentActor.bot_id || "bot")} (${String(currentActor.role || "implementer")})`
       : "none";
     coworkCurrentStage.textContent = `현재 단계: ${currentStage} · actor=${actorText}`;
   }
@@ -1677,7 +1684,7 @@ function renderSessionSkillRoleControls() {
       const option = document.createElement("option");
       option.value = roleValue;
       option.textContent = roleValue;
-      option.selected = roleValue === "executor";
+      option.selected = roleValue === "implementer";
       sessionRoleSelect.appendChild(option);
     }
     sessionRoleSelect.disabled = true;
@@ -1889,7 +1896,7 @@ async function applyProfileRole(profile, role) {
   if (!profileId || isProfileModelApplyBusy(profileId)) {
     return false;
   }
-  const previousRole = String(profile.selected_role || "executor");
+  const previousRole = String(profile.selected_role || "implementer");
   const nextRole = normalizeRole(role);
   setProfileModelApplyBusy(profileId, true);
   try {
@@ -2186,7 +2193,7 @@ function ensureInitialProfileFromParams() {
     selected_model: "",
     selected_skill: "",
     selected_project: "",
-    selected_role: normalizeRole(defaultBot?.default_role || "executor")
+    selected_role: normalizeRole(defaultBot?.default_role || "implementer")
   });
   uiState.selected_profile_id = uiState.profiles[0].profile_id;
 }
@@ -2274,7 +2281,7 @@ function reconcileProfilesWithCatalog() {
       selected_model: "",
       selected_skill: "",
       selected_project: "",
-      selected_role: normalizeRole(row?.default_role || "executor"),
+      selected_role: normalizeRole(row?.default_role || "implementer"),
     });
     existingByBotId.add(botId);
     changed = true;
@@ -3326,7 +3333,7 @@ function parseRoundOrchestrationCommand(rawText, config) {
     defaultRounds = 2,
     roundsMin = 1,
     roundsMax = 8,
-    defaultMaxTurnSec = 90,
+    defaultMaxTurnSec = 60,
     maxTurnMin = 10,
     maxTurnMax = 240,
   } = config || {};
@@ -3612,7 +3619,7 @@ function parseDebateCommand(rawText) {
     defaultRounds: 3,
     roundsMin: 1,
     roundsMax: 10,
-    defaultMaxTurnSec: 90,
+    defaultMaxTurnSec: 60,
     maxTurnMin: 10,
     maxTurnMax: 300,
   });
@@ -3762,7 +3769,7 @@ function parseCoworkCommand(rawText) {
   }
 
   let maxParallel = 3;
-  let maxTurnSec = 90;
+  let maxTurnSec = 60;
   let freshSession = true;
   let keepPartialOnError = true;
 
@@ -3969,7 +3976,7 @@ function startDebatePolling(debateId) {
   void pollDebateStatus(id);
   debatePollingTimer = setInterval(() => {
     void pollDebateStatus(id);
-  }, 1000);
+  }, ORCHESTRATION_STATUS_POLL_INTERVAL_MS);
 }
 
 function startCoworkPolling(coworkId) {
@@ -3981,7 +3988,7 @@ function startCoworkPolling(coworkId) {
   void pollCoworkStatus(id);
   coworkPollingTimer = setInterval(() => {
     void pollCoworkStatus(id);
-  }, 1000);
+  }, ORCHESTRATION_STATUS_POLL_INTERVAL_MS);
 }
 
 async function recoverActiveDebate() {
@@ -4113,12 +4120,38 @@ async function runCoworkFlow(targets, parsedCommand) {
     return;
   }
 
+  const buildCoworkScenario = (taskText) => {
+    const text = String(taskText || "").trim();
+    const slug = text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "cowork-project";
+    const deadline = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    return {
+      project_id: slug,
+      objective: text || "요구사항 기반 결과물 제공",
+      brand_tone: "신뢰감 있는 프리미엄",
+      target_audience: "온라인 구매 의사가 있는 일반 고객",
+      core_cta: "지금 시작하기",
+      required_sections: ["hero", "product", "trust", "cta"],
+      forbidden_elements: ["과장된 허위 문구"],
+      constraints: ["예산/기간/품질 제약을 명시적으로 관리"],
+      deadline,
+      priority: "P1",
+    };
+  };
+
   const payload = {
     task: parsedCommand.task,
     max_parallel: parsedCommand.max_parallel,
     max_turn_sec: parsedCommand.max_turn_sec,
     fresh_session: parsedCommand.fresh_session,
     keep_partial_on_error: parsedCommand.keep_partial_on_error,
+    scenario:
+      parsedCommand && typeof parsedCommand.scenario === "object" && parsedCommand.scenario
+        ? parsedCommand.scenario
+        : buildCoworkScenario(parsedCommand.task),
     profiles: targets.map((profile) => ({
       profile_id: String(profile.profile_id),
       label: String(profile.label || profile.bot_id || "Bot"),
@@ -4126,7 +4159,7 @@ async function runCoworkFlow(targets, parsedCommand) {
       token: String(profile.token || ""),
       chat_id: Number(profile.chat_id),
       user_id: Number(profile.user_id),
-      role: normalizeRole(profile.selected_role || catalogByBotId.get(profile.bot_id)?.default_role || "executor"),
+      role: normalizeRole(profile.selected_role || catalogByBotId.get(profile.bot_id)?.default_role || "implementer"),
     })),
   };
 
@@ -4704,7 +4737,7 @@ async function runPlayFlow(targets, parsedCommand, modeKey) {
           turnNo,
           totalTurns,
         });
-        const turn = await runPlayTurn(profile, prompt, Number(parsedCommand.max_turn_sec || 90), rowLabel, speakerMeta);
+        const turn = await runPlayTurn(profile, prompt, Number(parsedCommand.max_turn_sec || 60), rowLabel, speakerMeta);
         if (turn.status === "PASS") {
           passCount += 1;
           transcript.push({ speaker, text: turn.reply });
@@ -4744,7 +4777,7 @@ async function runPlayFlow(targets, parsedCommand, modeKey) {
       const turn = await runPlayTurn(
         judge,
         verdictPrompt,
-        Number(parsedCommand.max_turn_sec || 90),
+        Number(parsedCommand.max_turn_sec || 60),
         judgeRowLabel,
         speakerMeta
       );
@@ -5255,7 +5288,7 @@ async function addProfileAutomatically() {
     selected_model: "",
     selected_skill: "",
     selected_project: "",
-    selected_role: normalizeRole(created.default_role || "executor"),
+    selected_role: normalizeRole(created.default_role || "implementer"),
   };
 
   uiState.profiles.push(profile);
@@ -5323,7 +5356,7 @@ function addProfileFromDialog() {
     selected_model: "",
     selected_skill: "",
     selected_project: "",
-    selected_role: normalizeRole(row?.default_role || "executor")
+    selected_role: normalizeRole(row?.default_role || "implementer")
   };
   uiState.profiles.push(profile);
   uiState.selected_profile_id = profile.profile_id;

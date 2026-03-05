@@ -39,6 +39,7 @@ async def apply_failure_policy(
     append_audit_log_fn,
     looks_like_watchdog_timeout_error_fn,
     looks_like_gemini_quota_error_fn,
+    looks_like_gemini_human_input_required_error_fn,
     looks_like_codex_access_limited_error_fn,
     timed_out: bool,
     routed_provider_changed: bool,
@@ -111,6 +112,40 @@ async def apply_failure_policy(
             except Exception:
                 logger.exception(
                     "failed to auto-switch gemini model after quota failure bot=%s session=%s",
+                    bot_id,
+                    session.session_id,
+                )
+
+    if failed and provider == "gemini" and looks_like_gemini_human_input_required_error_fn(error_text, error_stderr):
+        fallback_provider = "codex"
+        fallback_model = "gpt-5"
+        current_provider = str(getattr(session, "adapter_name", "") or "").strip().lower()
+        current_model = str(getattr(session, "adapter_model", "") or "").strip() or None
+        if current_provider != fallback_provider or current_model != fallback_model:
+            try:
+                await repository.set_session_adapter(
+                    session_id=session.session_id,
+                    adapter_name=fallback_provider,
+                    adapter_model=fallback_model,
+                    now=now_ms_fn(),
+                )
+                await append_audit_log_fn(
+                    repository=repository,
+                    bot_id=bot_id,
+                    chat_id=str(turn.chat_id),
+                    session_id=turn.session_id,
+                    action="session.auto_fallback_provider",
+                    result="success",
+                    detail=f"{current_provider or 'unknown'}:{current_model or 'default'}->{fallback_provider}:{fallback_model}",
+                    now=now_ms_fn(),
+                )
+                next_error_text = (
+                    f"{(error_text or 'gemini requires human input').strip()} "
+                    f"(auto-switched provider to {fallback_provider}/{fallback_model}; retry the request)"
+                )
+            except Exception:
+                logger.exception(
+                    "failed to auto-switch provider after gemini human-input requirement bot=%s session=%s",
                     bot_id,
                     session.session_id,
                 )

@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 
 from telegram_bot_new.adapters import get_adapter
@@ -34,6 +35,7 @@ SKIP_DIR_NAMES = {
     ".mypy_cache",
 }
 RUN_TURN_TIMEOUT_SEC = max(15, int(os.getenv("RUN_TURN_TIMEOUT_SEC", "90")))
+RUN_WORKER_CONCURRENCY = max(1, int(os.getenv("RUN_WORKER_CONCURRENCY", "2")))
 
 
 def _now_ms() -> int:
@@ -66,6 +68,30 @@ def _looks_like_codex_access_limited_error(message: str | None, stderr: str | No
             "potentially suspicious activity",
             "related to cybersecurity",
             "access to gpt-5.3-codex-premium",
+        )
+    )
+
+
+def _looks_like_gemini_human_input_required_error(message: str | None, stderr: str | None) -> bool:
+    haystack = " ".join(part for part in [message or "", stderr or ""] if part).lower()
+    if not haystack:
+        return False
+    return any(
+        marker in haystack
+        for marker in (
+            "requires human input",
+            "human input required",
+            "interactive confirmation",
+            "approval required",
+            "press enter",
+            "login required",
+            "sign in",
+            "oauth",
+            "authenticate",
+            "manual step required",
+            "브라우저에서 인증",
+            "로그인 필요",
+            "휴먼 입력",
         )
     )
 
@@ -366,45 +392,76 @@ async def run_cli_worker(
     sent_artifacts_by_chat: dict[str, set[str]] = {}
     heartbeat_interval_ms = 5000
     next_heartbeat_ms = 0
+    max_concurrency = max(1, int(RUN_WORKER_CONCURRENCY))
+    active_tasks: set[asyncio.Task[None]] = set()
 
-    while not stop_event.is_set():
-        now = _now_ms()
-        try:
-            if now >= next_heartbeat_ms:
-                await repository.increment_runtime_metric(
+    try:
+        while not stop_event.is_set():
+            now = _now_ms()
+            try:
+                if now >= next_heartbeat_ms:
+                    await repository.increment_runtime_metric(
+                        bot_id=bot_id,
+                        metric_key="worker_heartbeat.run_worker",
+                        now=now,
+                    )
+                    next_heartbeat_ms = now + heartbeat_interval_ms
+
+                _reap_completed_run_tasks(active_tasks, bot_id=bot_id)
+                if len(active_tasks) >= max_concurrency:
+                    await asyncio.sleep(poll_interval_ms / 1000)
+                    continue
+
+                job = await repository.lease_next_run_job(
                     bot_id=bot_id,
-                    metric_key="worker_heartbeat.run_worker",
+                    owner=owner,
                     now=now,
+                    lease_duration_ms=lease_ms,
                 )
-                next_heartbeat_ms = now + heartbeat_interval_ms
+                if job is None:
+                    await asyncio.sleep(poll_interval_ms / 1000)
+                    continue
 
-            job = await repository.lease_next_run_job(
-                bot_id=bot_id,
-                owner=owner,
-                now=now,
-                lease_duration_ms=lease_ms,
-            )
-            if job is None:
-                await asyncio.sleep(poll_interval_ms / 1000)
-                continue
+                task = asyncio.create_task(
+                    _process_run_job(
+                        job=job,
+                        bot_id=bot_id,
+                        repository=repository,
+                        telegram_client=telegram_client,
+                        streamer=streamer,
+                        summary_service=summary_service,
+                        default_models_by_provider=default_models_by_provider,
+                        default_sandbox=default_sandbox,
+                        lease_ms=lease_ms,
+                        sent_artifacts_by_chat=sent_artifacts_by_chat,
+                    ),
+                    name=f"run-job:{bot_id}:{job.id}",
+                )
+                active_tasks.add(task)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("run worker loop error bot=%s", bot_id)
+                await asyncio.sleep(1)
+    finally:
+        for task in active_tasks:
+            if not task.done():
+                task.cancel()
+        for task in list(active_tasks):
+            with suppress(asyncio.CancelledError):
+                await task
 
-            await _process_run_job(
-                job=job,
-                bot_id=bot_id,
-                repository=repository,
-                telegram_client=telegram_client,
-                streamer=streamer,
-                summary_service=summary_service,
-                default_models_by_provider=default_models_by_provider,
-                default_sandbox=default_sandbox,
-                lease_ms=lease_ms,
-                sent_artifacts_by_chat=sent_artifacts_by_chat,
-            )
+
+def _reap_completed_run_tasks(tasks: set[asyncio.Task[None]], *, bot_id: str) -> None:
+    done = [task for task in tasks if task.done()]
+    for task in done:
+        tasks.discard(task)
+        try:
+            exception = task.exception()
         except asyncio.CancelledError:
-            raise
-        except Exception:
-            LOGGER.exception("run worker loop error bot=%s", bot_id)
-            await asyncio.sleep(1)
+            continue
+        if exception is not None:
+            LOGGER.exception("run job task failed bot=%s", bot_id, exc_info=exception)
 
 
 async def _process_run_job(
@@ -442,6 +499,7 @@ async def _process_run_job(
         augment_prompt_for_generation_request_fn=_augment_prompt_for_generation_request,
         looks_like_watchdog_timeout_error_fn=_looks_like_watchdog_timeout_error,
         looks_like_gemini_quota_error_fn=_looks_like_gemini_quota_error,
+        looks_like_gemini_human_input_required_error_fn=_looks_like_gemini_human_input_required_error,
         looks_like_codex_access_limited_error_fn=_looks_like_codex_access_limited_error,
         looks_like_image_request_fn=_looks_like_image_request,
         looks_like_html_request_fn=_looks_like_html_request,

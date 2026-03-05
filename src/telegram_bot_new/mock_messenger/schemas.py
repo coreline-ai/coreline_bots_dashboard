@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class MockSendRequest(BaseModel):
@@ -35,7 +35,19 @@ class BotCatalogDeleteRequest(BaseModel):
     bot_id: str = Field(min_length=1)
 
 
-CoworkRole = Literal["controller", "planner", "executor", "integrator"]
+CoworkRole = Literal["controller", "planner", "implementer", "qa", "executor", "integrator"]
+SCENARIO_REQUIRED_KEYS = (
+    "project_id",
+    "objective",
+    "brand_tone",
+    "target_audience",
+    "core_cta",
+    "required_sections",
+    "forbidden_elements",
+    "constraints",
+    "deadline",
+    "priority",
+)
 
 
 class BotCatalogRoleUpdateRequest(BaseModel):
@@ -64,7 +76,7 @@ class DebateStartRequest(BaseModel):
     topic: str = Field(min_length=1)
     profiles: list[DebateProfileRef] = Field(min_length=2)
     rounds: int = Field(default=3, ge=1, le=10)
-    max_turn_sec: int = Field(default=90, ge=10, le=300)
+    max_turn_sec: int = Field(default=60, ge=10, le=300)
     fresh_session: bool = True
 
 
@@ -145,16 +157,33 @@ class CoworkProfileRef(BaseModel):
     token: str = Field(min_length=1)
     chat_id: int
     user_id: int
-    role: CoworkRole = "executor"
+    role: CoworkRole = "implementer"
 
 
 class CoworkStartRequest(BaseModel):
     task: str = Field(min_length=1)
     profiles: list[CoworkProfileRef] = Field(min_length=2)
     max_parallel: int = Field(default=3, ge=1, le=8)
-    max_turn_sec: int = Field(default=90, ge=10, le=300)
+    max_turn_sec: int = Field(default=60, ge=10, le=300)
     fresh_session: bool = True
     keep_partial_on_error: bool = True
+    scenario: dict[str, Any]
+
+    @field_validator("scenario")
+    @classmethod
+    def validate_scenario_contract(cls, value: dict[str, Any]) -> dict[str, Any]:
+        missing: list[str] = []
+        for key in SCENARIO_REQUIRED_KEYS:
+            field_value = value.get(key)
+            if isinstance(field_value, list):
+                normalized = [str(item).strip() for item in field_value if str(item).strip()]
+                if not normalized:
+                    missing.append(key)
+            elif not str(field_value or "").strip():
+                missing.append(key)
+        if missing:
+            raise ValueError(f"scenario contract missing required fields: {', '.join(missing)}")
+        return value
 
 
 class CoworkCurrentActor(BaseModel):
@@ -228,6 +257,11 @@ class CoworkFinalReport(BaseModel):
     execution_checklist: Optional[str] = None
     execution_link: Optional[str] = None
     evidence_summary: Optional[str] = None
+    qa_conclusion: Optional[str] = None
+    qa_signoff: Optional[str] = None
+    defect_summary: Optional[str] = None
+    repro_steps: Optional[str] = None
+    defects: list[dict[str, Any]] = Field(default_factory=list)
     completion_status: Optional[str] = None
     quality_gate_failures: list[str] = Field(default_factory=list)
     immediate_actions_top3: list[str] = Field(default_factory=list)
@@ -258,7 +292,20 @@ class CoworkStatusResponse(BaseModel):
     started_at: Optional[int] = None
     finished_at: Optional[int] = None
     error_summary: Optional[str] = None
-    current_stage: Optional[Literal["planning", "execution", "integration", "finalization"]] = None
+    current_stage: Optional[
+        Literal[
+            "intake",
+            "planning",
+            "planning_review",
+            "execution",
+            "implementation",
+            "integration",
+            "qa",
+            "rework",
+            "controller_gate",
+            "finalization",
+        ]
+    ] = None
     current_actor: Optional[CoworkCurrentActor] = None
     stages: list[CoworkStageView] = Field(default_factory=list)
     tasks: list[CoworkTaskView] = Field(default_factory=list)

@@ -91,6 +91,31 @@ class _GeminiQuotaErrorAdapter:
         return None
 
 
+class _GeminiHumanInputRequiredAdapter:
+    async def _emit_human_input_required_error(self):
+        yield AdapterEvent(
+            seq=1,
+            ts="2026-01-01T00:00:00+00:00",
+            event_type="error",
+            payload={
+                "message": "Gemini requires human input: open browser and sign in via OAuth.",
+                "stderr": "interactive confirmation required",
+            },
+        )
+        yield AdapterEvent(seq=2, ts="2026-01-01T00:00:01+00:00", event_type="turn_completed", payload={"status": "error"})
+
+    async def run_new_turn(self, request):
+        async for event in self._emit_human_input_required_error():
+            yield event
+
+    async def run_resume_turn(self, request):
+        async for event in self._emit_human_input_required_error():
+            yield event
+
+    def extract_thread_id(self, event: AdapterEvent):
+        return None
+
+
 class _CodexAccessLimitedAdapter:
     async def _emit_access_limited_error(self):
         yield AdapterEvent(
@@ -195,6 +220,7 @@ class _Repository:
         self.last_set_unsafe_until: int | None | object = object()
         self.thread_updates: list[str | None] = []
         self.set_model_calls: list[str] = []
+        self.set_adapter_calls: list[str] = []
         self.turn_cancelled = False
 
     async def get_turn(self, *, turn_id: str):
@@ -244,6 +270,18 @@ class _Repository:
     async def set_session_model(self, *, session_id: str, adapter_model: str | None, now: int) -> None:
         self.adapter_model = adapter_model
         self.set_model_calls.append(adapter_model or "default")
+
+    async def set_session_adapter(
+        self,
+        *,
+        session_id: str,
+        adapter_name: str,
+        adapter_model: str | None,
+        now: int,
+    ) -> None:
+        self.adapter_name = adapter_name
+        self.adapter_model = adapter_model
+        self.set_adapter_calls.append(f"{adapter_name}:{adapter_model or 'default'}")
 
     async def complete_run_job_and_turn(self, *, job_id: str, turn_id: str, assistant_text: str, now: int) -> None:
         self.completed = True
@@ -569,6 +607,30 @@ async def test_process_run_job_applies_gemini_quota_fallback(monkeypatch: pytest
     assert repo.failed is True
     assert repo.set_model_calls == ["gemini-2.5-flash"]
     assert "auto-switched model to gemini-2.5-flash" in repo.failed_error
+
+
+@pytest.mark.asyncio
+async def test_process_run_job_applies_gemini_human_input_provider_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("telegram_bot_new.workers.run_worker.get_adapter", lambda _name: _GeminiHumanInputRequiredAdapter())
+    repo = _Repository(adapter_name="gemini", adapter_model="gemini-2.5-pro")
+    streamer = _Streamer()
+
+    await _process_run_job(
+        job=LeasedRunJob(id="job-10a", turn_id="turn-10a", chat_id="1001"),
+        bot_id="bot-1",
+        repository=repo,
+        telegram_client=_TelegramClientNoop(),
+        streamer=streamer,
+        summary_service=_SummaryService(),
+        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_sandbox="workspace-write",
+        lease_ms=30_000,
+        sent_artifacts_by_chat={},
+    )
+
+    assert repo.failed is True
+    assert repo.set_adapter_calls == ["codex:gpt-5"]
+    assert "auto-switched provider to codex/gpt-5" in repo.failed_error
 
 
 @pytest.mark.asyncio

@@ -270,7 +270,7 @@ def test_mock_bot_catalog_endpoint(tmp_path: Path) -> None:
         bots = payload["result"]["bots"]
         assert len(bots) == 3
         assert bots[0]["bot_id"] == "bot-a"
-        assert bots[0]["default_role"] == "executor"
+        assert bots[0]["default_role"] == "implementer"
         assert bots[0]["embedded_url"] == "http://127.0.0.1:8600"
         assert bots[0]["available_models"]["gemini"] == ["gemini-2.5-pro", "gemini-2.5-flash"]
         assert bots[0]["available_models"]["codex"] == [
@@ -831,7 +831,7 @@ def test_mock_bot_catalog_role_update_for_three_bots(tmp_path: Path) -> None:
         role_updates = {
             "bot-a": "controller",
             "bot-b": "planner",
-            "bot-c": "integrator",
+            "bot-c": "qa",
         }
         for bot_id, role in role_updates.items():
             response = client.post("/_mock/bot_catalog/role", json={"bot_id": bot_id, "role": role})

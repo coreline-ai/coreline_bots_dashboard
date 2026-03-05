@@ -173,7 +173,7 @@ def register_orchestration_routes(
             raise HTTPException(status_code=404, detail=f"unknown cowork_id: {cowork_id}")
         return {"ok": True, "result": result}
 
-    @app.get("/_mock/cowork/{cowork_id}/artifact/{filename}")
+    @app.get("/_mock/cowork/{cowork_id}/artifact/{filename:path}")
     async def get_cowork_artifact_file(cowork_id: str, filename: str) -> FileResponse:
         path = cowork_orchestrator.resolve_artifact_path(cowork_id, filename)
         if path is None:

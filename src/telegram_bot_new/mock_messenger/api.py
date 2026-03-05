@@ -84,7 +84,7 @@ def create_app(
     cowork_orchestrator = CoworkOrchestrator(
         store=store,
         send_user_message=_enqueue_and_dispatch_user_message,
-        artifact_root=Path.cwd() / "cowork",
+        artifact_root=Path.cwd() / "result",
     )
     app.state.debate_orchestrator = debate_orchestrator
     app.state.cowork_orchestrator = cowork_orchestrator

@@ -57,8 +57,8 @@ class DebateOrchestrator:
         *,
         store: MockMessengerStore,
         send_user_message: DebateSendFn,
-        poll_interval_sec: float = 1.0,
-        cool_down_sec: float = 1.0,
+        poll_interval_sec: float = 0.25,
+        cool_down_sec: float = 0.2,
     ) -> None:
         self._store = store
         self._send_user_message = send_user_message
@@ -184,7 +184,7 @@ class DebateOrchestrator:
 
             transcript: list[dict[str, Any]] = []
             rounds_total = int(debate.get("rounds_total") or 1)
-            max_turn_sec = int(debate.get("max_turn_sec") or 90)
+            max_turn_sec = int(debate.get("max_turn_sec") or 60)
 
             for round_no in range(1, rounds_total + 1):
                 # Final round is a single synthesis turn by the starter bot (position=1).
