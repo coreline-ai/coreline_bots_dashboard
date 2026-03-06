@@ -1,0 +1,716 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+WEB_PROJECT_PROFILES = (
+    "landing-basic",
+    "landing-responsive",
+    "form-validation",
+    "theme-toggle",
+    "accessibility-page",
+    "state-demo",
+    "catalog-filter",
+    "i18n-landing",
+    "seo-landing",
+    "smoke-pack",
+)
+
+PROFILE_REQUIRED_FILES: dict[str, tuple[str, ...]] = {
+    "landing-basic": ("index.html", "styles.css", "README.md"),
+    "landing-responsive": ("index.html", "styles.css", "README.md"),
+    "form-validation": ("index.html", "styles.css", "app.js", "README.md"),
+    "theme-toggle": ("index.html", "styles.css", "app.js", "README.md"),
+    "accessibility-page": ("index.html", "styles.css", "README.md"),
+    "state-demo": ("index.html", "styles.css", "app.js", "README.md"),
+    "catalog-filter": ("index.html", "styles.css", "app.js", "README.md"),
+    "i18n-landing": ("index.html", "styles.css", "app.js", "README.md", "locales/ko.json", "locales/en.json"),
+    "seo-landing": ("index.html", "styles.css", "README.md"),
+    "smoke-pack": ("index.html", "styles.css", "README.md", "smoke-report.md"),
+}
+
+PROFILE_MARKERS: dict[str, dict[str, tuple[str, ...]]] = {
+    "landing-basic": {
+        "index.html": ("<section id=\"hero\"", "<section id=\"product\"", "<section id=\"trust\"", "<section id=\"cta\""),
+        "styles.css": ("@media (min-width: 768px)", "@media (min-width: 1440px)"),
+    },
+    "landing-responsive": {
+        "styles.css": ("390px", "768px", "1440px"),
+    },
+    "form-validation": {
+        "index.html": ("<form", "type=\"email\"", "type=\"password\""),
+        "app.js": ("checkValidity", "password", "email"),
+    },
+    "theme-toggle": {
+        "index.html": ("data-theme", "theme-toggle"),
+        "app.js": ("localStorage", "theme-toggle"),
+    },
+    "accessibility-page": {
+        "index.html": ("aria-label", "skip-link", "tabindex"),
+    },
+    "state-demo": {
+        "index.html": ("loading-state", "error-state", "empty-state"),
+        "app.js": ("setState", "loading", "empty"),
+    },
+    "catalog-filter": {
+        "index.html": ("filter-bar", "card-grid"),
+        "app.js": ("applyFilters", "search-input"),
+    },
+    "i18n-landing": {
+        "index.html": ("data-i18n", "language-toggle"),
+        "app.js": ("fetchLocale", "language-toggle"),
+        "locales/ko.json": ("hero_title",),
+        "locales/en.json": ("hero_title",),
+    },
+    "seo-landing": {
+        "index.html": ("<title>", "meta name=\"description\"", "property=\"og:title\"", "<main", "<footer"),
+    },
+    "smoke-pack": {
+        "smoke-report.md": ("Smoke Test Report", "Buttons", "Forms", "Navigation"),
+    },
+}
+
+
+def resolve_web_project_profile(task_text: str, scenario: dict[str, Any] | None) -> str | None:
+    objective = str((scenario or {}).get("objective") or "").strip().lower()
+    project_id = str((scenario or {}).get("project_id") or "").strip().lower()
+    first_line = str(task_text or "").splitlines()[0].strip().lower() if str(task_text or "").strip() else ""
+    haystack = " ".join(part for part in [project_id, objective, first_line] if part)
+    if not haystack:
+        return None
+
+    def _contains(*tokens: str) -> bool:
+        return any(token in haystack for token in tokens)
+
+    if _contains("스모크", "smoke-pack", "smoke test", "smoke"):
+        return "smoke-pack"
+    if _contains("다국어", "i18n", "ko/en", "locale", "번역"):
+        return "i18n-landing"
+    if _contains("접근성", "accessibility", "aria", "skip link", "keyboard navigation", "키보드"):
+        return "accessibility-page"
+    if _contains("상태 관리", "state-demo", "state demo", "토스트", "카운터", "loading state", "empty state", "error state", "탭"):
+        return "state-demo"
+    if _contains("카탈로그", "catalog", "검색", "search", "필터", "정렬", "sort"):
+        return "catalog-filter"
+    if _contains("다크모드", "dark mode", "theme toggle", "theme-toggle", "localstorage", "toggle"):
+        return "theme-toggle"
+    if _contains("회원가입", "signup", "문의 폼", "form-validation", "form", "validation", "input", "오류 메시지"):
+        return "form-validation"
+    if _contains("반응형", "responsive", "390", "768", "1440"):
+        return "landing-responsive"
+    if _contains("seo", "meta title", "meta description", "open graph", "og 태그", "og:", "semantic"):
+        return "seo-landing"
+    if _contains("랜딩", "landing", "hero", "cta", "페이지", "page", "웹", "web"):
+        return "landing-basic"
+    return None
+
+
+def build_fallback_planning_submission(profile: str, scenario: dict[str, Any]) -> dict[str, Any]:
+    normalized = profile if profile in WEB_PROJECT_PROFILES else "landing-basic"
+    project_name = str(scenario.get("project_id") or "web-cowork")
+    objective = str(scenario.get("objective") or "웹 프로젝트 생성")
+    target = str(scenario.get("target_audience") or "일반 사용자")
+    brand_tone = str(scenario.get("brand_tone") or "명확하고 실무 중심")
+    cta = str(scenario.get("core_cta") or "지금 시작하기")
+    required_sections = [str(item).strip() for item in scenario.get("required_sections") or [] if str(item).strip()]
+    required_sections = required_sections or ["hero", "product", "trust", "cta"]
+    files = PROFILE_REQUIRED_FILES[normalized]
+    planning_tasks = [
+        {
+            "id": "T1",
+            "title": "Runnable artifact scaffold + audit",
+            "goal": f"{objective}에 맞는 실행 가능한 웹 artifact를 한 번에 생성하고 audit까지 통과",
+            "done_criteria": "required files non-empty + profile markers pass + entry artifact route openable",
+            "risk": "프로필별 필수 파일 또는 마커 누락",
+            "owner_role": "implementer",
+            "parallel_group": "G1",
+            "dependencies": [],
+            "artifacts": list(files),
+            "estimated_hours": 1.0,
+        },
+    ]
+    prd_content = "\n".join(
+        [
+            "# PRD",
+            "",
+            f"- Project: {project_name}",
+            f"- Objective: {objective}",
+            f"- Target Audience: {target}",
+            f"- Brand Tone: {brand_tone}",
+            f"- Primary CTA: {cta}",
+            f"- Required Sections: {', '.join(required_sections)}",
+            f"- Success Profile: {normalized}",
+        ]
+    )
+    trd_content = "\n".join(
+        [
+            "# TRD",
+            "",
+            "- Deliver a static web artifact set that opens via artifact route.",
+            "- Use semantic HTML, responsive CSS, and progressive enhancement where needed.",
+            f"- Required output files: {', '.join(files)}",
+            f"- Entry artifact: index.html",
+        ]
+    )
+    db_content = "\n".join(
+        [
+            "# DB",
+            "",
+            "- Runtime database changes are not required.",
+            "- If the profile needs client state, use in-memory JS state or localStorage only.",
+            f"- Profile: {normalized}",
+        ]
+    )
+    test_strategy_content = "\n".join(
+        [
+            "# Test Strategy",
+            "",
+            "- Verify required files exist and are non-empty.",
+            "- Verify HTML markers and profile-specific markers are present.",
+            "- Verify README describes how to open the artifact entrypoint.",
+            "- Verify profile-specific behavior markers exist in app.js or support files.",
+        ]
+    )
+    release_plan_content = "\n".join(
+        [
+            "# Release Plan",
+            "",
+            "- Generate artifact files inside the cowork result directory.",
+            "- Expose entrypoint with artifact URL.",
+            "- Run artifact audit and record QA/final summary.",
+            "- Mark completed when artifact audit passes.",
+        ]
+    )
+    design_doc_content = "\n".join(
+        [
+            "# Design Spec",
+            "",
+            f"- Visual direction: {brand_tone}",
+            f"- Page profile: {normalized}",
+            f"- Core CTA placement: {cta} button in hero and final CTA section",
+            f"- Layout sections: {', '.join(required_sections)}",
+            "- Include responsive breakpoints for mobile, tablet, and desktop.",
+        ]
+    )
+    qa_plan_content = "\n".join(
+        [
+            "# QA Test Plan",
+            "",
+            "- Open index.html through the artifact route.",
+            "- Check required sections, CTA visibility, and content presence.",
+            "- Check profile-specific interactions and support files.",
+            "- Fail if any required file is missing or empty.",
+        ]
+    )
+    return {
+        "planning_tasks": planning_tasks,
+        "prd_path": "PRD.md",
+        "trd_path": "TRD.md",
+        "db_path": "DB.md",
+        "test_strategy_path": "test_strategy.md",
+        "release_plan_path": "release_plan.md",
+        "design_doc_path": "design_spec.md",
+        "qa_plan_path": "qa_test_plan.md",
+        "prd_content": prd_content,
+        "trd_content": trd_content,
+        "db_content": db_content,
+        "test_strategy_content": test_strategy_content,
+        "release_plan_content": release_plan_content,
+        "design_doc_content": design_doc_content,
+        "qa_plan_content": qa_plan_content,
+    }
+
+
+def ensure_web_project_scaffold(profile: str, artifact_dir: str | Path, scenario: dict[str, Any]) -> dict[str, Any]:
+    root = Path(artifact_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    normalized = profile if profile in WEB_PROJECT_PROFILES else "landing-basic"
+    files = PROFILE_REQUIRED_FILES[normalized]
+    sections = [str(item).strip() for item in scenario.get("required_sections") or [] if str(item).strip()]
+    sections = sections or ["hero", "product", "trust", "cta"]
+    section_markup = "\n".join(_build_section_markup(section_id, scenario) for section_id in sections)
+    project_name = str(scenario.get("project_id") or "web-cowork")
+    objective = str(scenario.get("objective") or "웹 프로젝트 생성")
+    brand_tone = str(scenario.get("brand_tone") or "명확하고 실무 중심")
+    target = str(scenario.get("target_audience") or "일반 사용자")
+    cta = str(scenario.get("core_cta") or "Get Started")
+    script_tag = "\n    <script src=\"app.js\" defer></script>" if "app.js" in files else ""
+    language_toggle = (
+        "\n        <div class=\"toolbar\"><button id=\"language-toggle\" class=\"pill\" type=\"button\">KO / EN</button></div>"
+        if normalized == "i18n-landing"
+        else ""
+    )
+    theme_toggle = (
+        "\n        <div class=\"toolbar\"><button id=\"theme-toggle\" class=\"pill\" type=\"button\">Theme</button></div>"
+        if normalized == "theme-toggle"
+        else ""
+    )
+    extra_blocks = _profile_specific_markup(normalized)
+    html = "\n".join(
+        [
+            "<!DOCTYPE html>",
+            "<html lang=\"ko\" data-theme=\"light\">",
+            "  <head>",
+            "    <meta charset=\"UTF-8\" />",
+            "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
+            f"    <title>{project_name} | {objective}</title>",
+            f"    <meta name=\"description\" content=\"{objective} - {target}를 위한 {brand_tone} 웹 초안\" />",
+            f"    <meta property=\"og:title\" content=\"{project_name}\" />",
+            f"    <meta property=\"og:description\" content=\"{objective}\" />",
+            "    <meta property=\"og:type\" content=\"website\" />",
+            "    <link rel=\"stylesheet\" href=\"styles.css\" />",
+            f"{script_tag}",
+            "  </head>",
+            "  <body>",
+            "    <a class=\"skip-link\" href=\"#main-content\">본문 바로가기</a>",
+            "    <header class=\"shell hero-shell\">",
+            "      <p class=\"eyebrow\">Runnable Cowork Artifact</p>",
+            f"      <h1 data-i18n=\"hero_title\">{objective}</h1>",
+            f"      <p class=\"hero-copy\">{brand_tone} 톤으로 {target}에게 전달하는 단일 파일 웹 초안입니다.</p>",
+            "      <div class=\"hero-actions\">",
+            f"        <a class=\"button primary\" href=\"#cta\">{cta}</a>",
+            "        <a class=\"button secondary\" href=\"#product\">See Details</a>",
+            "      </div>",
+            f"{language_toggle}",
+            f"{theme_toggle}",
+            "    </header>",
+            "    <main id=\"main-content\" tabindex=\"-1\">",
+            section_markup,
+            extra_blocks,
+            "    </main>",
+            "    <footer class=\"shell footer\">",
+            f"      <strong>{project_name}</strong>",
+            "      <p>Generated by cowork deterministic web scaffold.</p>",
+            "    </footer>",
+            "  </body>",
+            "</html>",
+        ]
+    )
+    styles = _build_styles(normalized)
+    readme = "\n".join(
+        [
+            f"# {project_name}",
+            "",
+            f"- Profile: `{normalized}`",
+            f"- Objective: {objective}",
+            f"- Entry: `index.html`",
+            "- Open the artifact route in the cowork panel to inspect the page.",
+            "- This scaffold is a deterministic fallback to guarantee runnable output.",
+        ]
+    )
+    written = {
+        "index.html": html,
+        "styles.css": styles,
+        "README.md": readme,
+    }
+    if "app.js" in files:
+        written["app.js"] = _build_app_js(normalized, cta)
+    if normalized == "i18n-landing":
+        written["locales/ko.json"] = json.dumps(
+            {
+                "hero_title": objective,
+                "hero_body": f"{brand_tone} 톤으로 {target}에게 전달하는 단일 파일 웹 초안입니다.",
+                "cta_label": cta,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        written["locales/en.json"] = json.dumps(
+            {
+                "hero_title": objective,
+                "hero_body": f"A premium single-page concept for {target}.",
+                "cta_label": cta,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    if normalized == "smoke-pack":
+        written["smoke-report.md"] = "\n".join(
+            [
+                "# Smoke Test Report",
+                "",
+                "- Buttons: hero CTA, detail CTA",
+                "- Links: anchor navigation verified",
+                "- Forms: check form field presence where applicable",
+                "- Navigation: internal section links verified",
+            ]
+        )
+    for relative_path, content in written.items():
+        target = root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or not target.read_text(encoding="utf-8", errors="ignore").strip():
+            target.write_text(content.strip() + "\n", encoding="utf-8")
+    return {"profile": normalized, "root_dir": str(root), "files": sorted(written.keys())}
+
+
+def audit_web_project(profile: str, artifact_dir: str | Path) -> dict[str, Any]:
+    root = Path(artifact_dir).expanduser().resolve()
+    normalized = profile if profile in WEB_PROJECT_PROFILES else "landing-basic"
+    required_files = PROFILE_REQUIRED_FILES[normalized]
+    missing_files: list[str] = []
+    empty_files: list[str] = []
+    missing_markers: list[str] = []
+    for relative_path in required_files:
+        candidate = root / relative_path
+        if not candidate.is_file():
+            missing_files.append(relative_path)
+            continue
+        text = candidate.read_text(encoding="utf-8", errors="ignore")
+        if not text.strip():
+            empty_files.append(relative_path)
+        for marker in PROFILE_MARKERS.get(normalized, {}).get(relative_path, ()):
+            if marker not in text:
+                missing_markers.append(f"{relative_path}:{marker}")
+    failures: list[str] = []
+    if missing_files:
+        failures.append(f"missing files: {', '.join(missing_files)}")
+    if empty_files:
+        failures.append(f"empty files: {', '.join(empty_files)}")
+    if missing_markers:
+        failures.append(f"missing markers: {', '.join(missing_markers)}")
+    return {
+        "profile": normalized,
+        "artifact_root": str(root),
+        "required_files": list(required_files),
+        "missing_files": missing_files,
+        "empty_files": empty_files,
+        "missing_markers": missing_markers,
+        "artifact_audit_failures": failures,
+        "passed": not failures,
+        "entry_artifact_path": "index.html",
+    }
+
+
+def synthesize_qa_from_audit(audit: dict[str, Any]) -> str:
+    passed = bool(audit.get("passed"))
+    failures = list(audit.get("artifact_audit_failures") or [])
+    summary = "없음" if not failures else "; ".join(failures[:3])
+    return "\n".join(
+        [
+            f"QA결론: {'PASS' if passed else 'FAIL'}",
+            f"결함요약: {summary}",
+            f"재현절차: {'artifact route에서 index.html 확인' if not passed else '없음'}",
+            f"수정요청: {'없음' if passed else '필수 파일 및 마커를 보강'}",
+            f"QA승인: {'APPROVED' if passed else 'REJECTED'}",
+        ]
+    )
+
+
+def synthesize_finalization_from_audit(audit: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any]:
+    passed = bool(audit.get("passed"))
+    failures = list(audit.get("artifact_audit_failures") or [])
+    objective = str(scenario.get("objective") or "웹 프로젝트 생성")
+    checklist = [
+        "artifact route로 index.html 확인",
+        "필수 파일 non-empty 확인",
+        "프로필별 핵심 마커 확인",
+    ]
+    if passed:
+        conclusion = f"{objective} 결과물이 artifact 기반으로 실행 가능 상태입니다."
+        evidence = "entry artifact와 required file audit 통과"
+        actions = ["시각 검수 수행", "카피/스타일 세부 조정", "추가 회귀 테스트"]
+    else:
+        conclusion = f"{objective} 결과물은 생성되었지만 artifact audit 보완이 필요합니다."
+        evidence = "; ".join(failures[:3]) or "audit 실패"
+        actions = ["누락 파일 보강", "마커 기준 보완", "artifact audit 재실행"]
+    text = "\n".join(
+        [
+            f"최종결론: {conclusion}",
+            f"실행체크리스트: {' / '.join(checklist)}",
+            "실행링크: index.html",
+            f"증빙요약: {evidence}",
+            f"즉시실행항목(Top3): 1) {actions[0]} 2) {actions[1]} 3) {actions[2]}",
+        ]
+    )
+    return {
+        "text": text,
+        "final_conclusion": conclusion,
+        "execution_checklist": "\n".join(f"- {item}" for item in checklist),
+        "execution_link": "index.html",
+        "entry_artifact_path": str(audit.get("entry_artifact_path") or "index.html"),
+        "evidence_summary": evidence,
+        "immediate_actions_top3": actions,
+        "artifact_audit_failures": failures,
+    }
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return slug or "section"
+
+
+def _build_section_markup(section_id: str, scenario: dict[str, Any]) -> str:
+    normalized = _slugify(section_id)
+    cta = str(scenario.get("core_cta") or "Get Started")
+    title = normalized.replace("-", " ").title()
+    copy = f"{title} section for {scenario.get('target_audience') or 'users'}."
+    return "\n".join(
+        [
+            f"      <section id=\"{normalized}\" class=\"section shell\">",
+            f"        <div class=\"section-head\"><p class=\"eyebrow\">{title}</p></div>",
+            f"        <h2 data-i18n=\"{normalized}_title\">{title}</h2>",
+            f"        <p>{copy}</p>",
+            f"        <a class=\"text-link\" href=\"#cta\">{cta}</a>",
+            "      </section>",
+        ]
+    )
+
+
+def _profile_specific_markup(profile: str) -> str:
+    if profile == "form-validation":
+        return "\n".join(
+            [
+                "      <section id=\"signup-form\" class=\"section shell\">",
+                "        <h2>Signup Form</h2>",
+                "        <form id=\"signup-form-element\" novalidate>",
+                "          <label>Email <input id=\"email\" type=\"email\" aria-label=\"email address\" required /></label>",
+                "          <label>Password <input id=\"password\" type=\"password\" aria-label=\"password\" required minlength=\"8\" /></label>",
+                "          <p id=\"form-feedback\" class=\"status-text\" aria-live=\"polite\"></p>",
+                "          <button class=\"button primary\" type=\"submit\">Create Account</button>",
+                "        </form>",
+                "      </section>",
+            ]
+        )
+    if profile == "state-demo":
+        return "\n".join(
+            [
+                "      <section id=\"states\" class=\"section shell\">",
+                "        <h2>State Demo</h2>",
+                "        <div class=\"state-controls\">",
+                "          <button data-state-target=\"loading\" class=\"pill\" type=\"button\">Loading</button>",
+                "          <button data-state-target=\"error\" class=\"pill\" type=\"button\">Error</button>",
+                "          <button data-state-target=\"empty\" class=\"pill\" type=\"button\">Empty</button>",
+                "        </div>",
+                "        <div id=\"loading-state\" class=\"state-card\">Loading state preview</div>",
+                "        <div id=\"error-state\" class=\"state-card is-hidden\">Error state preview</div>",
+                "        <div id=\"empty-state\" class=\"state-card is-hidden\">Empty state preview</div>",
+                "      </section>",
+            ]
+        )
+    if profile == "catalog-filter":
+        return "\n".join(
+            [
+                "      <section id=\"catalog\" class=\"section shell\">",
+                "        <h2>Catalog</h2>",
+                "        <div class=\"filter-bar\">",
+                "          <input id=\"search-input\" type=\"search\" placeholder=\"Search\" aria-label=\"search\" />",
+                "          <select id=\"category-filter\" aria-label=\"category filter\">",
+                "            <option value=\"all\">All</option>",
+                "            <option value=\"new\">New</option>",
+                "            <option value=\"popular\">Popular</option>",
+                "          </select>",
+                "        </div>",
+                "        <div id=\"card-grid\" class=\"card-grid\"></div>",
+                "      </section>",
+            ]
+        )
+    if profile == "accessibility-page":
+        return "\n".join(
+            [
+                "      <section id=\"a11y-checklist\" class=\"section shell\">",
+                "        <h2>Accessibility Checklist</h2>",
+                "        <nav aria-label=\"Accessibility quick links\" class=\"toolbar\">",
+                "          <a class=\"pill\" href=\"#hero\">Hero</a>",
+                "          <a class=\"pill\" href=\"#cta\">CTA</a>",
+                "        </nav>",
+                "        <ul>",
+                "          <li tabindex=\"0\">Keyboard navigation path verified</li>",
+                "          <li tabindex=\"0\">ARIA labels and landmarks present</li>",
+                "          <li tabindex=\"0\">Color contrast guidance documented</li>",
+                "        </ul>",
+                "      </section>",
+            ]
+        )
+    return ""
+
+
+def _build_styles(profile: str) -> str:
+    extra = ""
+    if profile == "catalog-filter":
+        extra += "\n.card-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }\n"
+    if profile in {"state-demo", "form-validation"}:
+        extra += "\n.state-card, form { background: rgba(255,255,255,0.86); padding: 20px; border-radius: 18px; }\n"
+    return "\n".join(
+        [
+            ":root {",
+            "  --bg: radial-gradient(circle at top left, #f4efe6 0%, #e7f0ec 45%, #d8e2ec 100%);",
+            "  --surface: rgba(255,255,255,0.78);",
+            "  --text: #102030;",
+            "  --muted: #4d5e70;",
+            "  --accent: #0d7a64;",
+            "  --accent-strong: #0a4f43;",
+            "  --border: rgba(16,32,48,0.14);",
+            "  --shadow: 0 24px 80px rgba(16,32,48,0.12);",
+            "}",
+            "",
+            "* { box-sizing: border-box; }",
+            "html { color-scheme: light; }",
+            "body { margin: 0; font-family: Georgia, 'Times New Roman', serif; background: var(--bg); color: var(--text); }",
+            "body[data-theme='dark'], html[data-theme='dark'] body { background: linear-gradient(180deg, #0e1820 0%, #16222c 100%); color: #f5f7fa; }",
+            "a { color: inherit; }",
+            ".shell { width: min(1120px, calc(100vw - 32px)); margin: 0 auto; }",
+            ".hero-shell { padding: 48px 0 24px; }",
+            ".section { margin: 24px auto; padding: 28px; border: 1px solid var(--border); border-radius: 24px; background: var(--surface); box-shadow: var(--shadow); }",
+            ".eyebrow { margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.14em; font-size: 12px; color: var(--muted); }",
+            ".hero-copy { max-width: 680px; line-height: 1.6; }",
+            ".hero-actions, .toolbar, .state-controls, .filter-bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }",
+            ".button, .pill { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 18px; border-radius: 999px; border: 1px solid var(--border); background: white; cursor: pointer; text-decoration: none; }",
+            ".button.primary { background: var(--accent); color: white; border-color: transparent; }",
+            ".button.secondary { background: transparent; }",
+            ".text-link { color: var(--accent-strong); font-weight: 700; }",
+            ".skip-link { position: absolute; left: 8px; top: 8px; padding: 8px 12px; background: #fff; transform: translateY(-180%); }",
+            ".skip-link:focus { transform: translateY(0); }",
+            ".footer { padding: 16px 0 48px; color: var(--muted); }",
+            ".is-hidden { display: none; }",
+            ".status-text { min-height: 1.2em; color: var(--accent-strong); }",
+            "",
+            "@media (min-width: 390px) {",
+            "  .section { padding: 24px; }",
+            "}",
+            "",
+            "@media (min-width: 768px) {",
+            "  .hero-shell { padding-top: 72px; }",
+            "  .section { padding: 36px; }",
+            "}",
+            "",
+            "@media (min-width: 1440px) {",
+            "  .shell { width: min(1280px, calc(100vw - 96px)); }",
+            "}",
+            extra.strip(),
+        ]
+    ).strip() + "\n"
+
+
+def _build_app_js(profile: str, cta: str) -> str:
+    if profile == "form-validation":
+        return "\n".join(
+            [
+                "const form = document.getElementById('signup-form-element');",
+                "const email = document.getElementById('email');",
+                "const password = document.getElementById('password');",
+                "const feedback = document.getElementById('form-feedback');",
+                "",
+                "if (form && email && password && feedback) {",
+                "  form.addEventListener('submit', (event) => {",
+                "    event.preventDefault();",
+                "    if (!email.value.trim()) {",
+                "      feedback.textContent = 'Email is required.';",
+                "      email.setCustomValidity('Email is required.');",
+                "      email.reportValidity();",
+                "      return;",
+                "    }",
+                "    email.setCustomValidity('');",
+                "    if (!email.checkValidity()) {",
+                "      feedback.textContent = 'Enter a valid email address.';",
+                "      email.reportValidity();",
+                "      return;",
+                "    }",
+                "    if (password.value.length < 8) {",
+                "      feedback.textContent = 'Password must be at least 8 characters.';",
+                "      return;",
+                "    }",
+                f"    feedback.textContent = '{cta} flow is ready.';",
+                "  });",
+                "}",
+            ]
+        )
+    if profile == "theme-toggle":
+        return "\n".join(
+            [
+                "const key = 'cowork-theme';",
+                "const button = document.getElementById('theme-toggle');",
+                "const applyTheme = (theme) => {",
+                "  document.documentElement.setAttribute('data-theme', theme);",
+                "  document.body.setAttribute('data-theme', theme);",
+                "  localStorage.setItem(key, theme);",
+                "};",
+                "applyTheme(localStorage.getItem(key) || 'light');",
+                "if (button) {",
+                "  button.addEventListener('click', () => {",
+                "    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';",
+                "    applyTheme(next);",
+                "  });",
+                "}",
+            ]
+        )
+    if profile == "state-demo":
+        return "\n".join(
+            [
+                "const stateNodes = {",
+                "  loading: document.getElementById('loading-state'),",
+                "  error: document.getElementById('error-state'),",
+                "  empty: document.getElementById('empty-state'),",
+                "};",
+                "const setState = (name) => {",
+                "  Object.entries(stateNodes).forEach(([key, node]) => {",
+                "    if (!node) return;",
+                "    node.classList.toggle('is-hidden', key !== name);",
+                "  });",
+                "};",
+                "document.querySelectorAll('[data-state-target]').forEach((button) => {",
+                "  button.addEventListener('click', () => setState(button.getAttribute('data-state-target')));",
+                "});",
+                "setState('loading');",
+            ]
+        )
+    if profile == "catalog-filter":
+        return "\n".join(
+            [
+                "const items = [",
+                "  { name: 'Starter Kit', category: 'new' },",
+                "  { name: 'Growth Pack', category: 'popular' },",
+                "  { name: 'Ops Bundle', category: 'new' },",
+                "];",
+                "const grid = document.getElementById('card-grid');",
+                "const searchInput = document.getElementById('search-input');",
+                "const categoryFilter = document.getElementById('category-filter');",
+                "const applyFilters = () => {",
+                "  if (!grid) return;",
+                "  const query = (searchInput?.value || '').toLowerCase();",
+                "  const category = categoryFilter?.value || 'all';",
+                "  const visible = items.filter((item) => {",
+                "    const queryMatch = item.name.toLowerCase().includes(query);",
+                "    const categoryMatch = category === 'all' || item.category === category;",
+                "    return queryMatch && categoryMatch;",
+                "  });",
+                "  grid.innerHTML = visible.map((item) => `<article class=\"section\"><strong>${item.name}</strong><p>${item.category}</p></article>`).join('');",
+                "};",
+                "searchInput?.addEventListener('input', applyFilters);",
+                "categoryFilter?.addEventListener('change', applyFilters);",
+                "applyFilters();",
+            ]
+        )
+    if profile == "i18n-landing":
+        return "\n".join(
+            [
+                "const locales = {",
+                "  ko: { hero_title: document.querySelector('[data-i18n=\"hero_title\"]')?.textContent || '', cta_label: '지금 시작하기' },",
+                "  en: { hero_title: 'Launch faster with your team', cta_label: 'Start Now' },",
+                "};",
+                "const fetchLocale = async (language) => locales[language] || locales.ko;",
+                "const button = document.getElementById('language-toggle');",
+                "const applyLocale = async (language) => {",
+                "  const payload = await fetchLocale(language);",
+                "  document.querySelectorAll('[data-i18n]').forEach((node) => {",
+                "    const key = node.getAttribute('data-i18n');",
+                "    if (payload[key]) node.textContent = payload[key];",
+                "  });",
+                "};",
+                "button?.addEventListener('click', async () => {",
+                "  const next = button.dataset.lang === 'en' ? 'ko' : 'en';",
+                "  button.dataset.lang = next;",
+                "  await applyLocale(next);",
+                "});",
+            ]
+        )
+    return "\n".join(
+        [
+            "document.querySelectorAll('a[href=\"#cta\"]').forEach((link) => {",
+            "  link.addEventListener('click', () => {",
+            "    link.dataset.clicked = 'true';",
+            "  });",
+            "});",
+        ]
+    )

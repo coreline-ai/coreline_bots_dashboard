@@ -18,7 +18,7 @@ from telegram_bot_new.mock_messenger.debate import (
     DebateOrchestrator,
 )
 from telegram_bot_new.mock_messenger.runtime_profile import explain_unknown_bot_id, infer_runtime_profile
-from telegram_bot_new.mock_messenger.schemas import CoworkStartRequest, DebateStartRequest
+from telegram_bot_new.mock_messenger.schemas import CoworkStartRequest, CoworkStopRequest, DebateStartRequest
 
 
 def register_orchestration_routes(
@@ -159,9 +159,14 @@ def register_orchestration_routes(
         return {"ok": True, "result": snapshot}
 
     @app.post("/_mock/cowork/{cowork_id}/stop")
-    async def stop_cowork(cowork_id: str) -> dict[str, Any]:
+    async def stop_cowork(cowork_id: str, request: CoworkStopRequest | None = None) -> dict[str, Any]:
         try:
-            result = await cowork_orchestrator.stop_cowork(cowork_id)
+            result = await cowork_orchestrator.stop_cowork(
+                cowork_id,
+                reason=request.reason if request else None,
+                source=request.source if request else None,
+                requested_by=request.requested_by if request else None,
+            )
         except CoworkNotFoundError as error:
             raise HTTPException(status_code=404, detail=f"unknown cowork_id: {error}") from error
         return {"ok": True, "result": result}
@@ -180,6 +185,12 @@ def register_orchestration_routes(
             raise HTTPException(status_code=404, detail=f"unknown cowork artifact: {cowork_id}/{filename}")
         media_type = "application/octet-stream"
         suffix = path.suffix.lower()
+        if suffix in {".html", ".htm"}:
+            media_type = "text/html"
+        elif suffix == ".css":
+            media_type = "text/css"
+        elif suffix == ".js":
+            media_type = "text/javascript"
         if suffix == ".json":
             media_type = "application/json"
         elif suffix in {".md", ".markdown"}:

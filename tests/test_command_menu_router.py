@@ -78,7 +78,7 @@ class _RouterHarness:
         ("/reset", ("reset", {"chat_id": 100, "now_ms": 77})),
         ("/summary", ("summary", {"chat_id": 100})),
         ("/mode codex", ("mode", {"chat_id": 100, "arg": "codex", "now_ms": 77})),
-        ("/model gpt-5.3-codex", ("model", {"chat_id": 100, "arg": "gpt-5.3-codex", "now_ms": 77})),
+        ("/model gpt-5.4", ("model", {"chat_id": 100, "arg": "gpt-5.4", "now_ms": 77})),
         ("/project /tmp/work", ("project", {"chat_id": 100, "arg": "/tmp/work", "now_ms": 77})),
         ("/skills", ("skills", {"chat_id": 100})),
         ("/skill remotion-best-practices", ("skill", {"chat_id": 100, "arg": "remotion-best-practices", "now_ms": 77})),

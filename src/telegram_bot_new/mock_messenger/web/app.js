@@ -55,6 +55,7 @@ const coworkTasks = document.getElementById("cowork-tasks");
 const coworkErrors = document.getElementById("cowork-errors");
 const coworkFinal = document.getElementById("cowork-final");
 const coworkArtifacts = document.getElementById("cowork-artifacts");
+const coworkOpenProject = document.getElementById("cowork-open-project");
 const coworkStopBtn = document.getElementById("cowork-stop-btn");
 const toggleCoworkPanelBtn = document.getElementById("toggle-cowork-panel-btn");
 const towerPanelBody = document.getElementById("tower-panel-body");
@@ -162,6 +163,7 @@ const SUPPORTED_PROVIDER_OPTIONS = ["codex", "gemini", "claude"];
 const SUPPORTED_ROLE_OPTIONS = ["controller", "planner", "implementer", "qa"];
 const FALLBACK_AVAILABLE_MODELS = {
   codex: [
+    "gpt-5.4",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
     "gpt-5.2-codex",
@@ -1320,6 +1322,10 @@ function renderCoworkPanel(snapshot) {
     if (coworkFinal) {
       coworkFinal.textContent = "최종 리포트 없음";
     }
+    if (coworkOpenProject) {
+      coworkOpenProject.classList.add("is-hidden");
+      coworkOpenProject.removeAttribute("href");
+    }
     renderCoworkArtifacts(null);
     if (coworkStopBtn) {
       coworkStopBtn.disabled = true;
@@ -1339,15 +1345,31 @@ function renderCoworkPanel(snapshot) {
   const rowsErrors = Array.isArray(data.errors) ? data.errors : [];
   const finalReport = data.final_report && typeof data.final_report === "object" ? data.final_report : null;
   const artifacts = data.artifacts && typeof data.artifacts === "object" ? data.artifacts : null;
+  const budgetText = data.budget_floor_sec ? `budget=${Number(data.budget_applied_sec || data.budget_floor_sec)}s` : "";
+  const stopText = data.stop_reason ? `stop=${String(data.stop_source || "-")}:${String(data.stop_reason || "-")}` : "";
+  const timeoutEvent =
+    data.last_timeout_event && typeof data.last_timeout_event === "object" ? data.last_timeout_event : null;
+  const timeoutText = timeoutEvent
+    ? `timeout=${String(timeoutEvent.origin || "-")}:${String(timeoutEvent.label || timeoutEvent.bot_id || "-")}:${String(
+        timeoutEvent.stage_type || "-"
+      )}`
+    : "";
 
   if (coworkMeta) {
-    coworkMeta.textContent = `ID=${coworkId} · ${status.toUpperCase()} · ${task}`;
+    const parts = [`ID=${coworkId}`, status.toUpperCase(), task];
+    if (budgetText) {
+      parts.push(budgetText);
+    }
+    if (stopText) {
+      parts.push(stopText);
+    }
+    coworkMeta.textContent = parts.join(" · ");
   }
   if (coworkCurrentStage) {
     const actorText = currentActor
       ? `${String(currentActor.label || currentActor.bot_id || "bot")} (${String(currentActor.role || "implementer")})`
       : "none";
-    coworkCurrentStage.textContent = `현재 단계: ${currentStage} · actor=${actorText}`;
+    coworkCurrentStage.textContent = `현재 단계: ${currentStage} · actor=${actorText}${timeoutText ? ` · ${timeoutText}` : ""}`;
   }
 
   renderCoworkList(
@@ -1382,6 +1404,19 @@ function renderCoworkPanel(snapshot) {
       coworkFinal.textContent = "최종 리포트 없음";
     } else {
       coworkFinal.textContent = JSON.stringify(finalReport, null, 2);
+    }
+  }
+  if (coworkOpenProject) {
+    const openProjectUrl =
+      finalReport && typeof finalReport.entry_artifact_url === "string" && finalReport.entry_artifact_url.trim()
+        ? finalReport.entry_artifact_url.trim()
+        : "";
+    if (openProjectUrl) {
+      coworkOpenProject.href = openProjectUrl;
+      coworkOpenProject.classList.remove("is-hidden");
+    } else {
+      coworkOpenProject.classList.add("is-hidden");
+      coworkOpenProject.removeAttribute("href");
     }
   }
   renderCoworkArtifacts(artifacts);
@@ -3888,6 +3923,7 @@ function parseCoworkCommand(rawText) {
   let maxTurnSec = 60;
   let freshSession = true;
   let keepPartialOnError = true;
+  let projectId = "";
 
   const takeIntOption = (name, min, max) => {
     const optionRe = new RegExp(`(?:^|\\s)--${name}\\s+(\\d+)(?=\\s|$)`, "i");
@@ -3899,6 +3935,20 @@ function parseCoworkCommand(rawText) {
     rest = rest.replace(match[0], " ").trim();
     if (!Number.isFinite(value) || value < min || value > max) {
       return { error: `--${name} 값은 ${min}~${max} 범위여야 합니다.` };
+    }
+    return value;
+  };
+
+  const takeStringOption = (name, pattern, errorMessage) => {
+    const optionRe = new RegExp(`(?:^|\\s)--${name}\\s+([^\\s]+)(?=\\s|$)`, "i");
+    const match = rest.match(optionRe);
+    if (!match) {
+      return null;
+    }
+    const value = String(match[1] || "").trim();
+    rest = rest.replace(match[0], " ").trim();
+    if (!value || (pattern instanceof RegExp && !pattern.test(value))) {
+      return { error: errorMessage };
     }
     return value;
   };
@@ -3917,6 +3967,18 @@ function parseCoworkCommand(rawText) {
   }
   if (typeof maxTurnValue === "number") {
     maxTurnSec = Math.trunc(maxTurnValue);
+  }
+
+  const projectIdValue = takeStringOption(
+    "project-id",
+    /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/,
+    "--project-id 값은 영문/숫자/하이픈/언더스코어만 사용할 수 있으며 1~80자여야 합니다."
+  );
+  if (projectIdValue && typeof projectIdValue === "object" && projectIdValue.error) {
+    return projectIdValue;
+  }
+  if (typeof projectIdValue === "string") {
+    projectId = projectIdValue;
   }
 
   if (/(?:^|\s)--keep-session(?:\s|$)/i.test(rest)) {
@@ -3939,6 +4001,7 @@ function parseCoworkCommand(rawText) {
   }
   return {
     task,
+    project_id: projectId || null,
     max_parallel: maxParallel,
     max_turn_sec: maxTurnSec,
     fresh_session: freshSession,
@@ -4236,13 +4299,16 @@ async function runCoworkFlow(targets, parsedCommand) {
     return;
   }
 
-  const buildCoworkScenario = (taskText) => {
+  const buildCoworkScenario = (taskText, projectId) => {
     const text = String(taskText || "").trim();
-    const slug = text
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 40) || "cowork-project";
+    const explicitProjectId = String(projectId || "").trim();
+    const slug = explicitProjectId || (
+      text
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 40) || "cowork-project"
+    );
     const deadline = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     return {
       project_id: slug,
@@ -4267,7 +4333,7 @@ async function runCoworkFlow(targets, parsedCommand) {
     scenario:
       parsedCommand && typeof parsedCommand.scenario === "object" && parsedCommand.scenario
         ? parsedCommand.scenario
-        : buildCoworkScenario(parsedCommand.task),
+        : buildCoworkScenario(parsedCommand.task, parsedCommand.project_id),
     profiles: targets.map((profile) => ({
       profile_id: String(profile.profile_id),
       label: String(profile.label || profile.bot_id || "Bot"),
@@ -5665,7 +5731,14 @@ if (coworkStopBtn) {
       return;
     }
     try {
-      await requestJson(`/_mock/cowork/${encodeURIComponent(coworkId)}/stop`, { method: "POST" });
+      await requestJson(`/_mock/cowork/${encodeURIComponent(coworkId)}/stop`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason: "manual_stop",
+          source: "mock-ui",
+          requested_by: "user",
+        }),
+      });
       appendBubble("meta", "팀워크 중단 요청을 전송했습니다.");
       await pollCoworkStatus(coworkId);
     } catch (error) {

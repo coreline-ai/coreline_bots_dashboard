@@ -6,6 +6,7 @@ SUPPORTED_CLI_PROVIDERS: tuple[str, ...] = ("codex", "gemini", "claude")
 
 AVAILABLE_MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
     "codex": (
+        "gpt-5.4",
         "gpt-5.3-codex",
         "gpt-5.3-codex-spark",
         "gpt-5.2-codex",
@@ -19,7 +20,7 @@ AVAILABLE_MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
 }
 
 PREFERRED_DEFAULT_MODEL_BY_PROVIDER: dict[str, str] = {
-    "codex": "gpt-5.3-codex",
+    "codex": "gpt-5.4",
     # Keep Gemini usable by default even when Pro terminal capacity is exhausted.
     "gemini": "gemini-2.5-flash",
     "claude": "claude-sonnet-4-5",

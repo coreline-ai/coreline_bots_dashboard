@@ -4,34 +4,20 @@ bots:
   mode: embedded
   telegram_token: mock_token_a
   adapter: codex
-  default_role: controller
+  codex:
+    model: gpt-5.4
+  default_role: planner
   webhook:
     path_secret: bot-a-path
     secret_token: bot-a-secret
-- bot_id: bot-b
-  name: 제미나이
-  mode: embedded
-  telegram_token: mock_token_b
-  adapter: codex
-  default_role: planner
-  webhook:
-    path_secret: bot-b-path
-    secret_token: bot-b-secret
-- bot_id: bot-c
-  name: 클로드
-  mode: embedded
-  telegram_token: mock_token_c
-  adapter: codex
-  default_role: integrator
-  webhook:
-    path_secret: bot-c-path
-    secret_token: bot-c-secret
 - bot_id: bot-d
   name: 코덱스5.3S
   mode: embedded
   telegram_token: mock_token_d
   adapter: codex
-  default_role: implementer
+  codex:
+    model: gpt-5.4
+  default_role: qa
   database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/config/state/bot-d.db
   webhook:
     path_secret: bot-d-path
@@ -41,6 +27,8 @@ bots:
   mode: embedded
   telegram_token: mock_token_e
   adapter: codex
+  codex:
+    model: gpt-5.4
   default_role: implementer
   database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/config/state/bot-e.db
   webhook:

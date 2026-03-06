@@ -226,6 +226,8 @@ def _write_bots_yaml(path: Path) -> None:
                 "    mode: embedded",
                 "    telegram_token: mock_token_a",
                 "    adapter: codex",
+                "    codex:",
+                "      model: gpt-5.4",
                 "    webhook:",
                 "      path_secret: bot-a-path",
                 "      secret_token: bot-a-secret",
@@ -274,6 +276,7 @@ def test_mock_bot_catalog_endpoint(tmp_path: Path) -> None:
         assert bots[0]["embedded_url"] == "http://127.0.0.1:8600"
         assert bots[0]["available_models"]["gemini"] == ["gemini-2.5-pro", "gemini-2.5-flash"]
         assert bots[0]["available_models"]["codex"] == [
+            "gpt-5.4",
             "gpt-5.3-codex",
             "gpt-5.3-codex-spark",
             "gpt-5.2-codex",
@@ -282,6 +285,7 @@ def test_mock_bot_catalog_endpoint(tmp_path: Path) -> None:
             "gpt-5.1-codex-mini",
             "gpt-5",
         ]
+        assert bots[0]["default_models"]["codex"] == "gpt-5.4"
         assert bots[0]["available_models"]["claude"] == ["claude-sonnet-4-5"]
         assert bots[1]["bot_id"] == "bot-b"
         assert bots[1]["embedded_url"] == "http://127.0.0.1:8601"

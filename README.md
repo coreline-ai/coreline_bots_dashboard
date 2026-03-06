@@ -116,6 +116,7 @@ Telegram <-> CLI adapter bridge MVP.
 ## 특징
 
 - 각 봇은 기본적으로 `/mode` 명령으로 `gemini`, `codex`, `claude` 모드를 전환할 수 있고, 대시보드 봇 카드에서 provider/model 드롭다운으로 즉시 변경할 수 있습니다.
+- Codex 기본 모델은 `gpt-5.4`이며, 대시보드와 `/model` 명령에서 `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.2`, `gpt-5.1-codex-mini`, `gpt-5`를 선택할 수 있습니다.
 - 멀티봇을 지원하여, 한 번의 프롬프트로 여러 봇에서 다양한 형태의 결과물을 병렬로 얻을 수 있습니다.
 - Session 섹션에서 `Project / Skill / Role(controller/planner/executor/integrator)`를 통합 제어할 수 있고, 병렬 입력창에서 `/cowork <요청>`으로 역할 기반 협업 오케스트레이션을 실행할 수 있습니다.
 - Mock Dashboard UI에서는 `/talk` 외에 `/relay`, `/pitchbattle`, `/quizbattle`, `/debate-lite`, `/improv`, `/quest`, `/memechain`, `/court` Play 명령 8종을 즉시 실행할 수 있습니다.
@@ -285,7 +286,7 @@ bots:
       secret_token: bot-a-secret
       public_url: https://example.com/telegram/webhook/bot-a/bot-a-path
     codex:
-      model: gpt-5
+      model: gpt-5.4
       sandbox: workspace-write
     gemini:
       model: gemini-2.5-pro
@@ -467,6 +468,7 @@ CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
 | `/quest <미션> [--rounds n] [--max-turn-sec n] [--keep-session]` | 협동 퀘스트 + 성공/실패 판정 |
 | `/memechain <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 밈 체인 |
 | `/court <사건> [--rounds n] [--max-turn-sec n] [--keep-session]` | 법정극 + 판결 (`3` bots 이상 필요) |
+| `/cowork <요청> [--project-id id] [--max-parallel n] [--max-turn-sec n] [--keep-session] [--strict]` | 역할 기반 협업 실행 및 아티팩트 생성 |
 
 추가 동작:
 
@@ -537,7 +539,7 @@ Skill 관리:
 | `POST` | `/_mock/cowork/start` | 역할 기반 협업(`/cowork`) 시작 |
 | `GET` | `/_mock/cowork/active` | 진행 중 협업 조회 |
 | `GET` | `/_mock/cowork/{cowork_id}` | 협업 단계/작업/리포트 조회 |
-| `POST` | `/_mock/cowork/{cowork_id}/stop` | 협업 중단 요청 |
+| `POST` | `/_mock/cowork/{cowork_id}/stop` | 협업 중단 요청(`reason`, `source`, `requested_by` optional body 지원) |
 | `GET` | `/_mock/cowork/{cowork_id}/artifacts` | 협업 아티팩트 메타 조회 |
 | `GET` | `/_mock/cowork/{cowork_id}/artifact/{filename}` | 협업 아티팩트 파일 다운로드 |
 | `POST` | `/_mock/rate_limit` | 429 시뮬레이션 룰 |
@@ -637,6 +639,47 @@ pytest
 - 병렬 전송 결과 수집
 - profile 추가/삭제 흐름
 
+실제 라이브 UI로 `/cowork` 10개 웹 케이스를 다시 실행하고 `result/`에 증빙까지 남기려면:
+
+```bash
+./scripts/run-cowork-web-10cases.sh --headed
+```
+
+옵션 예시:
+
+```bash
+./scripts/run-cowork-web-10cases.sh --headless --max-turn-sec 45 --case-timeout-sec 240
+./scripts/run-cowork-web-10cases.sh --headless --case-timeout-sec 120
+./scripts/run-cowork-web-10cases.sh --headless --case-timeout-sec 120 --allow-unsafe-timeout
+```
+
+결과 위치:
+
+- `result/cowork_web_test_10cases_live_<timestamp>/report.md`
+- `result/cowork_web_test_10cases_live_<timestamp>/report.json`
+- 케이스별 `request.json`, `snapshot.json`, `artifacts.json`, `status.log`, `summary.md`
+- 케이스별 `ui/cowork-panel.png`, `ui/project-page.png`, `ui/failure-panel.png`
+- 케이스별 `cowork_artifacts/` 전체 복사본
+
+실패 시 우선 확인:
+
+- 루트 `runner.log`
+- 케이스 `status.log`
+- 실패 케이스 `playwright/trace.zip`
+- `cowork_artifacts/final/controller_final_report.md`
+
+timeout 분류 규칙:
+
+- `runner_case_timeout`: live UI runner가 case budget 초과로 `/_mock/cowork/{id}/stop`을 요청한 경우
+- `turn_timeout`: 특정 participant bot의 turn timeout
+- `stage_timeout_budget`: runner 요청 timeout이 cowork 계산 budget보다 작아서 자동 상향된 경우
+
+live rerun 스크립트의 timeout 보정 규칙:
+
+- 기본적으로 `--case-timeout-sec`가 cowork snapshot의 `budget_floor_sec`보다 작으면 자동으로 상향됩니다.
+- 상향된 값은 `report.json`, `summary.md`, `status.log`, `suite_meta.json`에 모두 기록됩니다.
+- 강제로 unsafe timeout을 유지하고 싶으면 `--allow-unsafe-timeout`을 명시해야 합니다.
+
 ### 13.3 Smoke scripts
 
 ```bash
@@ -655,10 +698,12 @@ pytest
 | `scripts/run-local.sh` | macOS/Linux single-bot stack wrapper |
 | `scripts/run-local-fixed.sh` | single-bot stack 실제 실행기(mock + bot) |
 | `scripts/run-local-multibot.sh` | multi-bot stack 실행기(mock + supervisor) |
+| `scripts/run-cowork-web-10cases.sh` | temp runtime + real browser로 `/cowork` 웹 10케이스 재실행 및 증빙 리포트 생성, unsafe case timeout 자동 상향 지원 |
 | `scripts/run-local-with-mock.ps1` | Windows에서 mock + supervisor 동시 실행 |
 | `scripts/run-mock-messenger.ps1` | Windows mock만 실행 |
 | `scripts/run-mock-codex-bridge.ps1` | mock + codex bridge 실행 |
 | `scripts/stop-mock-codex-bridge.ps1` | bridge/mock 정리 |
+| `scripts/report_cowork_web_suite.py` | live cowork raw evidence를 `report.md`/`report.json`으로 집계하고 timeout origin/actor/budget metadata를 노출 |
 | `scripts/verify-multibot-smoke.sh` | 멀티봇 스모크 검증 |
 | `scripts/verify-mock-ui-e2e.sh` | mock UI Playwright E2E |
 | `scripts/verify-release-flow.sh` | 주요 테스트 + 런타임 스모크 |
@@ -690,11 +735,18 @@ pytest
 
 - 협업 단계에서 participant별 실행은 같은 `(bot_id, chat_id)` 조합에 대해 직렬화되어 동작합니다(중복 active run 충돌 완화).
 - 그래도 기존 활성 run이 남아 있으면 `/stop` 선행이 필요합니다.
+- live rerun 스크립트는 기본적으로 temp config/runtime/port를 사용하므로 기존 `9082` 스택과 분리됩니다.
+- `--project-id`를 주면 결과 아티팩트 루트가 고정되어 케이스별 비교가 쉬워집니다.
+- 웹 profile(`landing-basic`, `form-validation`, `seo-landing` 등)은 기본적으로 `web guaranteed mode`로 동작하며, deterministic scaffold + audit가 통과하면 planner/implementer/qa/controller LLM turn 없이도 `completed`가 가능합니다.
 - 최종 품질 게이트에서 아래 조건이면 `failed` 처리됩니다.
   - 실행 태스크 실패/중단 존재
   - 렌더링/화면 요청인데 실행 가능한 링크 부재
   - 최종 결론이 `미이행/미완료` 등 실패 신호 포함
-- `Cowork Panel`의 stages/tasks/errors와 `/_mock/cowork/{cowork_id}/artifacts`를 함께 확인하세요.
+- `Cowork Panel`의 `budget`, `stop_reason`, `last_timeout_event`와 `/_mock/cowork/{cowork_id}/artifacts`를 함께 확인하세요.
+- timeout 책임 해석 규칙:
+  - `timeout_origin=runner_case_timeout`: 원인자는 live runner이며, bot fault가 아닙니다.
+  - `timeout_origin=turn_timeout`: `timeout_actor_label`, `timeout_actor_role`, `timeout_stage_type`에 기록된 participant가 직접 원인자입니다.
+  - `timeout_origin=stage_timeout_budget`: runner timeout 계약이 잘못된 경우이며, `budget_floor_sec`와 `applied_case_timeout_sec`를 먼저 확인해야 합니다.
 
 ### Play 명령(`/relay`~`/court`)이 실패하거나 멈춘 것처럼 보이는 경우
 

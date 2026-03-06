@@ -191,6 +191,12 @@ class CoworkStartRequest(BaseModel):
         return value
 
 
+class CoworkStopRequest(BaseModel):
+    reason: Optional[str] = None
+    source: Optional[str] = None
+    requested_by: Optional[str] = None
+
+
 class CoworkCurrentActor(BaseModel):
     bot_id: str
     label: str
@@ -208,6 +214,13 @@ class CoworkStageView(BaseModel):
     response_text: Optional[str] = None
     status: str
     error_text: Optional[str] = None
+    resolved_status: Optional[str] = None
+    raw_outcome_status: Optional[str] = None
+    raw_outcome_detail: Optional[str] = None
+    raw_outcome_error_text: Optional[str] = None
+    fallback_applied: bool = False
+    fallback_source: Optional[str] = None
+    effective_timeout_sec: Optional[int] = None
     started_at: int
     finished_at: Optional[int] = None
     duration_ms: Optional[int] = None
@@ -224,6 +237,16 @@ class CoworkTaskView(BaseModel):
     status: str
     response_text: Optional[str] = None
     error_text: Optional[str] = None
+    resolved_status: Optional[str] = None
+    raw_outcome_status: Optional[str] = None
+    raw_outcome_detail: Optional[str] = None
+    raw_outcome_error_text: Optional[str] = None
+    fallback_applied: bool = False
+    fallback_source: Optional[str] = None
+    effective_timeout_sec: Optional[int] = None
+    blocked_by_task_no: Optional[int] = None
+    blocked_by_bot_id: Optional[str] = None
+    blocked_by_reason: Optional[str] = None
     started_at: Optional[int] = None
     finished_at: Optional[int] = None
     duration_ms: Optional[int] = None
@@ -270,6 +293,12 @@ class CoworkFinalReport(BaseModel):
     completion_status: Optional[str] = None
     quality_gate_failures: list[str] = Field(default_factory=list)
     immediate_actions_top3: list[str] = Field(default_factory=list)
+    project_profile: Optional[str] = None
+    scaffold_source: Optional[str] = None
+    planning_gate_status: Optional[str] = None
+    entry_artifact_path: Optional[str] = None
+    entry_artifact_url: Optional[str] = None
+    artifact_audit_failures: list[str] = Field(default_factory=list)
 
 
 class CoworkArtifactFile(BaseModel):
@@ -297,6 +326,12 @@ class CoworkStatusResponse(BaseModel):
     started_at: Optional[int] = None
     finished_at: Optional[int] = None
     error_summary: Optional[str] = None
+    budget_floor_sec: Optional[int] = None
+    budget_applied_sec: Optional[int] = None
+    budget_auto_raised: bool = False
+    stop_reason: Optional[str] = None
+    stop_source: Optional[str] = None
+    last_timeout_event: Optional[dict[str, Any]] = None
     current_stage: Optional[
         Literal[
             "intake",

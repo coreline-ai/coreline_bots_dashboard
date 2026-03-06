@@ -1,0 +1,92 @@
+[
+  {
+    "case_no": 1,
+    "case_id": "01_mvp-hero-benefits-cta-index-html-styles-css",
+    "task": "랜딩 페이지 MVP 구현: hero/benefits/CTA 섹션 포함, index.html styles.css 생성",
+    "project_id": "web-cowork-r3-01-landing-page-mvp",
+    "expected_profile": "landing-basic",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  },
+  {
+    "case_no": 2,
+    "case_id": "02_responsive-390-768-1440-validation-log",
+    "task": "반응형 랜딩 페이지 구현: 390/768/1440 뷰포트 대응과 검증 로그 포함",
+    "project_id": "web-cowork-r3-02-landing-responsive",
+    "expected_profile": "landing-responsive",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  },
+  {
+    "case_no": 3,
+    "case_id": "03_signup-form-validation",
+    "task": "회원가입 폼 UI+검증 구현: 빈값/이메일 형식/비밀번호 규칙 검증 포함",
+    "project_id": "web-cowork-r3-03-form-validation",
+    "expected_profile": "form-validation",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  },
+  {
+    "case_no": 4,
+    "case_id": "04_theme-toggle-localstorage",
+    "task": "다크모드 토글 페이지 구현: localStorage 상태 유지 포함",
+    "project_id": "web-cowork-r3-04-theme-toggle",
+    "expected_profile": "theme-toggle",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  },
+  {
+    "case_no": 5,
+    "case_id": "05_accessibility-aria-keyboard-contrast",
+    "task": "접근성 개선 웹 페이지: 키보드 탐색/aria-label/색 대비 체크리스트 포함",
+    "project_id": "web-cowork-r3-05-accessibility-page",
+    "expected_profile": "accessibility-page",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  },
+  {
+    "case_no": 6,
+    "case_id": "06_loading-error-empty-state-demo",
+    "task": "로딩/에러/빈 상태 UI 3종 구현 및 상태 전환 데모 구성",
+    "project_id": "web-cowork-r3-06-state-demo",
+    "expected_profile": "state-demo",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  },
+  {
+    "case_no": 7,
+    "case_id": "07_catalog-search-filter-cards",
+    "task": "검색+필터 카드 목록 페이지 구현: 필터 조합 테스트 시나리오 포함",
+    "project_id": "web-cowork-r3-07-catalog-filter",
+    "expected_profile": "catalog-filter",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  },
+  {
+    "case_no": 8,
+    "case_id": "08_i18n-ko-en-landing",
+    "task": "다국어 랜딩 페이지 구현: ko/en 전환 및 문자열 리소스 분리",
+    "project_id": "web-cowork-r3-08-i18n-landing",
+    "expected_profile": "i18n-landing",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  },
+  {
+    "case_no": 9,
+    "case_id": "09_seo-meta-og-semantic-html",
+    "task": "SEO 기본 세팅 페이지 구현: meta/og/semantic HTML 반영",
+    "project_id": "web-cowork-r3-09-seo-landing",
+    "expected_profile": "seo-landing",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  },
+  {
+    "case_no": 10,
+    "case_id": "10_smoke-test-pack-report",
+    "task": "배포 전 스모크 테스트 패키지: 주요 버튼/링크/폼/네비 점검 보고서 작성",
+    "project_id": "web-cowork-r3-10-smoke-pack",
+    "expected_profile": "smoke-pack",
+    "max_parallel": 3,
+    "max_turn_sec": 45
+  }
+]

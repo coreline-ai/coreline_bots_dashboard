@@ -1302,6 +1302,63 @@ async def test_model_updates_session_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_accepts_new_codex_cli_model() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="codex")
+    session_service.adapter_model = "gpt-5.3-codex"
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(
+            bot_id="b1",
+            bot_name="Bot",
+            adapter="codex",
+            owner_user_id=999,
+            default_models={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        ),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 321,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 321, "text": "/model gpt-5.4"},
+    }
+    await handler.handle_update_payload(payload, now_ms=321)
+
+    assert session_service.adapter_model == "gpt-5.4"
+    assert "model updated: gpt-5.3-codex -> gpt-5.4" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_mode_without_configured_codex_model_uses_gpt54_default() -> None:
+    client = FakeTelegramClient()
+    session_service = FakeSessionServiceForMode(adapter_name="gemini")
+    handler = TelegramCommandHandler(
+        bot=BotIdentity(
+            bot_id="b1",
+            bot_name="Bot",
+            adapter="gemini",
+            owner_user_id=999,
+            default_models={"codex": None, "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        ),
+        client=client,
+        session_service=session_service,
+        run_service=FakeRunService(),
+    )
+
+    payload = {
+        "update_id": 322,
+        "message": {"chat": {"id": 100}, "from": {"id": 999}, "message_id": 322, "text": "/mode codex"},
+    }
+    await handler.handle_update_payload(payload, now_ms=322)
+
+    assert session_service.adapter_name == "codex"
+    assert session_service.adapter_model == "gpt-5.4"
+    assert "mode switched: gemini -> codex" in client.messages[-1][1]
+    assert "model=gpt-5.4" in client.messages[-1][1]
+
+
+@pytest.mark.asyncio
 async def test_model_rejects_unsupported_model() -> None:
     client = FakeTelegramClient()
     session_service = FakeSessionServiceForMode(adapter_name="codex")

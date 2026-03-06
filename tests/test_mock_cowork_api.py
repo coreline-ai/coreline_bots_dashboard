@@ -221,6 +221,101 @@ def test_cowork_start_active_stop_and_complete_flow(tmp_path: Path) -> None:
     store.close()
 
 
+def test_cowork_api_exposes_entry_artifact_fields_and_index_artifact(tmp_path: Path) -> None:
+    def sender_factory(store: MockMessengerStore):
+        async def fake_sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+            store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+            if text.startswith("/"):
+                store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+                return {"ok": True}
+
+            lowered = text.lower()
+            if "planner" in lowered:
+                reply = json.dumps(
+                    {
+                        "planning_tasks": [
+                            {
+                                "id": "T1",
+                                "title": "랜딩 페이지 구현",
+                                "goal": "artifact 생성",
+                                "done_criteria": "index.html/styles.css 생성",
+                                "risk": "누락",
+                                "owner_role": "implementer",
+                                "parallel_group": "G1",
+                                "dependencies": [],
+                                "artifacts": ["index.html", "styles.css"],
+                                "estimated_hours": 1.0,
+                            },
+                            {
+                                "id": "T2",
+                                "title": "검증",
+                                "goal": "README와 audit 보강",
+                                "done_criteria": "README 생성",
+                                "risk": "검증 누락",
+                                "owner_role": "implementer",
+                                "parallel_group": "G2",
+                                "dependencies": ["T1"],
+                                "artifacts": ["README.md"],
+                                "estimated_hours": 0.5,
+                            },
+                        ],
+                        "prd_content": "# PRD\n\n- non-empty",
+                        "trd_content": "# TRD\n\n- non-empty",
+                        "db_content": "# DB\n\n- non-empty",
+                        "test_strategy_content": "# Test Strategy\n\n- non-empty",
+                        "release_plan_content": "# Release Plan\n\n- non-empty",
+                        "design_doc_content": "# Design Spec\n\n- non-empty",
+                        "qa_plan_content": "# QA Test Plan\n\n- non-empty",
+                    },
+                    ensure_ascii=False,
+                )
+            elif "검토 대상 planning_tasks" in lowered:
+                reply = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+            elif "integrator" in lowered:
+                reply = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+            elif "qa 리포트" in lowered:
+                reply = "최종결론: 실행 가능\n실행체크리스트: artifact 확인\n실행링크: 없음\n증빙요약: artifact route\n즉시실행항목(Top3): 1) 리뷰 2) QA 3) 배포"
+            else:
+                reply = "결과요약: 작업 완료\n검증: 완료조건 충족\n실행링크: 없음\n증빙: artifact 생성\n테스트요청: index.html 확인\n남은이슈: 없음"
+
+            store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {reply}")
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+
+        return fake_sender
+
+    client, store = _make_client(tmp_path, sender_factory=sender_factory)
+    with client:
+        started = client.post(
+            "/_mock/cowork/start",
+            json={
+                "task": "랜딩 페이지 MVP 구현",
+                "profiles": _profiles_payload(),
+                "max_parallel": 2,
+                "max_turn_sec": 10,
+                "fresh_session": True,
+                "keep_partial_on_error": True,
+                "scenario": _scenario_payload("랜딩 페이지 MVP 구현"),
+            },
+        )
+        assert started.status_code == 200
+        cowork_id = str(started.json()["result"]["cowork_id"])
+        terminal = _wait_cowork_terminal(client, cowork_id)
+        assert terminal["status"] == "completed"
+        final_report = terminal["final_report"]
+        assert isinstance(final_report, dict)
+        assert final_report["entry_artifact_path"] == "index.html"
+        assert final_report["entry_artifact_url"] == f"/_mock/cowork/{cowork_id}/artifact/index.html"
+        assert final_report["execution_link"] == f"/_mock/cowork/{cowork_id}/artifact/index.html"
+
+        artifact = client.get(f"/_mock/cowork/{cowork_id}/artifact/index.html")
+        assert artifact.status_code == 200
+        assert "text/html" in artifact.headers["content-type"]
+        assert "<!DOCTYPE html>" in artifact.text
+
+    store.close()
+
+
 def test_cowork_start_rejects_duplicate_active(tmp_path: Path) -> None:
     def sender_factory(store: MockMessengerStore):
         async def fake_sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:

@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from telegram_bot_new.mock_messenger.cowork import CoworkOrchestrator
+from telegram_bot_new.mock_messenger.cowork_fallbacks import (
+    audit_web_project,
+    build_fallback_planning_submission,
+    ensure_web_project_scaffold,
+)
 from telegram_bot_new.mock_messenger.store import MockMessengerStore
 
 
@@ -249,6 +254,99 @@ def test_requires_render_link_does_not_false_positive_on_required_sections_keywo
         assert orchestrator._requires_render_link(task_text) is False
     finally:
         store.close()
+
+
+def test_quality_gate_passes_with_entry_artifact_url_and_audit(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-contract.db"),
+        data_dir=str(tmp_path / "cowork-contract-data"),
+    )
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=_sender,
+        poll_interval_sec=0.01,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "result",
+    )
+    try:
+        cowork_id = "c-web-pass"
+        orchestrator._scenario_cache[cowork_id] = {
+            "project_id": "web-pass",
+            "objective": "랜딩 페이지 구현",
+            "brand_tone": "신뢰감",
+            "target_audience": "일반 사용자",
+            "core_cta": "지금 시작하기",
+            "required_sections": ["hero", "product", "trust", "cta"],
+            "forbidden_elements": ["허위 과장 문구"],
+            "constraints": ["검증 가능한 증빙 필수"],
+            "deadline": "2026-03-31",
+            "priority": "P1",
+        }
+        orchestrator._project_meta_cache[cowork_id] = {"project_id": "web-pass", "project_profile": "landing-basic"}
+        ensure_web_project_scaffold("landing-basic", orchestrator._artifact_dir(cowork_id), orchestrator._scenario_cache[cowork_id])
+        final_report = {
+            "final_conclusion": "실행 가능",
+            "execution_checklist": "검증 완료",
+            "qa_signoff": "APPROVED",
+            "entry_artifact_url": f"/_mock/cowork/{cowork_id}/artifact/index.html",
+            "defects": [],
+        }
+        gate = orchestrator._evaluate_completion_gate(
+            cowork_id=cowork_id,
+            task_text="랜딩 페이지 구현",
+            execution_rows=[{"status": "success", "response_text": "결과요약: ok"}],
+            final_report=final_report,
+        )
+        assert gate.passed is True
+        assert gate.execution_link == f"/_mock/cowork/{cowork_id}/artifact/index.html"
+    finally:
+        store.close()
+
+
+def test_fallback_planning_submission_produces_non_empty_docs(tmp_path: Path) -> None:
+    payload = build_fallback_planning_submission(
+        "landing-basic",
+        {
+            "project_id": "non-empty-docs",
+            "objective": "랜딩 페이지 구현",
+            "brand_tone": "신뢰감",
+            "target_audience": "일반 사용자",
+            "core_cta": "지금 시작하기",
+            "required_sections": ["hero", "product", "trust", "cta"],
+            "forbidden_elements": ["허위 과장 문구"],
+            "constraints": ["검증 가능한 증빙 필수"],
+            "deadline": "2026-03-31",
+            "priority": "P1",
+        },
+    )
+    assert payload["prd_content"].strip()
+    assert payload["trd_content"].strip()
+    assert payload["db_content"].strip()
+    assert payload["test_strategy_content"].strip()
+    assert payload["release_plan_content"].strip()
+    assert payload["design_doc_content"].strip()
+    assert payload["qa_plan_content"].strip()
+
+
+def test_profile_specific_artifact_audit_checks_required_files_and_markers(tmp_path: Path) -> None:
+    scenario = {
+        "project_id": "theme-page",
+        "objective": "다크모드 토글 페이지 구현",
+        "brand_tone": "신뢰감",
+        "target_audience": "일반 사용자",
+        "core_cta": "지금 시작하기",
+        "required_sections": ["hero", "product", "trust", "cta"],
+        "forbidden_elements": ["허위 과장 문구"],
+        "constraints": ["검증 가능한 증빙 필수"],
+        "deadline": "2026-03-31",
+        "priority": "P1",
+    }
+    artifact_dir = tmp_path / "theme-page"
+    ensure_web_project_scaffold("theme-toggle", artifact_dir, scenario)
+    audit = audit_web_project("theme-toggle", artifact_dir)
+    assert audit["passed"] is True
+    assert audit["missing_files"] == []
+    assert audit["empty_files"] == []
 
 
 def test_workflow_documents_are_generated_from_snapshot(tmp_path: Path) -> None:

@@ -30,9 +30,11 @@ def create_cowork(
             """
             INSERT INTO coworks(
               cowork_id, task, status, max_parallel, max_turn_sec, fresh_session, keep_partial_on_error,
-              stop_requested, created_at, started_at, finished_at, error_summary, final_report_json
+              stop_requested, budget_floor_sec, budget_applied_sec, budget_auto_raised, budget_reason,
+              stop_reason, stop_source, stop_requested_by, last_timeout_event_json,
+              created_at, started_at, finished_at, error_summary, final_report_json
             )
-            VALUES (?, ?, 'queued', ?, ?, ?, ?, 0, ?, NULL, NULL, NULL, NULL)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, 0, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL)
             """,
             (
                 cowork_id,
@@ -70,6 +72,33 @@ def create_cowork(
     return cowork_id
 
 
+def set_cowork_budget(
+    self: MockMessengerStore,
+    *,
+    cowork_id: str,
+    budget_floor_sec: int | None,
+    budget_applied_sec: int | None,
+    budget_auto_raised: bool,
+    budget_reason: str | None = None,
+) -> None:
+    with self._lock:
+        self._conn.execute(
+            """
+            UPDATE coworks
+            SET budget_floor_sec = ?, budget_applied_sec = ?, budget_auto_raised = ?, budget_reason = ?
+            WHERE cowork_id = ?
+            """,
+            (
+                int(budget_floor_sec) if budget_floor_sec is not None else None,
+                int(budget_applied_sec) if budget_applied_sec is not None else None,
+                1 if budget_auto_raised else 0,
+                budget_reason,
+                cowork_id,
+            ),
+        )
+        self._conn.commit()
+
+
 def set_cowork_running(self: MockMessengerStore, *, cowork_id: str) -> None:
     now_ms = _now_ms()
     with self._lock:
@@ -85,11 +114,35 @@ def set_cowork_running(self: MockMessengerStore, *, cowork_id: str) -> None:
         self._conn.commit()
 
 
-def set_cowork_stop_requested(self: MockMessengerStore, *, cowork_id: str) -> None:
+def set_cowork_stop_requested(
+    self: MockMessengerStore,
+    *,
+    cowork_id: str,
+    reason: str | None = None,
+    source: str | None = None,
+    requested_by: str | None = None,
+) -> None:
     with self._lock:
         self._conn.execute(
-            "UPDATE coworks SET stop_requested = 1 WHERE cowork_id = ?",
-            (cowork_id,),
+            """
+            UPDATE coworks
+            SET stop_requested = 1,
+                stop_reason = COALESCE(?, stop_reason),
+                stop_source = COALESCE(?, stop_source),
+                stop_requested_by = COALESCE(?, stop_requested_by)
+            WHERE cowork_id = ?
+            """,
+            (reason, source, requested_by, cowork_id),
+        )
+        self._conn.commit()
+
+
+def set_cowork_timeout_event(self: MockMessengerStore, *, cowork_id: str, event: dict[str, Any] | None) -> None:
+    serialized = json.dumps(event, ensure_ascii=False) if isinstance(event, dict) else None
+    with self._lock:
+        self._conn.execute(
+            "UPDATE coworks SET last_timeout_event_json = ? WHERE cowork_id = ?",
+            (serialized, cowork_id),
         )
         self._conn.commit()
 
@@ -99,7 +152,9 @@ def get_cowork(self: MockMessengerStore, *, cowork_id: str) -> dict[str, Any] | 
         row = self._conn.execute(
             """
             SELECT cowork_id, task, status, max_parallel, max_turn_sec, fresh_session, keep_partial_on_error,
-                   stop_requested, created_at, started_at, finished_at, error_summary, final_report_json
+                   stop_requested, budget_floor_sec, budget_applied_sec, budget_auto_raised, budget_reason,
+                   stop_reason, stop_source, stop_requested_by, last_timeout_event_json,
+                   created_at, started_at, finished_at, error_summary, final_report_json
             FROM coworks
             WHERE cowork_id = ?
             """,
@@ -115,7 +170,9 @@ def get_active_cowork(self: MockMessengerStore) -> dict[str, Any] | None:
         row = self._conn.execute(
             """
             SELECT cowork_id, task, status, max_parallel, max_turn_sec, fresh_session, keep_partial_on_error,
-                   stop_requested, created_at, started_at, finished_at, error_summary, final_report_json
+                   stop_requested, budget_floor_sec, budget_applied_sec, budget_auto_raised, budget_reason,
+                   stop_reason, stop_source, stop_requested_by, last_timeout_event_json,
+                   created_at, started_at, finished_at, error_summary, final_report_json
             FROM coworks
             WHERE status IN ('queued', 'running')
             ORDER BY created_at DESC
@@ -144,9 +201,12 @@ def insert_cowork_stage_start(
             """
             INSERT INTO cowork_stages(
               cowork_id, stage_no, stage_type, actor_bot_id, actor_label, actor_role,
-              prompt_text, response_text, status, error_text, started_at, finished_at, duration_ms
+              prompt_text, response_text, status, error_text, resolved_status,
+              raw_outcome_status, raw_outcome_detail, raw_outcome_error_text,
+              fallback_applied, fallback_source, effective_timeout_sec,
+              started_at, finished_at, duration_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'running', NULL, ?, NULL, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'running', NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, NULL, NULL)
             """,
             (cowork_id, stage_no, stage_type, actor_bot_id, actor_label, actor_role, prompt_text, started_at),
         )
@@ -161,6 +221,13 @@ def finish_cowork_stage(
     status: str,
     response_text: str | None = None,
     error_text: str | None = None,
+    resolved_status: str | None = None,
+    raw_outcome_status: str | None = None,
+    raw_outcome_detail: str | None = None,
+    raw_outcome_error_text: str | None = None,
+    fallback_applied: bool = False,
+    fallback_source: str | None = None,
+    effective_timeout_sec: int | None = None,
 ) -> None:
     finished_at = _now_ms()
     with self._lock:
@@ -173,10 +240,26 @@ def finish_cowork_stage(
         self._conn.execute(
             """
             UPDATE cowork_stages
-            SET status = ?, response_text = ?, error_text = ?, finished_at = ?, duration_ms = ?
+            SET status = ?, response_text = ?, error_text = ?, resolved_status = ?, raw_outcome_status = ?,
+                raw_outcome_detail = ?, raw_outcome_error_text = ?, fallback_applied = ?, fallback_source = ?,
+                effective_timeout_sec = ?, finished_at = ?, duration_ms = ?
             WHERE id = ?
             """,
-            (status, response_text, error_text, finished_at, duration_ms, stage_id),
+            (
+                status,
+                response_text,
+                error_text,
+                resolved_status or status,
+                raw_outcome_status,
+                raw_outcome_detail,
+                raw_outcome_error_text,
+                1 if fallback_applied else 0,
+                fallback_source,
+                int(effective_timeout_sec) if effective_timeout_sec is not None else None,
+                finished_at,
+                duration_ms,
+                stage_id,
+            ),
         )
         self._conn.commit()
 
@@ -198,9 +281,12 @@ def insert_cowork_task(
             """
             INSERT INTO cowork_tasks(
               cowork_id, task_no, title, spec_json, assignee_bot_id, assignee_label, assignee_role,
-              status, response_text, error_text, started_at, finished_at, duration_ms
+              status, response_text, error_text, resolved_status, raw_outcome_status, raw_outcome_detail,
+              raw_outcome_error_text, fallback_applied, fallback_source, effective_timeout_sec,
+              blocked_by_task_no, blocked_by_bot_id, blocked_by_reason,
+              started_at, finished_at, duration_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
             """,
             (
                 cowork_id,
@@ -238,6 +324,16 @@ def finish_cowork_task(
     status: str,
     response_text: str | None = None,
     error_text: str | None = None,
+    resolved_status: str | None = None,
+    raw_outcome_status: str | None = None,
+    raw_outcome_detail: str | None = None,
+    raw_outcome_error_text: str | None = None,
+    fallback_applied: bool = False,
+    fallback_source: str | None = None,
+    effective_timeout_sec: int | None = None,
+    blocked_by_task_no: int | None = None,
+    blocked_by_bot_id: str | None = None,
+    blocked_by_reason: str | None = None,
 ) -> None:
     finished_at = _now_ms()
     with self._lock:
@@ -250,10 +346,30 @@ def finish_cowork_task(
         self._conn.execute(
             """
             UPDATE cowork_tasks
-            SET status = ?, response_text = ?, error_text = ?, finished_at = ?, duration_ms = ?
+            SET status = ?, response_text = ?, error_text = ?, resolved_status = ?, raw_outcome_status = ?,
+                raw_outcome_detail = ?, raw_outcome_error_text = ?, fallback_applied = ?, fallback_source = ?,
+                effective_timeout_sec = ?, blocked_by_task_no = ?, blocked_by_bot_id = ?, blocked_by_reason = ?,
+                finished_at = ?, duration_ms = ?
             WHERE id = ?
             """,
-            (status, response_text, error_text, finished_at, duration_ms, task_id),
+            (
+                status,
+                response_text,
+                error_text,
+                resolved_status or status,
+                raw_outcome_status,
+                raw_outcome_detail,
+                raw_outcome_error_text,
+                1 if fallback_applied else 0,
+                fallback_source,
+                int(effective_timeout_sec) if effective_timeout_sec is not None else None,
+                int(blocked_by_task_no) if blocked_by_task_no is not None else None,
+                blocked_by_bot_id,
+                blocked_by_reason,
+                finished_at,
+                duration_ms,
+                task_id,
+            ),
         )
         self._conn.commit()
 
@@ -317,7 +433,9 @@ def list_cowork_stages(self: MockMessengerStore, *, cowork_id: str) -> list[dict
         rows = self._conn.execute(
             """
             SELECT id, cowork_id, stage_no, stage_type, actor_bot_id, actor_label, actor_role,
-                   prompt_text, response_text, status, error_text, started_at, finished_at, duration_ms
+                   prompt_text, response_text, status, error_text, resolved_status, raw_outcome_status,
+                   raw_outcome_detail, raw_outcome_error_text, fallback_applied, fallback_source,
+                   effective_timeout_sec, started_at, finished_at, duration_ms
             FROM cowork_stages
             WHERE cowork_id = ?
             ORDER BY id ASC
@@ -337,6 +455,13 @@ def list_cowork_stages(self: MockMessengerStore, *, cowork_id: str) -> list[dict
             "response_text": row["response_text"],
             "status": row["status"],
             "error_text": row["error_text"],
+            "resolved_status": row["resolved_status"],
+            "raw_outcome_status": row["raw_outcome_status"],
+            "raw_outcome_detail": row["raw_outcome_detail"],
+            "raw_outcome_error_text": row["raw_outcome_error_text"],
+            "fallback_applied": bool(int(row["fallback_applied"])) if row["fallback_applied"] is not None else False,
+            "fallback_source": row["fallback_source"],
+            "effective_timeout_sec": int(row["effective_timeout_sec"]) if row["effective_timeout_sec"] is not None else None,
             "started_at": int(row["started_at"]),
             "finished_at": int(row["finished_at"]) if row["finished_at"] is not None else None,
             "duration_ms": int(row["duration_ms"]) if row["duration_ms"] is not None else None,
@@ -350,7 +475,10 @@ def list_cowork_tasks(self: MockMessengerStore, *, cowork_id: str) -> list[dict[
         rows = self._conn.execute(
             """
             SELECT id, cowork_id, task_no, title, spec_json, assignee_bot_id, assignee_label, assignee_role,
-                   status, response_text, error_text, started_at, finished_at, duration_ms
+                   status, response_text, error_text, resolved_status, raw_outcome_status, raw_outcome_detail,
+                   raw_outcome_error_text, fallback_applied, fallback_source, effective_timeout_sec,
+                   blocked_by_task_no, blocked_by_bot_id, blocked_by_reason,
+                   started_at, finished_at, duration_ms
             FROM cowork_tasks
             WHERE cowork_id = ?
             ORDER BY task_no ASC, id ASC
@@ -381,6 +509,16 @@ def list_cowork_tasks(self: MockMessengerStore, *, cowork_id: str) -> list[dict[
                 "status": row["status"],
                 "response_text": row["response_text"],
                 "error_text": row["error_text"],
+                "resolved_status": row["resolved_status"],
+                "raw_outcome_status": row["raw_outcome_status"],
+                "raw_outcome_detail": row["raw_outcome_detail"],
+                "raw_outcome_error_text": row["raw_outcome_error_text"],
+                "fallback_applied": bool(int(row["fallback_applied"])) if row["fallback_applied"] is not None else False,
+                "fallback_source": row["fallback_source"],
+                "effective_timeout_sec": int(row["effective_timeout_sec"]) if row["effective_timeout_sec"] is not None else None,
+                "blocked_by_task_no": int(row["blocked_by_task_no"]) if row["blocked_by_task_no"] is not None else None,
+                "blocked_by_bot_id": row["blocked_by_bot_id"],
+                "blocked_by_reason": row["blocked_by_reason"],
                 "started_at": int(row["started_at"]) if row["started_at"] is not None else None,
                 "finished_at": int(row["finished_at"]) if row["finished_at"] is not None else None,
                 "duration_ms": int(row["duration_ms"]) if row["duration_ms"] is not None else None,

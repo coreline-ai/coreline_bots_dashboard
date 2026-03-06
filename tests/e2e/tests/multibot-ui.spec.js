@@ -126,7 +126,7 @@ test('provider dropdown applies /mode then /model immediately', async ({ page })
     if (text.startsWith('/mode ')) {
       const nextAgent = text.replace('/mode ', '').trim().toLowerCase();
       state.agent = nextAgent;
-      state.model = nextAgent === 'codex' ? 'gpt-5' : (nextAgent === 'claude' ? 'claude-sonnet-4-5' : 'gemini-2.5-pro');
+      state.model = nextAgent === 'codex' ? 'gpt-5.4' : (nextAgent === 'claude' ? 'claude-sonnet-4-5' : 'gemini-2.5-pro');
       state.messages.push({
         message_id: ++state.nextMessageId,
         direction: 'bot',

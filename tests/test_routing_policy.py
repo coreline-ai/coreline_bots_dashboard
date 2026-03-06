@@ -27,12 +27,12 @@ def test_suggest_route_with_auto_prefix_routes_by_task_type() -> None:
         prompt="@auto 코드 리팩토링 해줘",
         session_provider="gemini",
         session_model=None,
-        default_models={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-flash", "claude": "claude-sonnet-4-5"},
+        default_models={"codex": "gpt-5.4", "gemini": "gemini-2.5-flash", "claude": "claude-sonnet-4-5"},
     )
     assert decision.enabled is True
     assert decision.task_type == "code"
     assert decision.provider == "codex"
-    assert decision.model == "gpt-5.3-codex"
+    assert decision.model == "gpt-5.4"
     assert decision.stripped_prompt == "코드 리팩토링 해줘"
 
 
@@ -41,7 +41,7 @@ def test_suggest_route_with_forced_provider() -> None:
         prompt="@auto:claude 성능 전략 비교",
         session_provider="gemini",
         session_model=None,
-        default_models={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-flash", "claude": "claude-sonnet-4-5"},
+        default_models={"codex": "gpt-5.4", "gemini": "gemini-2.5-flash", "claude": "claude-sonnet-4-5"},
     )
     assert decision.enabled is True
     assert decision.provider == "claude"

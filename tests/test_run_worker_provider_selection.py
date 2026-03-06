@@ -490,7 +490,7 @@ async def test_process_run_job_applies_auto_route_prefix_and_switches_provider(m
         telegram_client=_TelegramClientNoop(),
         streamer=streamer,
         summary_service=_SummaryService(),
-        default_models_by_provider={"codex": "gpt-5.3-codex", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
+        default_models_by_provider={"codex": "gpt-5.4", "gemini": "gemini-2.5-pro", "claude": "claude-sonnet-4-5"},
         default_sandbox="workspace-write",
         lease_ms=30_000,
         sent_artifacts_by_chat={},
@@ -499,7 +499,7 @@ async def test_process_run_job_applies_auto_route_prefix_and_switches_provider(m
     assert repo.completed is True
     assert requested[0] == "codex"
     assert codex_adapter.last_request is not None
-    assert codex_adapter.last_request.model == "gpt-5.3-codex"
+    assert codex_adapter.last_request.model == "gpt-5.4"
     assert codex_adapter.last_request.prompt.startswith("fix bug in code path")
 
 

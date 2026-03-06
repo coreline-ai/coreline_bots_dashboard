@@ -18,7 +18,7 @@
       public_url: https://example.com/telegram/webhook/bot-a/bot-a-path
     adapter: gemini
     codex:
-      model: gpt-5
+      model: gpt-5.4
       sandbox: workspace-write
     gemini:
       model: gemini-2.5-pro

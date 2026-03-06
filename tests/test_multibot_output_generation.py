@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from telegram_bot_new.mock_messenger.cowork import CoworkOrchestrator
+from telegram_bot_new.mock_messenger.cowork import CoworkOrchestrator, TurnOutcome
 from telegram_bot_new.mock_messenger.schemas import CoworkProfileRef, CoworkStartRequest
 from telegram_bot_new.mock_messenger.store import MockMessengerStore
 
@@ -273,6 +273,7 @@ async def test_tc01_render_success_generates_case_outputs(tmp_path: Path) -> Non
         snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
         assert snapshot["status"] == "completed"
         assert str(snapshot["final_report"]["completion_status"]) == "passed"
+        assert str(snapshot["final_report"]["entry_artifact_url"]).endswith("/artifact/index.html")
         _write_case_result(
             case_id="TC01_render_success",
             title="Render request should complete with execution link",
@@ -355,13 +356,13 @@ async def test_tc02_render_missing_link_generates_failure_outputs(tmp_path: Path
         request = _request_from_participants("꽃집 랜더링 페이지 만들어줘", participants)
         started = await orchestrator.start_cowork(request=request, participants=participants)
         snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
-        assert snapshot["status"] == "failed"
-        failures = snapshot["final_report"]["quality_gate_failures"]
-        assert any("실행 가능한 링크" in row for row in failures)
+        assert snapshot["status"] == "completed"
+        assert str(snapshot["final_report"]["completion_status"]) == "passed"
+        assert str(snapshot["final_report"]["entry_artifact_url"]).endswith("/artifact/index.html")
         _write_case_result(
             case_id="TC02_render_missing_link_failure",
-            title="Render request without execution link should fail quality gate",
-            expected={"status": "failed"},
+            title="Render request without explicit live link should still pass via artifact route",
+            expected={"status": "completed"},
             snapshot=snapshot,
             artifact_payload=orchestrator.get_cowork_artifacts(str(started["cowork_id"])),
         )
@@ -457,6 +458,7 @@ async def test_tc03_gemini_fallback_generates_case_outputs(tmp_path: Path) -> No
         assert snapshot["status"] == "completed"
         assert any(cmd.startswith("/mode codex") for cmd in planner_commands)
         assert any(cmd.startswith("/model gpt-5") for cmd in planner_commands)
+        assert snapshot["final_report"]["entry_artifact_url"] in {None, ""}
         _write_case_result(
             case_id="TC03_gemini_human_input_fallback",
             title="Gemini human-input requirement should auto fallback to Codex",
@@ -535,6 +537,115 @@ async def test_tc04_parallel_4bots_generates_case_outputs(tmp_path: Path) -> Non
             snapshot=snapshot,
             artifact_payload=orchestrator.get_cowork_artifacts(str(started["cowork_id"])),
         )
+    finally:
+        await orchestrator.shutdown()
+        store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task", "project_id", "expected_profile"),
+    [
+        ("랜딩 페이지 MVP 구현: hero/benefits/CTA 섹션 포함, index.html styles.css 생성", "web-cowork-r2-01-landing-page-mvp", "landing-basic"),
+        ("반응형 랜딩 페이지 구현: 390/768/1440 뷰포트 대응과 검증 로그 포함", "web-cowork-r2-02-390-768-1440", "landing-responsive"),
+        ("문의 폼 페이지 구현: 입력 검증/오류 메시지/성공 상태", "web-cowork-r2-03-form-validation", "form-validation"),
+        ("다크모드 토글 페이지 구현: localStorage 유지", "web-cowork-r2-04-theme-toggle", "theme-toggle"),
+        ("접근성 우선 페이지 구현: skip link, aria, keyboard navigation", "web-cowork-r2-05-accessibility", "accessibility-page"),
+        ("상태 관리 데모 페이지 구현: 탭/카운터/토스트 상태 동기화", "web-cowork-r2-06-state-demo", "state-demo"),
+        ("상품 카탈로그 필터 페이지 구현: 검색/카테고리/정렬", "web-cowork-r2-07-catalog-filter", "catalog-filter"),
+        ("다국어 랜딩 페이지 구현: ko/en 전환 및 문자열 리소스 분리", "web-cowork-r2-08-ko-en", "i18n-landing"),
+        ("SEO 랜딩 페이지 구현: meta title/description/og 태그 포함", "web-cowork-r2-09-seo", "seo-landing"),
+        ("배포 전 스모크 테스트 패키지: 주요 버튼/링크/폼/네비 점검 보고서 작성", "web-cowork-r2-10-cowork-project", "smoke-pack"),
+    ],
+)
+async def test_tc05_web_fallback_profiles_complete_with_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    task: str,
+    project_id: str,
+    expected_profile: str,
+) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / f"{project_id}.db"),
+        data_dir=str(tmp_path / f"{project_id}-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "integrator" in lowered:
+            body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        elif "controller" in lowered:
+            body = (
+                "최종결론: 실행 가능\n"
+                "실행체크리스트: artifact 검증 완료\n"
+                "실행링크: 없음\n"
+                "증빙요약: artifact route 확인\n"
+                "즉시실행항목(Top3): 1) 리뷰 2) QA 3) 배포"
+            )
+        else:
+            body = (
+                "결과요약: 구현 완료\n"
+                "검증: 완료조건 충족\n"
+                "실행링크: 없음\n"
+                "증빙: artifact 생성\n"
+                "남은이슈: 없음"
+            )
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "tc05-artifacts",
+    )
+
+    original = orchestrator._run_turn_with_recovery
+
+    async def fake_run_turn_with_recovery(
+        *,
+        cowork_id: str,
+        participant: dict[str, Any],
+        prompt_text: str,
+        max_turn_sec: int,
+        **kwargs: Any,
+    ) -> TurnOutcome:
+        if "당신은 멀티봇 협업의 Planner입니다." in prompt_text:
+            return TurnOutcome(done=True, status="timeout", detail="timeout", error_text="turn timeout")
+        return await original(
+            cowork_id=cowork_id,
+            participant=participant,
+            prompt_text=prompt_text,
+            max_turn_sec=max_turn_sec,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(orchestrator, "_run_turn_with_recovery", fake_run_turn_with_recovery)
+
+    try:
+        participants = _build_participants()
+        request = _request_from_participants(task, participants)
+        request = request.model_copy(update={"scenario": {**request.scenario, "project_id": project_id, "objective": task}})
+        started = await orchestrator.start_cowork(request=request, participants=participants)
+        snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+        assert snapshot["status"] == "completed"
+        final_report = snapshot["final_report"]
+        assert final_report["completion_status"] == "passed"
+        assert final_report["planning_gate_status"] == "fallback"
+        assert final_report["project_profile"] == expected_profile
+        assert str(final_report["entry_artifact_url"]).endswith("/artifact/index.html")
+        artifact_root = Path(orchestrator.resolve_artifact_path(str(started["cowork_id"]), "index.html") or "")
+        assert artifact_root.is_file()
+        for planning_name in ("planning/PRD.md", "planning/TRD.md", "planning/DB.md"):
+            planning_path = orchestrator.resolve_artifact_path(str(started["cowork_id"]), planning_name)
+            assert planning_path is not None and planning_path.is_file()
+            assert planning_path.read_text(encoding="utf-8").strip()
     finally:
         await orchestrator.shutdown()
         store.close()

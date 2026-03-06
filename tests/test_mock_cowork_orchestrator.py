@@ -535,9 +535,11 @@ async def test_cowork_orchestrator_uses_planning_fallback_and_role_normalization
     done = await _wait_terminal(orchestrator, cowork_id)
     assert done["status"] == "completed"
     assert len(done["tasks"]) >= 1
-    assert planner_attempts >= 2
+    assert planner_attempts == 1
     participant_roles = [row["role"] for row in done["participants"]]
     assert "implementer" in participant_roles
+    assert done["final_report"]["planning_gate_status"] == "fallback"
+    assert done["final_report"]["entry_artifact_url"] in {None, ""}
 
     await orchestrator.shutdown()
     store.close()
@@ -634,6 +636,509 @@ async def test_cowork_orchestrator_blocks_dependent_task_when_predecessor_fails(
     non_command_user_msgs = [m for m in token_d_messages if m.get("direction") == "user" and not str(m.get("text") or "").startswith("/")]
     assert non_command_user_msgs == []
 
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_controller_reject_uses_soft_gate_and_completes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COWORK_WEB_ALLOW_PLANNER_AUGMENT", "1")
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-soft-gate.db"),
+        data_dir=str(tmp_path / "cowork-soft-gate-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "planner" in lowered:
+            body = json.dumps(
+                {
+                    "planning_tasks": [
+                        {
+                            "id": "T1",
+                            "title": "화면 구현",
+                            "goal": "랜딩 페이지 구조 생성",
+                            "done_criteria": "index.html/styles.css 생성",
+                            "risk": "누락",
+                            "owner_role": "implementer",
+                            "parallel_group": "G1",
+                            "dependencies": [],
+                            "artifacts": ["index.html", "styles.css"],
+                            "estimated_hours": 1.0,
+                        },
+                        {
+                            "id": "T2",
+                            "title": "검증",
+                            "goal": "artifact audit 준비",
+                            "done_criteria": "README 포함",
+                            "risk": "검증 누락",
+                            "owner_role": "implementer",
+                            "parallel_group": "G2",
+                            "dependencies": ["T1"],
+                            "artifacts": ["README.md"],
+                            "estimated_hours": 0.5,
+                        },
+                    ],
+                    "prd_content": "# PRD\n\n- non-empty",
+                    "trd_content": "# TRD\n\n- non-empty",
+                    "db_content": "# DB\n\n- non-empty",
+                    "test_strategy_content": "# Test Strategy\n\n- non-empty",
+                    "release_plan_content": "# Release Plan\n\n- non-empty",
+                    "design_doc_content": "# Design Spec\n\n- non-empty",
+                    "qa_plan_content": "# QA Test Plan\n\n- non-empty",
+                },
+                ensure_ascii=False,
+            )
+        elif "검토 대상 planning_tasks" in lowered:
+            body = '{"decision":"REJECTED","reason":"controller wants stronger constraints","must_fix":["constraints"]}'
+        elif "qa 리포트" in lowered:
+            body = "최종결론: 실행 가능\n실행체크리스트: artifact 확인\n실행링크: 없음\n증빙요약: artifact route\n즉시실행항목(Top3): 1) 리뷰 2) QA 3) 배포"
+        elif "integrator" in lowered:
+            body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        else:
+            body = "결과요약: 구현 완료\n검증: 완료조건 충족\n실행링크: 없음\n증빙: artifact 생성\n테스트요청: index.html 확인\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "soft-gate-artifacts",
+    )
+    req = _make_request(task="랜딩 페이지 MVP 구현")
+    started = await orchestrator.start_cowork(request=req, participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert snapshot["status"] == "completed"
+    assert snapshot["final_report"]["planning_gate_status"] == "soft_pass"
+    assert snapshot["final_report"]["entry_artifact_url"]
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_planning_timeout_uses_fallback_submission_and_completes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-planning-fallback.db"),
+        data_dir=str(tmp_path / "cowork-planning-fallback-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "검토 대상 planning_tasks" in lowered:
+            body = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+        elif "qa 리포트" in lowered:
+            body = "최종결론: 실행 가능\n실행체크리스트: artifact 확인\n실행링크: 없음\n증빙요약: artifact route\n즉시실행항목(Top3): 1) 리뷰 2) QA 3) 배포"
+        elif "integrator" in lowered:
+            body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        else:
+            body = "결과요약: 구현 완료\n검증: 완료조건 충족\n실행링크: 없음\n증빙: artifact 생성\n테스트요청: index.html 확인\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "planning-fallback-artifacts",
+    )
+
+    original = orchestrator._run_turn_with_recovery
+
+    async def fake_run_turn_with_recovery(*, cowork_id: str, participant: dict[str, Any], prompt_text: str, max_turn_sec: int, **kwargs: Any) -> TurnOutcome:
+        if "당신은 멀티봇 협업의 Planner입니다." in prompt_text:
+            return TurnOutcome(done=True, status="timeout", detail="timeout", error_text="turn timeout")
+        return await original(
+            cowork_id=cowork_id,
+            participant=participant,
+            prompt_text=prompt_text,
+            max_turn_sec=max_turn_sec,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(orchestrator, "_run_turn_with_recovery", fake_run_turn_with_recovery)
+    started = await orchestrator.start_cowork(request=_make_request(task="SEO 기본 세팅 페이지 구현"), participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert snapshot["status"] == "completed"
+    assert snapshot["final_report"]["planning_gate_status"] == "fallback"
+    assert snapshot["tasks"]
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_web_guaranteed_mode_skips_planner_and_records_budget(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-web-guaranteed.db"),
+        data_dir=str(tmp_path / "cowork-web-guaranteed-data"),
+    )
+    planner_prompts = 0
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        nonlocal planner_prompts
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        if "planner" in text.lower():
+            planner_prompts += 1
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:00][assistant_message] ignored')
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "web-guaranteed-artifacts",
+    )
+    started = await orchestrator.start_cowork(request=_make_request(task="랜딩 페이지 MVP 구현"), participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert snapshot["status"] == "completed"
+    assert planner_prompts == 0
+    assert snapshot["budget_floor_sec"] == 30
+    planning_stage = next(row for row in snapshot["stages"] if str(row.get("stage_type")) == "planning")
+    assert planning_stage["raw_outcome_status"] == "skipped"
+    assert snapshot["final_report"]["planning_gate_status"] == "fallback"
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_planning_timeout_records_timeout_actor_before_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COWORK_WEB_ALLOW_PLANNER_AUGMENT", "1")
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-planning-timeout-actor.db"),
+        data_dir=str(tmp_path / "cowork-planning-timeout-actor-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "integrator" in lowered:
+            body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        elif "qa 리포트" in lowered:
+            body = "최종결론: 실행 가능\n실행체크리스트: artifact 확인\n실행링크: 없음\n증빙요약: artifact route\n즉시실행항목(Top3): 1) 리뷰 2) QA 3) 배포"
+        else:
+            body = "결과요약: 구현 완료\n검증: 완료조건 충족\n실행링크: 없음\n증빙: artifact 생성\n테스트요청: index.html 확인\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "planning-timeout-actor-artifacts",
+    )
+
+    async def fake_run_turn_with_recovery(*, cowork_id: str, participant: dict[str, Any], prompt_text: str, max_turn_sec: int, **kwargs: Any) -> TurnOutcome:
+        if "당신은 멀티봇 협업의 Planner입니다." in prompt_text:
+            return TurnOutcome(done=True, status="timeout", detail="timeout", error_text="turn timeout", effective_timeout_sec=75)
+        return TurnOutcome(
+            done=True,
+            status="success",
+            detail="assistant_message",
+            response_text="QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+            if "Integrator" in prompt_text
+            else "최종결론: 실행 가능\n실행체크리스트: artifact 확인\n실행링크: 없음\n증빙요약: artifact route\n즉시실행항목(Top3): 1) 리뷰 2) QA 3) 배포",
+        )
+
+    monkeypatch.setattr(orchestrator, "_run_turn_with_recovery", fake_run_turn_with_recovery)
+    started = await orchestrator.start_cowork(request=_make_request(task="SEO 기본 세팅 페이지 구현"), participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    planning_stage = next(row for row in snapshot["stages"] if str(row.get("stage_type")) == "planning")
+    assert planning_stage["raw_outcome_status"] == "timeout"
+    assert planning_stage["fallback_applied"] is True
+    assert snapshot["last_timeout_event"]["origin"] == "turn_timeout"
+    assert snapshot["last_timeout_event"]["label"] == "Bot B"
+    assert snapshot["last_timeout_event"]["role"] == "planner"
+    assert snapshot["last_timeout_event"]["stage_type"] == "planning"
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_stop_reason_and_runner_timeout_event_are_exposed(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-stop-metadata.db"),
+        data_dir=str(tmp_path / "cowork-stop-metadata-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        await asyncio.sleep(0.2)
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:00][assistant_message] busy')
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "stop-metadata-artifacts",
+    )
+    started = await orchestrator.start_cowork(request=_make_request(task="일반 협업 작업"), participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    cowork_id = str(started["cowork_id"])
+    await orchestrator.stop_cowork(
+        cowork_id,
+        reason="case_timeout",
+        source="cowork-web-live-suite",
+        requested_by="playwright",
+    )
+    snapshot = await _wait_terminal(orchestrator, cowork_id, timeout_sec=4.0)
+    assert snapshot["status"] == "stopped"
+    assert snapshot["stop_reason"] == "case_timeout"
+    assert snapshot["stop_source"] == "cowork-web-live-suite"
+    assert snapshot["last_timeout_event"]["origin"] == "runner_case_timeout"
+    assert snapshot["last_timeout_event"]["label"] == "cowork-web-live-suite"
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_implementation_timeout_recovers_with_scaffold_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-impl-fallback.db"),
+        data_dir=str(tmp_path / "cowork-impl-fallback-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "planner" in lowered:
+            body = json.dumps(
+                {
+                    "planning_tasks": [
+                        {
+                            "id": "T1",
+                            "title": "다크모드 구현",
+                            "goal": "theme toggle 페이지 생성",
+                            "done_criteria": "localStorage 유지",
+                            "risk": "상태 누락",
+                            "owner_role": "implementer",
+                            "parallel_group": "G1",
+                            "dependencies": [],
+                            "artifacts": ["index.html", "styles.css", "app.js"],
+                            "estimated_hours": 1.0,
+                        },
+                        {
+                            "id": "T2",
+                            "title": "검증",
+                            "goal": "artifact 확인",
+                            "done_criteria": "README 반영",
+                            "risk": "검증 누락",
+                            "owner_role": "implementer",
+                            "parallel_group": "G2",
+                            "dependencies": ["T1"],
+                            "artifacts": ["README.md"],
+                            "estimated_hours": 0.5,
+                        },
+                    ],
+                    "prd_content": "# PRD\n\n- non-empty",
+                    "trd_content": "# TRD\n\n- non-empty",
+                    "db_content": "# DB\n\n- non-empty",
+                    "test_strategy_content": "# Test Strategy\n\n- non-empty",
+                    "release_plan_content": "# Release Plan\n\n- non-empty",
+                    "design_doc_content": "# Design Spec\n\n- non-empty",
+                    "qa_plan_content": "# QA Test Plan\n\n- non-empty",
+                },
+                ensure_ascii=False,
+            )
+        elif "검토 대상 planning_tasks" in lowered:
+            body = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+        elif "qa 리포트" in lowered:
+            body = "최종결론: 실행 가능\n실행체크리스트: artifact 확인\n실행링크: 없음\n증빙요약: artifact route\n즉시실행항목(Top3): 1) 리뷰 2) QA 3) 배포"
+        elif "integrator" in lowered:
+            body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        else:
+            body = "결과요약: 구현 완료\n검증: 완료조건 충족\n실행링크: 없음\n증빙: artifact 생성\n테스트요청: index.html 확인\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "implementation-fallback-artifacts",
+    )
+    monkeypatch.setattr(orchestrator, "_is_web_guaranteed_mode", lambda **kwargs: False)
+
+    original = orchestrator._run_turn_with_recovery
+
+    async def fake_run_turn_with_recovery(*, cowork_id: str, participant: dict[str, Any], prompt_text: str, max_turn_sec: int, **kwargs: Any) -> TurnOutcome:
+        if "당신은 멀티봇 협업의 Implementer입니다." in prompt_text:
+            return TurnOutcome(done=True, status="timeout", detail="timeout", error_text="turn timeout")
+        return await original(
+            cowork_id=cowork_id,
+            participant=participant,
+            prompt_text=prompt_text,
+            max_turn_sec=max_turn_sec,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(orchestrator, "_run_turn_with_recovery", fake_run_turn_with_recovery)
+    started = await orchestrator.start_cowork(request=_make_request(task="다크모드 토글 페이지 구현"), participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert snapshot["status"] == "completed"
+    assert snapshot["final_report"]["scaffold_source"] in {"fallback", "hybrid"}
+    assert any("fallback_scaffold" in str(task.get("response_text") or "") for task in snapshot["tasks"])
+    execution_stage = next(row for row in snapshot["stages"] if str(row.get("stage_type")) == "implementation")
+    execution_task = next(row for row in snapshot["tasks"] if int(row.get("task_no") or 0) == 1)
+    assert execution_stage["raw_outcome_status"] == "timeout"
+    assert execution_stage["fallback_applied"] is True
+    assert execution_task["raw_outcome_status"] == "timeout"
+    assert execution_task["fallback_applied"] is True
+    assert snapshot["last_timeout_event"]["origin"] == "turn_timeout"
+    assert snapshot["last_timeout_event"]["label"] == "Bot C"
+    assert snapshot["last_timeout_event"]["role"] == "implementer"
+    assert snapshot["last_timeout_event"]["stage_type"] == "implementation"
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_qa_and_finalization_timeout_use_synthesized_fallbacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-qa-final-fallback.db"),
+        data_dir=str(tmp_path / "cowork-qa-final-fallback-data"),
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "planner" in lowered:
+            body = json.dumps(
+                {
+                    "planning_tasks": [
+                        {
+                            "id": "T1",
+                            "title": "SEO landing",
+                            "goal": "semantic html scaffold 생성",
+                            "done_criteria": "meta/og 포함",
+                            "risk": "seo 누락",
+                            "owner_role": "implementer",
+                            "parallel_group": "G1",
+                            "dependencies": [],
+                            "artifacts": ["index.html", "styles.css"],
+                            "estimated_hours": 1.0,
+                        },
+                        {
+                            "id": "T2",
+                            "title": "검증",
+                            "goal": "artifact 확인",
+                            "done_criteria": "README 반영",
+                            "risk": "검증 누락",
+                            "owner_role": "implementer",
+                            "parallel_group": "G2",
+                            "dependencies": ["T1"],
+                            "artifacts": ["README.md"],
+                            "estimated_hours": 0.5,
+                        },
+                    ],
+                    "prd_content": "# PRD\n\n- non-empty",
+                    "trd_content": "# TRD\n\n- non-empty",
+                    "db_content": "# DB\n\n- non-empty",
+                    "test_strategy_content": "# Test Strategy\n\n- non-empty",
+                    "release_plan_content": "# Release Plan\n\n- non-empty",
+                    "design_doc_content": "# Design Spec\n\n- non-empty",
+                    "qa_plan_content": "# QA Test Plan\n\n- non-empty",
+                },
+                ensure_ascii=False,
+            )
+        elif "검토 대상 planning_tasks" in lowered:
+            body = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+        else:
+            body = "결과요약: 구현 완료\n검증: 완료조건 충족\n실행링크: 없음\n증빙: artifact 생성\n테스트요청: index.html 확인\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "qa-final-fallback-artifacts",
+    )
+
+    original = orchestrator._run_turn_with_recovery
+
+    async def fake_run_turn_with_recovery(*, cowork_id: str, participant: dict[str, Any], prompt_text: str, max_turn_sec: int, **kwargs: Any) -> TurnOutcome:
+        lowered = prompt_text.lower()
+        if "당신은 멀티봇 협업의 integrator입니다." in lowered or "당신은 멀티봇 협업의 controller입니다." in lowered and "qa 리포트" in lowered:
+            return TurnOutcome(done=True, status="timeout", detail="timeout", error_text="turn timeout")
+        return await original(
+            cowork_id=cowork_id,
+            participant=participant,
+            prompt_text=prompt_text,
+            max_turn_sec=max_turn_sec,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(orchestrator, "_run_turn_with_recovery", fake_run_turn_with_recovery)
+    started = await orchestrator.start_cowork(request=_make_request(task="SEO 기본 세팅 페이지 구현"), participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert snapshot["status"] == "completed"
+    assert snapshot["final_report"]["qa_signoff"] == "APPROVED"
+    assert snapshot["final_report"]["entry_artifact_url"]
     await orchestrator.shutdown()
     store.close()
 
@@ -857,8 +1362,8 @@ async def test_cowork_orchestrator_render_task_reworks_until_link_present(tmp_pa
     done = await _wait_terminal(orchestrator, str(started["cowork_id"]))
     assert done["status"] == "completed"
     assert str(done["final_report"]["completion_status"]) == "passed"
-    assert str(done["final_report"]["execution_link"]).startswith("http://127.0.0.1:9082")
-    assert len(done["tasks"]) >= 2
+    assert str(done["final_report"]["entry_artifact_url"]).endswith("/artifact/index.html")
+    assert len(done["tasks"]) >= 1
 
     await orchestrator.shutdown()
     store.close()
@@ -942,10 +1447,11 @@ async def test_cowork_orchestrator_render_task_fails_when_link_missing(tmp_path:
     ]
     started = await orchestrator.start_cowork(request=req, participants=participants)
     done = await _wait_terminal(orchestrator, str(started["cowork_id"]))
-    assert done["status"] == "failed"
-    assert "quality gate failed" in str(done.get("error_summary") or "")
+    assert done["status"] == "completed"
+    assert str(done["final_report"]["completion_status"]) == "passed"
+    assert str(done["final_report"]["entry_artifact_url"]).endswith("/artifact/index.html")
     failures = done["final_report"]["quality_gate_failures"]
-    assert any("실행 가능한 링크" in row for row in failures)
+    assert failures == []
 
     await orchestrator.shutdown()
     store.close()

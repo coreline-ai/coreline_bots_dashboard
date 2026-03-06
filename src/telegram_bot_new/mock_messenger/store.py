@@ -156,6 +156,14 @@ class MockMessengerStore:
                   fresh_session INTEGER NOT NULL,
                   keep_partial_on_error INTEGER NOT NULL,
                   stop_requested INTEGER NOT NULL DEFAULT 0,
+                  budget_floor_sec INTEGER,
+                  budget_applied_sec INTEGER,
+                  budget_auto_raised INTEGER NOT NULL DEFAULT 0,
+                  budget_reason TEXT,
+                  stop_reason TEXT,
+                  stop_source TEXT,
+                  stop_requested_by TEXT,
+                  last_timeout_event_json TEXT,
                   created_at INTEGER NOT NULL,
                   started_at INTEGER,
                   finished_at INTEGER,
@@ -190,6 +198,13 @@ class MockMessengerStore:
                   response_text TEXT,
                   status TEXT NOT NULL,
                   error_text TEXT,
+                  resolved_status TEXT,
+                  raw_outcome_status TEXT,
+                  raw_outcome_detail TEXT,
+                  raw_outcome_error_text TEXT,
+                  fallback_applied INTEGER NOT NULL DEFAULT 0,
+                  fallback_source TEXT,
+                  effective_timeout_sec INTEGER,
                   started_at INTEGER NOT NULL,
                   finished_at INTEGER,
                   duration_ms INTEGER
@@ -207,6 +222,16 @@ class MockMessengerStore:
                   status TEXT NOT NULL,
                   response_text TEXT,
                   error_text TEXT,
+                  resolved_status TEXT,
+                  raw_outcome_status TEXT,
+                  raw_outcome_detail TEXT,
+                  raw_outcome_error_text TEXT,
+                  fallback_applied INTEGER NOT NULL DEFAULT 0,
+                  fallback_source TEXT,
+                  effective_timeout_sec INTEGER,
+                  blocked_by_task_no INTEGER,
+                  blocked_by_bot_id TEXT,
+                  blocked_by_reason TEXT,
                   started_at INTEGER,
                   finished_at INTEGER,
                   duration_ms INTEGER
@@ -226,6 +251,31 @@ class MockMessengerStore:
                 ON coworks(status, created_at DESC)
                 """
             )
+            self._ensure_column_locked(table="coworks", column="budget_floor_sec", definition="budget_floor_sec INTEGER")
+            self._ensure_column_locked(table="coworks", column="budget_applied_sec", definition="budget_applied_sec INTEGER")
+            self._ensure_column_locked(table="coworks", column="budget_auto_raised", definition="budget_auto_raised INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column_locked(table="coworks", column="budget_reason", definition="budget_reason TEXT")
+            self._ensure_column_locked(table="coworks", column="stop_reason", definition="stop_reason TEXT")
+            self._ensure_column_locked(table="coworks", column="stop_source", definition="stop_source TEXT")
+            self._ensure_column_locked(table="coworks", column="stop_requested_by", definition="stop_requested_by TEXT")
+            self._ensure_column_locked(table="coworks", column="last_timeout_event_json", definition="last_timeout_event_json TEXT")
+            self._ensure_column_locked(table="cowork_stages", column="resolved_status", definition="resolved_status TEXT")
+            self._ensure_column_locked(table="cowork_stages", column="raw_outcome_status", definition="raw_outcome_status TEXT")
+            self._ensure_column_locked(table="cowork_stages", column="raw_outcome_detail", definition="raw_outcome_detail TEXT")
+            self._ensure_column_locked(table="cowork_stages", column="raw_outcome_error_text", definition="raw_outcome_error_text TEXT")
+            self._ensure_column_locked(table="cowork_stages", column="fallback_applied", definition="fallback_applied INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column_locked(table="cowork_stages", column="fallback_source", definition="fallback_source TEXT")
+            self._ensure_column_locked(table="cowork_stages", column="effective_timeout_sec", definition="effective_timeout_sec INTEGER")
+            self._ensure_column_locked(table="cowork_tasks", column="resolved_status", definition="resolved_status TEXT")
+            self._ensure_column_locked(table="cowork_tasks", column="raw_outcome_status", definition="raw_outcome_status TEXT")
+            self._ensure_column_locked(table="cowork_tasks", column="raw_outcome_detail", definition="raw_outcome_detail TEXT")
+            self._ensure_column_locked(table="cowork_tasks", column="raw_outcome_error_text", definition="raw_outcome_error_text TEXT")
+            self._ensure_column_locked(table="cowork_tasks", column="fallback_applied", definition="fallback_applied INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column_locked(table="cowork_tasks", column="fallback_source", definition="fallback_source TEXT")
+            self._ensure_column_locked(table="cowork_tasks", column="effective_timeout_sec", definition="effective_timeout_sec INTEGER")
+            self._ensure_column_locked(table="cowork_tasks", column="blocked_by_task_no", definition="blocked_by_task_no INTEGER")
+            self._ensure_column_locked(table="cowork_tasks", column="blocked_by_bot_id", definition="blocked_by_bot_id TEXT")
+            self._ensure_column_locked(table="cowork_tasks", column="blocked_by_reason", definition="blocked_by_reason TEXT")
             self._conn.commit()
 
     def _ensure_column_locked(self, *, table: str, column: str, definition: str) -> None:
@@ -1460,6 +1510,15 @@ class MockMessengerStore:
                     final_report = loaded
             except Exception:
                 final_report = None
+        last_timeout_event: dict[str, Any] | None = None
+        raw_timeout_event = row["last_timeout_event_json"]
+        if isinstance(raw_timeout_event, str) and raw_timeout_event:
+            try:
+                loaded_timeout = json.loads(raw_timeout_event)
+                if isinstance(loaded_timeout, dict):
+                    last_timeout_event = loaded_timeout
+            except Exception:
+                last_timeout_event = None
         return {
             "cowork_id": row["cowork_id"],
             "task": row["task"],
@@ -1469,6 +1528,12 @@ class MockMessengerStore:
             "fresh_session": bool(int(row["fresh_session"])),
             "keep_partial_on_error": bool(int(row["keep_partial_on_error"])),
             "stop_requested": bool(int(row["stop_requested"])),
+            "budget_floor_sec": int(row["budget_floor_sec"]) if row["budget_floor_sec"] is not None else None,
+            "budget_applied_sec": int(row["budget_applied_sec"]) if row["budget_applied_sec"] is not None else None,
+            "budget_auto_raised": bool(int(row["budget_auto_raised"])) if row["budget_auto_raised"] is not None else False,
+            "stop_reason": row["stop_reason"],
+            "stop_source": row["stop_source"],
+            "last_timeout_event": last_timeout_event,
             "created_at": int(row["created_at"]),
             "started_at": int(row["started_at"]) if row["started_at"] is not None else None,
             "finished_at": int(row["finished_at"]) if row["finished_at"] is not None else None,
@@ -1545,8 +1610,10 @@ MockMessengerStore.list_debate_turns = _debate_store.list_debate_turns
 MockMessengerStore.list_debate_participants = _debate_store.list_debate_participants
 
 MockMessengerStore.create_cowork = _cowork_store.create_cowork
+MockMessengerStore.set_cowork_budget = _cowork_store.set_cowork_budget
 MockMessengerStore.set_cowork_running = _cowork_store.set_cowork_running
 MockMessengerStore.set_cowork_stop_requested = _cowork_store.set_cowork_stop_requested
+MockMessengerStore.set_cowork_timeout_event = _cowork_store.set_cowork_timeout_event
 MockMessengerStore.get_cowork = _cowork_store.get_cowork
 MockMessengerStore.get_active_cowork = _cowork_store.get_active_cowork
 MockMessengerStore.insert_cowork_stage_start = _cowork_store.insert_cowork_stage_start
