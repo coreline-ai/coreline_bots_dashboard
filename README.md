@@ -1,17 +1,23 @@
-# coreline_bots_dashboard
+<div align="center">
 
-[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.116-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/tests-pytest%20%2B%20playwright-6C63FF)](./tests)
+# 🤖 coreline_bots_dashboard
 
-Telegram <-> CLI adapter bridge MVP.
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.116-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Tests](https://img.shields.io/badge/tests-pytest%20%2B%20playwright-6C63FF?style=for-the-badge&logo=testinglibrary&logoColor=white)](./tests)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+
+**Telegram <-> CLI 어댑터 브리지 MVP**
+
+</div>
 
 - Telegram update ingestion (webhook + polling)
 - Job queue + lease/retry orchestration on PostgreSQL
 - CLI provider execution (`codex`, `gemini`, `claude`, `echo`)
 - Real-time event streaming back to Telegram
 - Multi-bot supervisor and local mock messenger for full offline testing
+
 
 ---
 
