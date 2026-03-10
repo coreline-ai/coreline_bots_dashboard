@@ -1,219 +1,277 @@
-# Coreline Bots Dashboard
+# coreline_bots_dashboard
 
-Telegram 메시지를 CLI 기반 AI 에이전트(Codex, Gemini, Claude) 실행으로 연결하는 멀티봇 브리지 프로젝트입니다. 단일 봇 응답기 수준이 아니라, `ingress -> DB queue -> worker -> provider adapter -> event streaming` 흐름과 로컬 Mock Messenger UI까지 포함한 운영형 MVP로 구현되어 있습니다.
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.116-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Tests](https://img.shields.io/badge/tests-pytest%20%2B%20playwright-6C63FF)](./tests)
 
-## 프로젝트 분석 요약
+Telegram <-> CLI adapter bridge MVP.
 
-이 저장소는 크게 네 가지 축으로 구성됩니다.
+- Telegram update ingestion (webhook + polling)
+- Job queue + lease/retry orchestration on PostgreSQL
+- CLI provider execution (`codex`, `gemini`, `claude`, `echo`)
+- Real-time event streaming back to Telegram
+- Multi-bot supervisor and local mock messenger for full offline testing
 
-1. `Telegram ingress`
-   실제 Telegram webhook/polling 또는 로컬 Mock Messenger에서 업데이트를 받습니다.
-2. `Session + queue persistence`
-   세션, turn, 작업 큐, 이벤트, 요약, 감사 로그를 DB에 저장합니다.
-3. `CLI provider execution`
-   `codex`, `gemini`, `claude` CLI를 subprocess로 실행하고 JSON stream을 표준 이벤트로 정규화합니다.
-4. `Local orchestration UI`
-   Mock Messenger 웹 UI에서 멀티봇, debate, cowork, play command를 실험할 수 있습니다.
+---
 
-현재 코드 기준으로 보면 이 프로젝트의 핵심 강점은 다음과 같습니다.
+<img width="1917" height="956" alt="스크린샷 2026-03-01 오후 12 00 09" src="https://github.com/user-attachments/assets/dfa2f3bb-07bf-4e68-8d42-61c67b9e4fee" />
 
-- 어댑터 교체 비용이 낮습니다. Provider별 CLI 차이를 `adapters/`에서 흡수합니다.
-- Telegram 수신과 실제 실행을 DB 큐로 분리해 재시도와 lease 기반 복구가 가능합니다.
-- 로컬 개발 환경이 강합니다. Mock Messenger, 멀티봇 실행 스크립트, Playwright E2E까지 함께 있습니다.
-- 세션 상태에 `adapter`, `model`, `skill`, `project_root`, `unsafe_until`, `thread_id`, `rolling_summary`를 유지해 작업 연속성을 고려했습니다.
+<img width="1520" height="874" alt="스크린샷 2026-03-04 오후 9 06 37" src="https://github.com/user-attachments/assets/4bf76de6-b9c7-4060-ae95-fceb8cf44e84" />
 
-반대로 현재 구조에서 주의할 점도 분명합니다.
+## 빠른 사용 가이드 (Talk/Play 기능)
 
-- 외부 CLI 설치와 인증 상태에 강하게 의존합니다.
-- `mock_messenger/cowork.py`와 `mock_messenger/web/app.js`에 기능이 많이 집중되어 있어 변경 영향 범위가 큽니다.
-- 운영 DB는 PostgreSQL을 기준으로 설계되었지만, 로컬 멀티봇 편의상 SQLite도 함께 지원합니다. 문맥에 따라 DB 동작 차이를 이해해야 합니다.
+처음 실행한 뒤, 아래 순서대로 하면 신규 기능(`/talk`, `/relay`~`/court`)을 바로 체험할 수 있습니다.
 
-## 실제 구현 범위
+### 1) 실행
 
-### 백엔드 런타임
+```bash
+./scripts/run-local-multibot.sh start
+```
 
-- `python -m telegram_bot_new.main supervisor`
-  봇 설정 파일을 읽어 embedded bot 프로세스와 gateway 프로세스를 감시합니다.
-- `python -m telegram_bot_new.main run-bot --bot-id <id>`
-  개별 봇을 실행합니다.
-- `python -m telegram_bot_new.main run-gateway`
-  gateway 모드 봇들의 webhook ingress를 한 프로세스로 받습니다.
+### 2) UI 접속
 
-### Provider adapter
+- 기본 URL: `http://127.0.0.1:9082/_mock/ui`
+- 왼쪽 `Multi Bots`에서 필요한 수만큼 봇을 선택합니다.
+- `/court`는 반드시 3개 이상 봇을 선택해야 합니다.
 
-현재 어댑터는 아래 4종입니다.
+### 3) 입력 위치
 
-- `codex`
-- `gemini`
-- `claude`
-- `echo`
+- 아래 2곳 모두 동일하게 동작합니다.
+  - Timeline 입력창(`message-input`)
+  - 왼쪽 병렬 입력창(`parallel-message-input`)
 
-`codex`, `gemini`, `claude`는 모두 CLI subprocess를 실행하고 스트리밍 JSON 이벤트를 내부 공통 이벤트로 변환합니다. `run_worker`는 이 이벤트를 DB에 적재하고 Telegram edit/send 스트리밍으로 전달합니다.
+### 4) 가장 빠른 체험 명령
 
-### 세션 및 명령 체계
+```text
+/talk 오늘은 뭐 만들까? --rounds 1
+/relay 퇴근길 지하철에서 생긴 일 --rounds 1
+/pitchbattle 주말 사이드 프로젝트 아이디어 --rounds 1
+/quizbattle 한국사 상식 --rounds 1
+/debate-lite 원격근무 vs 오피스근무 --rounds 1
+/improv 우주 엘리베이터에서 길을 잃은 팀 --rounds 1
+/quest 30분 안에 랜딩 페이지 초안 완성 --rounds 1
+/memechain 재택근무 현실 --rounds 1
+/court 버그 배포 사고 책임 공방 --rounds 1
+```
 
-텔레그램 명령 처리기는 아래 상태를 세션에 반영합니다.
+### 4-1) 케이스 설명 표 (`--rounds 1` 기준)
 
-- `/new`, `/reset`, `/status`, `/summary`
-- `/mode`, `/model`
-- `/project`
-- `/skills`, `/skill`
-- `/unsafe`
-- `/providers`
-- `/stop`
-- `/youtube`
+| 명령어 | 모드 성격 | 결과 스타일(1라운드) | 추천 용도 |
+|---|---|---|---|
+| `/talk 오늘은 뭐 만들까? --rounds 1` | 자유 대화 | 가볍게 아이디어를 던지고 빠르게 정리 | 워밍업, 브레인스토밍 시작 |
+| `/relay 퇴근길 지하철에서 생긴 일 --rounds 1` | 릴레이 스토리 | 앞 발화를 이어 다음 장면 생성 | 스토리 이어쓰기, 콘텐츠 초안 |
+| `/pitchbattle 주말 사이드 프로젝트 아이디어 --rounds 1` | 피치 대결 | 짧은 설득형 아이디어 제시 | 아이디어 비교, 후보 압축 |
+| `/quizbattle 한국사 상식 --rounds 1` | 퀴즈 대결 | 문제/답변 흐름으로 지식 점검 | 학습용 퀴즈, 팀 아이스브레이킹 |
+| `/debate-lite 원격근무 vs 오피스근무 --rounds 1` | 경량 찬반 토론 | 찬반 논지 + 핵심 근거 제시 | 의사결정 전 관점 점검 |
+| `/improv 우주 엘리베이터에서 길을 잃은 팀 --rounds 1` | 즉흥극 | 캐릭터 몰입형 상황 전개 | 창의 글쓰기, 세계관 확장 |
+| `/quest 30분 안에 랜딩 페이지 초안 완성 --rounds 1` | 협동 미션 | 진행 상태 + 다음 액션 중심 | 실무 태스크 kickoff |
+| `/memechain 재택근무 현실 --rounds 1` | 밈 체인 | 짧고 리듬감 있는 밈 연쇄 | 소셜 카피, 가벼운 콘텐츠 |
+| `/court 버그 배포 사고 책임 공방 --rounds 1` | 법정 공방 롤플레이 | 검사/변호/증인형 논리 공방 | 이슈 회고, 책임/원인 구조화 |
 
-즉, 이 프로젝트는 단순 챗봇이 아니라 "대화 세션에 실행 환경을 붙이는 컨트롤 레이어"에 가깝습니다.
+### 5) 공통 옵션
 
-### Mock Messenger / 멀티봇 오케스트레이션
+- `--rounds <n>`: 라운드 수 (`1~8`)
+- `--max-turn-sec <n>`: 턴 최대 대기 시간 (`10~240`)
+- `--keep-session`: `/new`를 생략하고 현재 세션 유지
 
-Mock Messenger는 Telegram 대체 입력 채널이자 개발용 제어 UI입니다.
+### 6) 결과 보는 곳
 
-- `/talk`, `/relay`, `/pitchbattle`, `/quizbattle`
-- `/debate-lite`, `/improv`, `/quest`, `/memechain`, `/court`
-- `/cowork` 기반 역할 분담 오케스트레이션
-- 봇 카탈로그 조회/추가/삭제
-- embedded runtime health/metrics diagnostics
-- artifact 다운로드 및 HTML/이미지 preview
+- `Parallel Results`: 각 턴/명령의 PASS/FAIL 요약
+- 상단 `Talk / Play Viewer`: 대화/플레이 로그 전체 흐름
 
-## 아키텍처
+### 7) 자주 막히는 경우
+
+- `알 수 없는 옵션` 에러: 지원 옵션(`--rounds`, `--max-turn-sec`, `--keep-session`)만 사용
+- 오래 걸림: `--rounds 1`, `--max-turn-sec 20~45`로 먼저 테스트
+- 활성 run 충돌: `/stop` 후 재시도
+- 판정 표시가 `[판정 실패]`: 봇 응답에 `WINNER:`, `VERDICT:`, `RESULT:` 형식이 없는 경우
+
+상세 운영 가이드는 [docs/play_commands_manual.md](./docs/play_commands_manual.md)를 참고하세요.
+
+
+## Table of Contents
+
+- [빠른 사용 가이드 (Talk/Play 기능)](#빠른-사용-가이드-talkplay-기능)
+- [특징](#특징)
+- [1. Project Summary](#1-project-summary)
+- [2. Architecture](#2-architecture)
+- [3. Runtime Modes](#3-runtime-modes)
+- [4. Tech Stack](#4-tech-stack)
+- [5. Quick Start](#5-quick-start)
+- [6. Configuration](#6-configuration)
+- [7. Run Guide](#7-run-guide)
+- [8. Mock Messenger Guide](#8-mock-messenger-guide)
+- [9. Telegram Command Reference](#9-telegram-command-reference)
+- [10. API Endpoints](#10-api-endpoints)
+- [11. Data Model and Queue States](#11-data-model-and-queue-states)
+- [12. Metrics and Observability](#12-metrics-and-observability)
+- [13. Test Strategy](#13-test-strategy)
+- [14. Script Catalog](#14-script-catalog)
+- [15. Troubleshooting](#15-troubleshooting)
+- [16. License](#16-license)
+
+---
+
+## 특징
+
+- 각 봇은 기본적으로 `/mode` 명령으로 `gemini`, `codex`, `claude` 모드를 전환할 수 있고, 대시보드 봇 카드에서 provider/model 드롭다운으로 즉시 변경할 수 있습니다.
+- Codex 기본 모델은 `gpt-5.4`이며, 대시보드와 `/model` 명령에서 `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.2`, `gpt-5.1-codex-mini`, `gpt-5`를 선택할 수 있습니다.
+- 멀티봇을 지원하여, 한 번의 프롬프트로 여러 봇에서 다양한 형태의 결과물을 병렬로 얻을 수 있습니다.
+- Session 섹션에서 `Project / Skill / Role(controller/planner/executor/integrator)`를 통합 제어할 수 있고, 병렬 입력창에서 `/cowork <요청>`으로 역할 기반 협업 오케스트레이션을 실행할 수 있습니다.
+- Mock Dashboard UI에서는 `/talk` 외에 `/relay`, `/pitchbattle`, `/quizbattle`, `/debate-lite`, `/improv`, `/quest`, `/memechain`, `/court` Play 명령 8종을 즉시 실행할 수 있습니다.
+- 좌측 `Parallel Results / Debate Panel / Cowork Panel / Control Tower`는 동일한 접기/펼치기 UX를 제공하며, 펼친 상태가 많아지면 사이드바 전체에서 스크롤됩니다.
+- 멀티봇은 동적으로 다수 생성 및 삭제가 가능합니다.
+- 대시보드를 제공하여 시뮬레이션과 다양한 추가 개발 테스트를 수행할 수 있습니다.
+- Telegram 연동 코드는 구현되어 있으나, 현재 Telegram 계정 부재로 실계정 연동 테스트는 아직 진행하지 않았습니다.
+
+---
+
+## 1. Project Summary
+
+이 프로젝트는 Telegram 메시지를 CLI 에이전트 실행으로 연결하는 브리지입니다.
+핵심은 다음 4단계입니다.
+
+1. Telegram 업데이트 수신 (webhook/polling)
+2. DB 기반 큐에 작업 적재
+3. 워커가 CLI provider 실행 + 이벤트/아티팩트 수집
+4. 결과를 Telegram으로 스트리밍 전송 + 세션 요약 누적
+
+현재 구조는 MVP이지만, 멀티봇/장애복구/로컬 테스트 자동화까지 포함되어 운영 검증에 유리합니다.
+
+---
+
+## 2. Architecture
 
 ```mermaid
 flowchart LR
-    U[User or Mock UI] --> TG[Telegram API / Mock Messenger]
-    TG --> IN[Webhook or Poller]
-    IN --> TU[(telegram_updates)]
-    TU --> TUJ[(telegram_update_jobs)]
-    TUJ --> UW[update_worker]
-    UW --> CMD[TelegramCommandHandler]
-    CMD --> S[(sessions)]
-    CMD --> T[(turns)]
-    T --> RJ[(cli_run_jobs)]
-    RJ --> RW[run_worker]
-    RW --> AD[CLI Adapter]
-    AD --> EV[(cli_events)]
-    RW --> SS[(session_summaries)]
-    EV --> ST[TelegramEventStreamer]
-    ST --> TG
+  U[Telegram User] --> TG[Telegram API or Mock API]
+  TG --> IN[Ingress: webhook or poller]
+  IN --> TU[(telegram_updates)]
+  TU --> TUJ[(telegram_update_jobs)]
+  TUJ --> UW[update_worker]
+  UW --> CMD[TelegramCommandHandler]
+  CMD --> T[(turns)]
+  T --> RJ[(cli_run_jobs)]
+  RJ --> RW[run_worker]
+  RW --> AD[CLI Adapter: codex/gemini/claude/echo]
+  AD --> EV[(cli_events)]
+  EV --> ST[TelegramEventStreamer]
+  ST --> TG
+  RW --> SS[SummaryService]
+  SS --> S[(sessions + session_summaries)]
 ```
 
-### 요청 처리 흐름
+### 핵심 동작 포인트
 
-1. webhook 또는 polling이 update를 수신합니다.
-2. update payload를 `telegram_updates`에 저장합니다.
-3. `telegram_update_jobs` 큐에 적재합니다.
-4. `update_worker`가 명령/일반 텍스트를 해석합니다.
-5. 세션을 생성 또는 재사용하고 `turns`, `cli_run_jobs`를 만듭니다.
-6. `run_worker`가 provider CLI를 실행합니다.
-7. provider stream을 `cli_events`에 적재합니다.
-8. 이벤트를 Telegram edit/send 방식으로 스트리밍합니다.
-9. turn 완료 후 요약과 artifact를 후처리합니다.
+- **Lease 기반 워커 처리**
+  - `telegram_update_jobs`, `cli_run_jobs`를 `FOR UPDATE SKIP LOCKED`로 lease 처리
+  - 워커 재시작/크래시 시 lease 만료 후 재처리 가능
+- **중복 제어**
+  - `(bot_id, update_id)` 중복 차단
+  - 활성 run/session 유니크 인덱스로 동시성 보호
+- **세션 연속성**
+  - provider thread id 저장 + rolling summary 누적
+  - provider 전환 시 thread는 reset, summary 기반 문맥은 유지
+- **실시간 스트리밍**
+  - 이벤트를 `cli_events`에 영속화
+  - Telegram 메시지 edit + continuation 전략으로 장문 대응
 
-## 런타임 모드
+---
 
-| 모드 | 설명 |
-| --- | --- |
-| `embedded` | API, poller, update worker, run worker를 한 프로세스에 묶어 실행 |
-| `gateway` | webhook ingress만 gateway가 담당하고, 봇별 worker 프로세스는 별도로 실행 |
+## 3. Runtime Modes
 
-코드상 특징:
+### `embedded`
 
-- `embedded`는 봇별 `/healthz`, `/readyz`, `/metrics`, `/audit_logs`를 제공합니다.
-- `gateway`는 ingress를 통합하지만, 실제 run 처리는 개별 worker 경로로 분리됩니다.
-- local multibot 스크립트는 기본적으로 봇별 SQLite DB를 자동 생성해 충돌을 줄입니다.
+- 봇당 1프로세스
+- 각 프로세스가 API + workers를 같이 수행
+- 엔드포인트: `/healthz`, `/readyz`, `/metrics`, `/telegram/webhook/{bot_id}/{path_secret}`
 
-## 저장소 구조
+### `gateway`
 
-```text
-src/telegram_bot_new/
-  adapters/           provider CLI adapter 계층
-  db/                 SQLAlchemy 모델, repository, SQL migration
-  services/           session/run/summary/action token 등 도메인 서비스
-  streaming/          Telegram 이벤트 스트리밍
-  telegram/           Telegram API client, poller, command handlers
-  workers/            update_worker, run_worker, run pipeline
-  mock_messenger/     로컬 Telegram 대체 서버 + 웹 UI + debate/cowork
-  main.py             CLI 엔트리 포인트
-  settings.py         .env + bots.yaml 설정 로딩
+- 공유 webhook API 1개 + gateway bot마다 worker-only 프로세스
+- API/worker 분리 운영에 유리
+- gateway API는 모든 gateway bot webhook을 수신해서 큐에 적재
 
-tests/
-  pytest 기반 단위/통합 테스트 34개 파일
+---
 
-tests/e2e/
-  Playwright 기반 UI E2E
-
-scripts/
-  로컬 실행, smoke, release-flow, incident drill, 보고서 스크립트
-
-docs/
-  운영 계획, 테스트 계획, RCA, 사용 가이드
-```
-
-참고로 루트 `package.json`은 백엔드 런타임 필수 의존성이 아니라 Remotion/Puppeteer 계열 자산용이며, Playwright E2E는 `tests/e2e/package.json`을 별도로 사용합니다.
-
-## 기술 스택
-
-### Python 런타임
+## 4. Tech Stack
 
 - Python 3.11+
-- FastAPI
-- Uvicorn
-- SQLAlchemy 2.x
-- `asyncpg`, `aiosqlite`
-- Pydantic v2
-- PyYAML
+- FastAPI + Uvicorn
+- SQLAlchemy 2 + asyncpg
+- PostgreSQL (운영 큐/상태 저장소)
+- httpx (Telegram API / 외부 요청)
+- PyYAML + pydantic-settings
+- pytest + pytest-asyncio
+- Playwright (mock UI E2E)
 
-### 데이터 저장소
+---
 
-- 운영 기본값: PostgreSQL
-- 로컬 멀티봇 편의: SQLite 지원
+## 5. Quick Start
 
-### 프런트/도구
+### macOS / Linux
 
-- Mock Messenger Web UI: vanilla HTML/CSS/JS
-- Playwright E2E
-- Puppeteer / React / Remotion 관련 패키지 포함
+```bash
+docker compose up -d postgres
 
-## 설정
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 
-### `.env`
+cp .env.example .env
+cp config/bots.example.yaml config/bots.yaml
+```
 
-`.env.example` 기준 핵심 변수:
+### Windows (PowerShell)
 
-| 변수 | 기본값 | 설명 |
-| --- | --- | --- |
-| `DATABASE_URL` | 없음 | 기본 DB 연결 문자열 |
-| `LOG_LEVEL` | `INFO` | 로그 레벨 |
-| `JOB_LEASE_MS` | `30000` | 큐 lease 시간 |
-| `WORKER_POLL_INTERVAL_MS` | `250` | worker polling 주기 |
-| `SUPERVISOR_RESTART_MAX_BACKOFF_SEC` | `30` | supervisor 재시작 백오프 |
-| `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | 실제 Telegram 또는 Mock base URL |
-| `TELEGRAM_VIRTUAL_TOKEN` | `mock_token_1` | mock fallback token |
-| `BOT_SKILLS_DIR` | `./skills` | 스킬 루트 경로 |
+```powershell
+.\scripts\bootstrap-local.ps1
+```
 
-코드상 추가로 자주 보는 런타임 변수:
+### 최소 실행
 
-| 변수 | 기본값 | 설명 |
-| --- | --- | --- |
-| `RUN_TURN_TIMEOUT_SEC` | `180` | 단일 run watchdog timeout |
-| `RUN_WORKER_CONCURRENCY` | `2` | run worker 동시 처리 수 |
-| `CODEX_BIN` / `GEMINI_BIN` / `CLAUDE_BIN` | 없음 | provider binary override |
+```bash
+python -m telegram_bot_new.main supervisor
+```
 
-### `config/bots.yaml`
+---
 
-봇별로 아래 속성을 가질 수 있습니다.
+## 6. Configuration
 
-- `bot_id`, `name`, `mode`
-- `telegram_token`, `owner_user_id`
-- `webhook.public_url`, `webhook.path_secret`, `webhook.secret_token`
-- `adapter`
-- `codex.model`, `codex.sandbox`
-- `gemini.model`
-- `claude.model`
-- `database_url`
-- `telegram_api_base_url`
+### 6.1 `.env` 주요 변수
 
-예시:
+| Key | Required | Default | Description |
+|---|---|---|---|
+| `DATABASE_URL` | Yes | - | PostgreSQL async URL |
+| `LOG_LEVEL` | No | `INFO` | 로그 레벨 |
+| `JOB_LEASE_MS` | No | `30000` | 잡 lease 기간 |
+| `WORKER_POLL_INTERVAL_MS` | No | `250` | 워커 poll 주기 |
+| `RUN_TURN_TIMEOUT_SEC` | No | `90` | 단일 turn watchdog timeout(초, 최소 15) |
+| `SUPERVISOR_RESTART_MAX_BACKOFF_SEC` | No | `30` | supervisor 재시작 백오프 상한 |
+| `TELEGRAM_API_BASE_URL` | No | `https://api.telegram.org` | Telegram base URL (mock 사용 시 로컬 주소) |
+| `TELEGRAM_VIRTUAL_TOKEN` | No | `mock_token_1` | mock 토큰 자동 fallback |
+| `TELEGRAM_BOT_TOKEN` | No | empty | env-only bootstrap 토큰 |
+| `TELEGRAM_OWNER_USER_ID` | No | empty | owner-only 접근 제어 |
+| `TELEGRAM_BOT_ID` | No | `bot-1` | env-only bootstrap bot id |
+| `TELEGRAM_BOT_NAME` | No | `Bot 1` | env-only bootstrap bot name |
+| `TELEGRAM_BOT_MODE` | No | `embedded` | env-only bootstrap mode |
+| `TELEGRAM_WEBHOOK_PUBLIC_URL` | No | empty | webhook URL (없으면 polling) |
+| `TELEGRAM_WEBHOOK_PATH_SECRET` | No | empty | webhook path secret |
+| `TELEGRAM_WEBHOOK_SECRET_TOKEN` | No | empty | webhook secret token |
+| `BOT_SKILLS_DIR` | No | empty | skill 루트 경로(기본 `./skills`) |
+| `STRICT_BOT_DB_ISOLATION` | No | `false` | 멀티봇에서 bot별 `database_url` 강제 여부 |
+
+### 6.2 `config/bots.yaml`
+
+최소 설정:
+
+```yaml
+bots:
+  - telegram_token: TELEGRAM_BOT_TOKEN
+```
+
+상세 설정 예시:
 
 ```yaml
 bots:
@@ -236,95 +294,261 @@ bots:
       model: claude-sonnet-4-5
 ```
 
-## 빠른 시작
+### 6.3 Token fallback 규칙
 
-### 1. Python 환경 준비
+- `telegram_token: TELEGRAM_BOT_TOKEN`이면 `.env`의 `TELEGRAM_BOT_TOKEN` 대체
+- 토큰이 비어 있고 `TELEGRAM_API_BASE_URL`이 로컬 mock 주소면 `TELEGRAM_VIRTUAL_TOKEN` 자동 사용
+- `owner_user_id`가 비어 있으면 누구나 접근 가능
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
+---
 
-### 2. 설정 준비
+## 7. Run Guide
 
-```bash
-cp .env.example .env
-cp config/bots.example.yaml config/bots.yaml
-```
-
-### 3. PostgreSQL 실행
-
-```bash
-docker compose up -d postgres
-```
-
-### 4. 기본 런타임 실행
+### 7.1 Python module CLI
 
 ```bash
 python -m telegram_bot_new.main supervisor
+python -m telegram_bot_new.main run-bot --bot-id bot-1
+python -m telegram_bot_new.main run-gateway --config config/bots.yaml --host 0.0.0.0 --port 4312
 ```
 
-## 로컬 개발 실행
+### 7.2 Console scripts
 
-### 단일 봇 + Mock Messenger
+```bash
+telegram-bot-new supervisor
+telegram-bot-new-mock --host 127.0.0.1 --port 9082
+```
+
+### 7.3 Windows helper
+
+```powershell
+.\scripts\run-local.ps1 -Mode supervisor
+.\scripts\run-local.ps1 -Mode run-bot -BotId bot-1
+.\scripts\run-local.ps1 -Mode run-gateway
+```
+
+---
+
+## 8. Mock Messenger Guide
+
+로컬에서 Telegram 없이 전체 플로우를 검증하는 핵심 구성입니다.
+
+### 8.1 Single-bot fixed stack (macOS/Linux)
+
+```bash
+./scripts/run-local.sh up
+```
+
+관리 명령:
 
 ```bash
 ./scripts/run-local.sh start
+./scripts/run-local.sh stop
+./scripts/run-local.sh restart
 ./scripts/run-local.sh status
+./scripts/run-local.sh logs
+./scripts/run-local.sh doctor
 ```
 
-기본 UI:
+기본 URL:
 
-```text
-http://127.0.0.1:9082/_mock/ui?token=mock_token_1&chat_id=1001&user_id=9001
-```
+- UI: `http://127.0.0.1:9082/_mock/ui?token=mock_token_1&chat_id=1001&user_id=9001`
+- Bot health: `http://127.0.0.1:8600/healthz`
 
-### 멀티봇 스택
+### 8.2 Multi-bot stack
 
 ```bash
 ./scripts/run-local-multibot.sh start
-MAX_BOTS=3 ./scripts/run-local-multibot.sh start
-./scripts/run-local-multibot.sh status
 ```
 
-이 스크립트는 실행 시 `bots.effective.yaml`을 만들고, 봇별 `sqlite+aiosqlite:///.../state/<bot>.db`를 자동 주입하는 로직을 가집니다.
+기본 동작:
 
-## 주요 API
+- 기본 config: `config/bots.multibot.yaml`
+- 기본 `MAX_BOTS=8` (소스 config가 더 커도 효과 설정은 기본 8개)
+- mock + supervisor 동시 기동
 
-### embedded / gateway runtime
+유용한 명령:
 
-- `GET /healthz`
-- `GET /readyz`
-- `GET /metrics`
-- `POST /telegram/webhook/{bot_id}/{path_secret}`
+```bash
+./scripts/run-local-multibot.sh status
+./scripts/run-local-multibot.sh logs
+./scripts/run-local-multibot.sh stop
+MAX_BOTS=3 ./scripts/run-local-multibot.sh start
+CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
+```
 
-추가로 embedded runtime에는:
+### 8.3 Windows mock scripts
 
-- `GET /audit_logs`
+```powershell
+.\scripts\run-mock-messenger.ps1
+.\scripts\run-local-with-mock.ps1 -Config config/bots.yaml
+.\scripts\run-mock-codex-bridge.ps1
+.\scripts\stop-mock-codex-bridge.ps1
+```
 
-### Mock Messenger
+### 8.4 Dashboard UI 변경 포인트 (2026-03)
 
-- `GET /_mock/ui`
-- `POST /_mock/send`
-- `GET /_mock/messages`
-- `GET /_mock/state`
-- `GET /_mock/bot_catalog`
-- `GET /_mock/projects`
-- `GET /_mock/skills`
-- `POST /_mock/debate/start`
-- `POST /_mock/cowork/start`
-- `GET /_mock/cowork/{cowork_id}`
-- `GET /_mock/cowork/{cowork_id}/artifacts`
+- Session 패널은 `Session 기본 / Webhook / Rate Limit` 3개 아코디언으로 분리되며, 각 섹션 접힘 상태는 localStorage에 저장됩니다.
+- `Project / Skill / Role` 제어는 봇 카드가 아니라 Session 기본 섹션으로 이동했습니다.
+- Project 셀렉터의 후보는 `GET /_mock/projects`로 로드되며, 기준은 다음과 같습니다.
+  - 현재 workspace 루트는 항상 포함
+  - workspace의 1-depth 하위 디렉터리 중 `.git`, `package.json`, `pyproject.toml`, `requirements.txt`, `go.mod`, `Cargo.toml`, `README.md` 같은 marker 파일이 있는 디렉터리만 포함
+- Session Project 적용 우선순위:
+  - 1순위: diagnostics의 `session.current_project`(실제 런타임 상태)
+  - 2순위: 프로필의 `selected_project`(UI 저장값)
+- 좌측 사이드바 패널(`Parallel Results / Debate Panel / Cowork Panel / Control Tower`)은 모두 동일한 collapse 토글 패턴과 상태 저장(localStorage)을 사용합니다.
+- 패널을 모두 펼친 경우, 개별 패널만이 아니라 사이드바 전체(`.bot-sidebar`)에서 스크롤되도록 동작합니다.
 
-주의:
+### 8.5 Dashboard UI Play Commands (2026-03)
 
-- `/metrics`는 Prometheus text가 아니라 JSON payload입니다.
-- Mock Messenger는 자체 SQLite 저장소를 사용합니다.
+- 아래 명령은 Telegram 백엔드 slash command가 아니라 **Mock Dashboard UI 오케스트레이션 명령**입니다.
+- 입력 위치는 `message-input` 또는 `병렬 전송 메시지`(`parallel-message-input`) 둘 다 가능합니다.
+- 공통 옵션:
+  - `--rounds <n>`: 기본값은 명령별 상이, 범위 `1~8`
+  - `--max-turn-sec <n>`: 턴 타임아웃, 범위 `10~240`
+  - `--keep-session`: `/new` 없이 현재 세션을 유지하고 실행
 
-## 데이터 모델
+| Command | 기본 rounds | 최소 봇 | 설명 |
+|---|---:|---:|---|
+| `/talk <문장>` | 2 | 2 | 자유 대화 라운드 |
+| `/relay <주제>` | 3 | 2 | 릴레이 대사 이어쓰기 |
+| `/pitchbattle <주제>` | 2 | 2 | 아이디어 피치 배틀 + 판정 |
+| `/quizbattle <주제>` | 2 | 2 | 퀴즈 배틀 + 판정 |
+| `/debate-lite <주제>` | 2 | 2 | 경량 토론 + 판정 |
+| `/improv <상황>` | 3 | 2 | 즉흥극 릴레이 |
+| `/quest <미션>` | 3 | 2 | 협동 퀘스트 + 성공/실패 판정 |
+| `/memechain <주제>` | 3 | 2 | 한 줄 밈 체인 |
+| `/court <사건>` | 2 | 3 | 법정극 + 판결 |
 
-핵심 테이블은 다음과 같습니다.
+- 결과는 `Parallel Results`와 상단 `Talk / Play Viewer`에 함께 기록됩니다.
+
+---
+
+## 9. Telegram Command Reference
+
+| Command | Description |
+|---|---|
+| `/start` | 웰컴/사용 가이드 메시지 |
+| `/help` | 명령어 요약 |
+| `/new` | 새 세션 생성 |
+| `/status` | 현재 bot/adapter/model/session/thread/summary 상태 |
+| `/reset` | 현재 세션 리셋 후 새 세션 |
+| `/summary` | rolling summary 출력 |
+| `/mode` | 현재 provider 확인 + 사용법 안내 |
+| `/mode <codex\|gemini\|claude>` | provider 전환 (활성 run 중이면 차단) |
+| `/model` | 현재 provider의 model/허용 목록 조회 |
+| `/model <name>` | 현재 provider model 변경 (활성 run 중이면 차단) |
+| `/project` | 현재 세션 project root 조회 + 사용법 안내 |
+| `/project <directory-path>` | 세션 작업 경로 변경 (`off/default/reset`으로 해제, 활성 run 중이면 차단) |
+| `/skills` | 로컬 설치된 skill 프로필 목록 조회 |
+| `/skill` | 현재 세션 skill 조회 + 사용법 안내 |
+| `/skill <skill-id[,skill-id...]>` | 현재 세션 skill 적용 (활성 run 중이면 차단) |
+| `/skill off` | 현재 세션 skill 해제 |
+| `/unsafe on [minutes]` / `/unsafe off` | 세션 unsafe 모드 on/off (1~120분, 활성 run 중이면 차단) |
+| `/providers` | provider binary 설치여부 + 기본 model 표시 |
+| `/stop` | 활성 run 취소 요청 |
+| `/youtube <query>` / `/yt <query>` | YouTube 검색 후 watch URL 전송 |
+| `/echo <text>` | 입력 텍스트 그대로 에코 |
+
+일반 텍스트를 보내면 run queue에 turn이 적재됩니다.
+
+### 9.1 UI Orchestration Commands (Dashboard 전용)
+
+다음 명령은 Mock Dashboard UI 클라이언트(`/_mock/ui`)가 직접 해석해서 멀티봇 실행을 오케스트레이션합니다.
+백엔드 Telegram Command Handler의 slash command 라우팅과는 별개입니다.
+
+| Command | Description |
+|---|---|
+| `/talk <문장> [--rounds n] [--max-turn-sec n] [--keep-session]` | 자유 대화 라운드 실행 |
+| `/relay <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 릴레이 대화 |
+| `/pitchbattle <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 피치 배틀 + 판정 |
+| `/quizbattle <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 퀴즈 배틀 + 판정 |
+| `/debate-lite <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 경량 토론 + 판정 |
+| `/improv <상황> [--rounds n] [--max-turn-sec n] [--keep-session]` | 즉흥극 |
+| `/quest <미션> [--rounds n] [--max-turn-sec n] [--keep-session]` | 협동 퀘스트 + 성공/실패 판정 |
+| `/memechain <주제> [--rounds n] [--max-turn-sec n] [--keep-session]` | 밈 체인 |
+| `/court <사건> [--rounds n] [--max-turn-sec n] [--keep-session]` | 법정극 + 판결 (`3` bots 이상 필요) |
+| `/cowork <요청> [--project-id id] [--max-parallel n] [--max-turn-sec n] [--keep-session] [--strict]` | 역할 기반 협업 실행 및 아티팩트 생성 |
+
+추가 동작:
+
+- 인라인 callback 버튼(`요약`, `다시생성`, `다음추천`, `중단`)
+- action token TTL 기본 24시간
+- YouTube 자연어 의도(한/영, 오타 변형 일부) 처리
+
+Skill 관리:
+
+- 외부 스킬은 프로젝트 루트 `skills/<skill-id>/SKILL.md` 구조로 관리
+- `remotion-dev/skills` 동기화: `./scripts/sync-remotion-skill.sh`
+- 런타임은 세션의 `active_skill`을 읽어 실행 프롬프트 preamble에 자동 주입
+
+---
+
+## 10. API Endpoints
+
+### 10.1 Runtime API (embedded / gateway)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/healthz` | liveness |
+| `GET` | `/readyz` | readiness |
+| `GET` | `/metrics` | runtime + queue counters |
+| `POST` | `/telegram/webhook/{bot_id}/{path_secret}` | Telegram webhook ingest |
+
+### 10.2 Mock Telegram-compatible API
+
+| Method | Path |
+|---|---|
+| `POST` | `/bot{token}/getUpdates` |
+| `POST` | `/bot{token}/setWebhook` |
+| `POST` | `/bot{token}/deleteWebhook` |
+| `POST` | `/bot{token}/sendMessage` |
+| `POST` | `/bot{token}/editMessageText` |
+| `POST` | `/bot{token}/answerCallbackQuery` |
+| `POST` | `/bot{token}/sendDocument` |
+| `POST` | `/bot{token}/sendPhoto` |
+
+### 10.3 Mock Test/UI API
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/_mock/ui` | 웹 UI |
+| `GET` | `/_mock/threads` | 스레드 목록 |
+| `POST` | `/_mock/send` | 유저 메시지 주입 |
+| `GET` | `/_mock/messages` | 메시지 타임라인 조회 |
+| `POST` | `/_mock/messages/clear` | 타임라인/업데이트 정리 |
+| `GET` | `/_mock/document/{document_id}` | 문서/이미지 다운로드 |
+| `GET` | `/_mock/state` | mock 내부 상태 |
+| `GET` | `/_mock/bot_catalog` | 봇 카탈로그 |
+| `GET` | `/_mock/runtime_profile` | multi-bot runtime 프로파일(effective/source/max_bots) |
+| `GET` | `/_mock/projects` | Session Project 선택 후보 목록 |
+| `GET` | `/_mock/skills` | 설치된 skill 카탈로그 |
+| `GET` | `/_mock/routing/suggest` | 라우팅 정책 기반 provider/model 제안 |
+| `POST` | `/_mock/bot_catalog/add` | 동적 bot 추가 |
+| `POST` | `/_mock/bot_catalog/delete` | bot 삭제 |
+| `POST` | `/_mock/bot_catalog/role` | bot 기본 역할(controller/planner/executor/integrator) 저장 |
+| `GET` | `/_mock/bot_diagnostics` | bot 진단(health/metrics/session/error_tag) |
+| `GET` | `/_mock/audit_logs` | 최근 audit 로그 조회 |
+| `GET` | `/_mock/control_tower` | 전체 bot 상태 집계(SLO/state/action) |
+| `POST` | `/_mock/control_tower/recover` | `/stop` 또는 `/stop+/new` 기반 자동 복구 |
+| `GET` | `/_mock/forensics/bundle` | diagnostics/audit/messages/updates 포렌식 번들 |
+| `POST` | `/_mock/debate/start` | 멀티봇 토론 시작 |
+| `GET` | `/_mock/debate/active` | 진행 중 토론 조회 |
+| `GET` | `/_mock/debate/{debate_id}` | 토론 상세/턴 로그 조회 |
+| `POST` | `/_mock/debate/{debate_id}/stop` | 토론 중단 요청 |
+| `POST` | `/_mock/cowork/start` | 역할 기반 협업(`/cowork`) 시작 |
+| `GET` | `/_mock/cowork/active` | 진행 중 협업 조회 |
+| `GET` | `/_mock/cowork/{cowork_id}` | 협업 단계/작업/리포트 조회 |
+| `POST` | `/_mock/cowork/{cowork_id}/stop` | 협업 중단 요청(`reason`, `source`, `requested_by` optional body 지원) |
+| `GET` | `/_mock/cowork/{cowork_id}/artifacts` | 협업 아티팩트 메타 조회 |
+| `GET` | `/_mock/cowork/{cowork_id}/artifact/{filename}` | 협업 아티팩트 파일 다운로드 |
+| `POST` | `/_mock/rate_limit` | 429 시뮬레이션 룰 |
+
+---
+
+## 11. Data Model and Queue States
+
+### 핵심 테이블
 
 - `bots`
 - `telegram_updates`
@@ -337,83 +561,240 @@ MAX_BOTS=3 ./scripts/run-local-multibot.sh start
 - `action_tokens`
 - `deferred_button_actions`
 - `runtime_metric_counters`
-- `audit_logs`
 
-구조적으로 중요한 포인트:
+### 큐 상태값
 
-- update/job, run/job 모두 lease 기반 상태 전이를 사용합니다.
-- PostgreSQL에서는 `FOR UPDATE SKIP LOCKED`로 경쟁 선점을 처리합니다.
-- active session / active run uniqueness 보호 로직이 있습니다.
-- SQL migration은 `src/telegram_bot_new/db/migrations/*.sql`로 함께 관리됩니다.
+- `telegram_update_jobs`: `queued`, `leased`, `completed`, `failed`
+- `cli_run_jobs`: `queued`, `leased`, `in_flight`, `completed`, `failed`, `cancelled`
+- `turns`: `queued`, `in_flight`, `completed`, `failed`, `cancelled`
+- `sessions`: `active`, `reset`
 
-## Provider 실행 및 바이너리 해석
+### 동시성/무결성 포인트
 
-provider 바이너리는 아래 우선순위로 찾습니다.
+- 활성 run 유니크 인덱스: `uq_cli_run_jobs_bot_chat_active`
+- 활성 session 유니크 인덱스: `uq_sessions_bot_chat_active`
+- 이벤트 순서 유니크: `(turn_id, seq)` in `cli_events`
+- DB schema + SQL migrations는 런타임 시작 시 자동 적용
 
-1. `CODEX_BIN`, `GEMINI_BIN`, `CLAUDE_BIN`
-2. `PATH` 상의 `codex`, `gemini`, `claude`
-3. codex의 경우 VS Code / ChatGPT extension 내 번들 바이너리 탐색
+---
 
-즉, 로컬 환경에 따라 별도 설치 없이도 codex 바이너리를 찾을 수 있게 배려되어 있습니다.
+## 12. Metrics and Observability
 
-## 스킬 시스템
+`GET /metrics` 응답 구조:
 
-- 기본 스킬 루트는 `./skills`
-- 각 스킬은 `<skill>/SKILL.md`를 엔트리로 사용
-- 세션에 `/skill` 명령으로 적용 가능
-- `run_worker`는 활성 스킬을 읽어 프롬프트에 필요한 rule 문서를 일부 합성
+- `telegram_update_jobs`
+- `cli_run_jobs`
+- `in_flight_runs`
+- `telegram_updates_total`
+- `telegram_update_jobs_by_status`
+- `cli_run_jobs_by_status`
+- `runtime_counters`
 
-현재 저장소에는 예시로 `find-skills`, `remotion-best-practices` 스킬이 포함되어 있습니다.
+`runtime_counters` 대표 키:
 
-## 테스트 및 검증
+- `webhook_accept_total`
+- `webhook_duplicate_update`
+- `webhook_reject_*`
+- `callback_ack_success`
+- `callback_ack_failed`
+- `telegram_rate_limit_retry_total`
+- `telegram_rate_limit_retry.<method>`
+- `worker_heartbeat.run_worker`
+- `worker_heartbeat.update_worker`
+- `provider_switch_total.<provider>`
+- `provider_run_failed.<provider>`
+- `provider_run_watchdog_timeout.<provider>`
 
-현재 저장소에는 `tests/test_*.py` 기준 34개 pytest 파일이 있습니다.
+---
 
-대표 검증 범위:
+## 13. Test Strategy
 
-- settings / bot config 로딩
-- provider adapter event normalization
-- repository lease / postgres integration
-- telegram command handling
-- telegram poller / event streamer
-- run worker provider selection / artifact delivery
-- mock messenger API / webhook / polling flow
-- debate / cowork orchestrator
-- Playwright 기반 멀티봇 UI E2E
-
-실행 예시:
+### 13.1 Unit/Integration (pytest)
 
 ```bash
 pytest
+```
+
+주요 커버리지:
+
+- settings/token fallback 로직
+- adapter 명령 생성 + 이벤트 정규화
+- telegram API parsing/poller
+- command 핸들러(owner check, mode 전환, callback action token)
+- run worker artifact 전달(image/html)
+- queue/repository 동시성 유틸
+- mock messenger API/webhook/polling/diagnostics
+- supervisor 프로세스 스펙 계산
+
+### 13.2 E2E (Playwright)
+
+```bash
 ./scripts/verify-mock-ui-e2e.sh
+```
+
+검증 포인트:
+
+- 멀티봇 사이드바/레이아웃
+- slash command suggestion
+- 병렬 전송 결과 수집
+- profile 추가/삭제 흐름
+
+실제 라이브 UI로 `/cowork` 10개 웹 케이스를 다시 실행하고 `result/`에 증빙까지 남기려면:
+
+```bash
+./scripts/run-cowork-web-10cases.sh --headed
+```
+
+옵션 예시:
+
+```bash
+./scripts/run-cowork-web-10cases.sh --headless --max-turn-sec 45 --case-timeout-sec 240
+./scripts/run-cowork-web-10cases.sh --headless --case-timeout-sec 120
+./scripts/run-cowork-web-10cases.sh --headless --case-timeout-sec 120 --allow-unsafe-timeout
+```
+
+결과 위치:
+
+- `result/cowork_web_test_10cases_live_<timestamp>/report.md`
+- `result/cowork_web_test_10cases_live_<timestamp>/report.json`
+- 케이스별 `request.json`, `snapshot.json`, `artifacts.json`, `status.log`, `summary.md`
+- 케이스별 `ui/cowork-panel.png`, `ui/project-page.png`, `ui/failure-panel.png`
+- 케이스별 `cowork_artifacts/` 전체 복사본
+
+실패 시 우선 확인:
+
+- 루트 `runner.log`
+- 케이스 `status.log`
+- 실패 케이스 `playwright/trace.zip`
+- `cowork_artifacts/final/controller_final_report.md`
+
+timeout 분류 규칙:
+
+- `runner_case_timeout`: live UI runner가 case budget 초과로 `/_mock/cowork/{id}/stop`을 요청한 경우
+- `turn_timeout`: 특정 participant bot의 turn timeout
+- `stage_timeout_budget`: runner 요청 timeout이 cowork 계산 budget보다 작아서 자동 상향된 경우
+
+live rerun 스크립트의 timeout 보정 규칙:
+
+- 기본적으로 `--case-timeout-sec`가 cowork snapshot의 `budget_floor_sec`보다 작으면 자동으로 상향됩니다.
+- 상향된 값은 `report.json`, `summary.md`, `status.log`, `suite_meta.json`에 모두 기록됩니다.
+- 강제로 unsafe timeout을 유지하고 싶으면 `--allow-unsafe-timeout`을 명시해야 합니다.
+
+### 13.3 Smoke scripts
+
+```bash
 ./scripts/verify-multibot-smoke.sh
 ./scripts/verify-release-flow.sh
 ```
 
-## 분석 기반 운영 판단
+---
 
-### 이 프로젝트가 잘하는 것
+## 14. Script Catalog
 
-- 실제 Telegram 없이도 거의 전체 플로우를 로컬에서 재현할 수 있습니다.
-- 세션, 요약, 작업 경로, 스킬, provider 전환이 하나의 대화 컨텍스트에 묶여 있습니다.
-- 다중 provider를 단일 이벤트 스트림 모델로 통합한 구조가 명확합니다.
+| Script | Purpose |
+|---|---|
+| `scripts/bootstrap-local.ps1` | Windows bootstrap(venv + deps + config seed) |
+| `scripts/run-local.ps1` | Windows runtime helper(supervisor/run-bot/run-gateway) |
+| `scripts/run-local.sh` | macOS/Linux single-bot stack wrapper |
+| `scripts/run-local-fixed.sh` | single-bot stack 실제 실행기(mock + bot) |
+| `scripts/run-local-multibot.sh` | multi-bot stack 실행기(mock + supervisor) |
+| `scripts/run-cowork-web-10cases.sh` | temp runtime + real browser로 `/cowork` 웹 10케이스 재실행 및 증빙 리포트 생성, unsafe case timeout 자동 상향 지원 |
+| `scripts/run-local-with-mock.ps1` | Windows에서 mock + supervisor 동시 실행 |
+| `scripts/run-mock-messenger.ps1` | Windows mock만 실행 |
+| `scripts/run-mock-codex-bridge.ps1` | mock + codex bridge 실행 |
+| `scripts/stop-mock-codex-bridge.ps1` | bridge/mock 정리 |
+| `scripts/report_cowork_web_suite.py` | live cowork raw evidence를 `report.md`/`report.json`으로 집계하고 timeout origin/actor/budget metadata를 노출 |
+| `scripts/verify-multibot-smoke.sh` | 멀티봇 스모크 검증 |
+| `scripts/verify-mock-ui-e2e.sh` | mock UI Playwright E2E |
+| `scripts/verify-release-flow.sh` | 주요 테스트 + 런타임 스모크 |
 
-### 유지보수 시 주의할 부분
+---
 
-- `mock_messenger/cowork.py`와 `mock_messenger/web/app.js`는 길고 책임이 큽니다.
-- provider CLI의 출력 포맷이 바뀌면 adapter normalization이 먼저 깨질 수 있습니다.
-- README나 운영 문서에서 PostgreSQL 전용 기능으로 오해하기 쉽지만, 실제 로컬 스크립트는 SQLite를 적극 사용합니다.
-- `/metrics`의 형식과 의미를 외부 모니터링 시스템과 바로 연결 가능한 수준으로 착각하면 안 됩니다.
+## 15. Troubleshooting
 
-## 참고 문서
+### `provider executable not found` 에러
 
-- `docs/play_commands_manual.md`
-- `docs/multibot_output_test_plan.md`
-- `docs/role_based_workflow_spec_v1.md`
-- `docs/refactor_stage_1_4_execution_plan.md`
-- `planning/PRD.md`
-- `IMPROVEMENT_CHECKLIST.md`
+- `codex`, `gemini`, `claude` CLI 설치 확인
+- `/providers`로 설치 상태 확인
+- 설치된 provider로 `/mode <codex|gemini|claude>` 전환
 
-## 라이선스
+### run이 이미 활성 상태라 enqueue 실패
 
-MIT
+- 메시지: `A run is already active...`
+- `/stop` 실행 후 재시도
+- active run 보호 인덱스가 의도적으로 중복 실행을 차단
+
+### Gemini 응답이 느리거나 timeout으로 실패하는 경우
+
+- 기본 turn watchdog은 `RUN_TURN_TIMEOUT_SEC=90`초이며, 초과 시 run은 `error`로 종료됩니다.
+- watchdog timeout이 감지되면 `runtime_counters.provider_run_watchdog_timeout.<provider>`가 증가합니다.
+- `GET /metrics`, `/_mock/bot_diagnostics`, `/_mock/control_tower`에서 timeout 흔적(in_flight, run_status, error_tag)을 먼저 확인하세요.
+- timeout이 반복되면 `RUN_TURN_TIMEOUT_SEC` 상향, 모델 변경(`/model`), 세션 재생성(`/new`) 순으로 점검하세요.
+
+### `/cowork`가 바로 실패하거나 "아무것도 안 한 것처럼" 보이는 경우
+
+- 협업 단계에서 participant별 실행은 같은 `(bot_id, chat_id)` 조합에 대해 직렬화되어 동작합니다(중복 active run 충돌 완화).
+- 그래도 기존 활성 run이 남아 있으면 `/stop` 선행이 필요합니다.
+- live rerun 스크립트는 기본적으로 temp config/runtime/port를 사용하므로 기존 `9082` 스택과 분리됩니다.
+- `--project-id`를 주면 결과 아티팩트 루트가 고정되어 케이스별 비교가 쉬워집니다.
+- 웹 profile(`landing-basic`, `form-validation`, `seo-landing` 등)은 기본적으로 `web guaranteed mode`로 동작하며, deterministic scaffold + audit가 통과하면 planner/implementer/qa/controller LLM turn 없이도 `completed`가 가능합니다.
+- 최종 품질 게이트에서 아래 조건이면 `failed` 처리됩니다.
+  - 실행 태스크 실패/중단 존재
+  - 렌더링/화면 요청인데 실행 가능한 링크 부재
+  - 최종 결론이 `미이행/미완료` 등 실패 신호 포함
+- `Cowork Panel`의 `budget`, `stop_reason`, `last_timeout_event`와 `/_mock/cowork/{cowork_id}/artifacts`를 함께 확인하세요.
+- timeout 책임 해석 규칙:
+  - `timeout_origin=runner_case_timeout`: 원인자는 live runner이며, bot fault가 아닙니다.
+  - `timeout_origin=turn_timeout`: `timeout_actor_label`, `timeout_actor_role`, `timeout_stage_type`에 기록된 participant가 직접 원인자입니다.
+  - `timeout_origin=stage_timeout_budget`: runner timeout 계약이 잘못된 경우이며, `budget_floor_sec`와 `applied_case_timeout_sec`를 먼저 확인해야 합니다.
+
+### Play 명령(`/relay`~`/court`)이 실패하거나 멈춘 것처럼 보이는 경우
+
+- 최소 선택 봇 수 조건을 먼저 확인하세요. 특히 `/court`는 3개 이상 봇이 필요합니다.
+- 옵션 오탈자(`--foo` 등)는 즉시 파싱 실패 처리됩니다.
+- 활성 run 충돌이 있으면 `/stop` 후 재시도하거나 `--keep-session` 없이 실행해 세션을 재정비하세요.
+- 응답이 느리면 `--rounds`를 낮추고 `--max-turn-sec`를 조정해 전체 대기 시간을 줄일 수 있습니다.
+- 판정 명령에서 형식(`WINNER/VERDICT/RESULT`)이 없으면 Viewer에 `[판정 실패]`가 표시됩니다(실행 자체는 완료 처리).
+
+### Session Project 선택 기준이 헷갈리는 경우
+
+- 목록 자체는 `/_mock/projects` 결과(workspace + marker가 있는 1-depth 하위 프로젝트)에서 구성됩니다.
+- UI 선택값 표시 우선순위는 `session.current_project`(런타임) > `selected_project`(UI 저장값)입니다.
+- 실제 적용은 `/project <path>` 명령으로 처리되며, 활성 run이 있으면 적용이 차단됩니다.
+
+### mock에서 update가 안 들어오는 경우
+
+- webhook 모드에서는 `getUpdates`가 기본 차단됨
+- 필요 시 mock 실행 시 `--allow-get-updates-with-webhook` 사용
+- 또는 polling 모드로 전환
+
+### 포트 충돌
+
+- single-bot 기본: `9082`(mock), `8600`(bot)
+- multi-bot 기본: `9082`(mock), `8600+`(embedded bots), `4312`(gateway)
+- `status`/`doctor` 명령으로 상태 확인
+
+### 로컬 mock 재시작 후 polling offset 꼬임
+
+- 로컬 mock base URL(`127.0.0.1`/`localhost`)일 때는 ingest state reset 로직이 동작해 offset 문제를 줄입니다.
+
+---
+
+## 16. License
+
+This project is licensed under the MIT License.
+See [LICENSE](./LICENSE).
+
+---
+
+## Reference Paths
+
+- Entrypoint: `src/telegram_bot_new/main.py`
+- Supervisor: `src/telegram_bot_new/supervisor.py`
+- Embedded runtime: `src/telegram_bot_new/runtime_embedded.py`
+- Gateway runtime: `src/telegram_bot_new/runtime_gateway.py`
+- Workers: `src/telegram_bot_new/workers/`
+- Adapters: `src/telegram_bot_new/adapters/`
+- Repository/DB: `src/telegram_bot_new/db/`
+- Mock messenger: `src/telegram_bot_new/mock_messenger/`
+- Tests: `tests/`
