@@ -19,7 +19,7 @@ Telegram <-> CLI adapter bridge MVP.
 
 <img width="1520" height="874" alt="스크린샷 2026-03-04 오후 9 06 37" src="https://github.com/user-attachments/assets/4bf76de6-b9c7-4060-ae95-fceb8cf44e84" />
 
-## 빠른 사용 가이드 (Talk/Play 기능)
+## 🚀 빠른 사용 가이드 (Talk/Play 기능)
 
 처음 실행한 뒤, 아래 순서대로 하면 신규 기능(`/talk`, `/relay`~`/court`)을 바로 체험할 수 있습니다.
 
@@ -90,7 +90,7 @@ Telegram <-> CLI adapter bridge MVP.
 상세 운영 가이드는 [docs/play_commands_manual.md](./docs/play_commands_manual.md)를 참고하세요.
 
 
-## Table of Contents
+## 📑 Table of Contents
 
 - [빠른 사용 가이드 (Talk/Play 기능)](#빠른-사용-가이드-talkplay-기능)
 - [특징](#특징)
@@ -113,7 +113,7 @@ Telegram <-> CLI adapter bridge MVP.
 
 ---
 
-## 특징
+## ✨ 특징
 
 - 각 봇은 기본적으로 `/mode` 명령으로 `gemini`, `codex`, `claude` 모드를 전환할 수 있고, 대시보드 봇 카드에서 provider/model 드롭다운으로 즉시 변경할 수 있습니다.
 - Codex 기본 모델은 `gpt-5.4`이며, 대시보드와 `/model` 명령에서 `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.2`, `gpt-5.1-codex-mini`, `gpt-5`를 선택할 수 있습니다.
@@ -127,7 +127,7 @@ Telegram <-> CLI adapter bridge MVP.
 
 ---
 
-## 1. Project Summary
+## 📝 1. Project Summary
 
 이 프로젝트는 Telegram 메시지를 CLI 에이전트 실행으로 연결하는 브리지입니다.
 핵심은 다음 4단계입니다.
@@ -141,7 +141,7 @@ Telegram <-> CLI adapter bridge MVP.
 
 ---
 
-## 2. Architecture
+## 🏗 2. Architecture
 
 ```mermaid
 flowchart LR
@@ -179,7 +179,7 @@ flowchart LR
 
 ---
 
-## 3. Runtime Modes
+## ⚙️ 3. Runtime Modes
 
 ### `embedded`
 
@@ -195,7 +195,7 @@ flowchart LR
 
 ---
 
-## 4. Tech Stack
+## 🛠 4. Tech Stack
 
 - Python 3.11+
 - FastAPI + Uvicorn
@@ -208,7 +208,7 @@ flowchart LR
 
 ---
 
-## 5. Quick Start
+## 🏃 5. Quick Start
 
 ### macOS / Linux
 
@@ -237,7 +237,7 @@ python -m telegram_bot_new.main supervisor
 
 ---
 
-## 6. Configuration
+## 🔧 6. Configuration
 
 ### 6.1 `.env` 주요 변수
 
@@ -300,9 +300,19 @@ bots:
 - 토큰이 비어 있고 `TELEGRAM_API_BASE_URL`이 로컬 mock 주소면 `TELEGRAM_VIRTUAL_TOKEN` 자동 사용
 - `owner_user_id`가 비어 있으면 누구나 접근 가능
 
+### 6.4 Provider binary override
+
+provider CLI는 기본적으로 시스템 PATH에서 찾지만, 아래 환경 변수로 명시적으로 고정할 수 있습니다.
+
+- `CODEX_BIN`
+- `GEMINI_BIN`
+- `CLAUDE_BIN`
+
+추가로 `codex`는 PATH에 없더라도 VS Code / ChatGPT extension에 포함된 번들 바이너리를 자동 탐색하는 fallback 로직이 있습니다.
+
 ---
 
-## 7. Run Guide
+## 🚀 7. Run Guide
 
 ### 7.1 Python module CLI
 
@@ -319,6 +329,12 @@ telegram-bot-new supervisor
 telegram-bot-new-mock --host 127.0.0.1 --port 9082
 ```
 
+mock에서 webhook 등록 상태에서도 polling 기반 `getUpdates`를 허용해야 하면 다음 옵션을 사용할 수 있습니다.
+
+```bash
+telegram-bot-new-mock --allow-get-updates-with-webhook
+```
+
 ### 7.3 Windows helper
 
 ```powershell
@@ -329,7 +345,7 @@ telegram-bot-new-mock --host 127.0.0.1 --port 9082
 
 ---
 
-## 8. Mock Messenger Guide
+## 🎭 8. Mock Messenger Guide
 
 로컬에서 Telegram 없이 전체 플로우를 검증하는 핵심 구성입니다.
 
@@ -364,8 +380,10 @@ telegram-bot-new-mock --host 127.0.0.1 --port 9082
 기본 동작:
 
 - 기본 config: `config/bots.multibot.yaml`
-- 기본 `MAX_BOTS=8` (소스 config가 더 커도 효과 설정은 기본 8개)
+- 기본 `MAX_BOTS=0` (`0`이면 전체 봇 사용)
 - mock + supervisor 동시 기동
+- 실행 시 `RUNTIME_DIR/bots.effective.yaml`을 생성
+- bot별 `database_url`이 비어 있으면 런타임용 SQLite 파일을 자동 주입해 물리적 DB 격리를 보장
 
 유용한 명령:
 
@@ -424,7 +442,7 @@ CONFIG_PATH=config/bots.yaml ./scripts/run-local-multibot.sh start
 
 ---
 
-## 9. Telegram Command Reference
+## 💬 9. Telegram Command Reference
 
 | Command | Description |
 |---|---|
@@ -484,7 +502,7 @@ Skill 관리:
 
 ---
 
-## 10. API Endpoints
+## 🔌 10. API Endpoints
 
 ### 10.1 Runtime API (embedded / gateway)
 
@@ -493,6 +511,7 @@ Skill 관리:
 | `GET` | `/healthz` | liveness |
 | `GET` | `/readyz` | readiness |
 | `GET` | `/metrics` | runtime + queue counters |
+| `GET` | `/audit_logs` | embedded bot 최근 audit 로그 조회 |
 | `POST` | `/telegram/webhook/{bot_id}/{path_secret}` | Telegram webhook ingest |
 
 ### 10.2 Mock Telegram-compatible API
@@ -546,7 +565,7 @@ Skill 관리:
 
 ---
 
-## 11. Data Model and Queue States
+## 🗄 11. Data Model and Queue States
 
 ### 핵심 테이블
 
@@ -561,6 +580,7 @@ Skill 관리:
 - `action_tokens`
 - `deferred_button_actions`
 - `runtime_metric_counters`
+- `audit_logs`
 
 ### 큐 상태값
 
@@ -578,7 +598,7 @@ Skill 관리:
 
 ---
 
-## 12. Metrics and Observability
+## 📊 12. Metrics and Observability
 
 `GET /metrics` 응답 구조:
 
@@ -589,6 +609,11 @@ Skill 관리:
 - `telegram_update_jobs_by_status`
 - `cli_run_jobs_by_status`
 - `runtime_counters`
+
+주의:
+
+- `/metrics`는 Prometheus text 포맷이 아니라 JSON 응답입니다.
+- Mock UI의 `/_mock/bot_diagnostics`, `/_mock/control_tower`는 이 JSON을 가공해서 표시합니다.
 
 `runtime_counters` 대표 키:
 
@@ -607,7 +632,7 @@ Skill 관리:
 
 ---
 
-## 13. Test Strategy
+## 🧪 13. Test Strategy
 
 ### 13.1 Unit/Integration (pytest)
 
@@ -689,7 +714,7 @@ live rerun 스크립트의 timeout 보정 규칙:
 
 ---
 
-## 14. Script Catalog
+## 📜 14. Script Catalog
 
 | Script | Purpose |
 |---|---|
@@ -710,13 +735,15 @@ live rerun 스크립트의 timeout 보정 규칙:
 
 ---
 
-## 15. Troubleshooting
+## 🆘 15. Troubleshooting
 
 ### `provider executable not found` 에러
 
 - `codex`, `gemini`, `claude` CLI 설치 확인
 - `/providers`로 설치 상태 확인
 - 설치된 provider로 `/mode <codex|gemini|claude>` 전환
+- 필요하면 `CODEX_BIN`, `GEMINI_BIN`, `CLAUDE_BIN`으로 바이너리 경로를 직접 지정
+- `codex`는 VS Code / ChatGPT extension 번들 바이너리 자동 탐색 fallback도 지원
 
 ### run이 이미 활성 상태라 enqueue 실패
 
@@ -768,6 +795,12 @@ live rerun 스크립트의 timeout 보정 규칙:
 - 필요 시 mock 실행 시 `--allow-get-updates-with-webhook` 사용
 - 또는 polling 모드로 전환
 
+### 멀티봇에서 특정 bot이 안 보이는 경우
+
+- `MAX_BOTS=0`이면 전체 봇을 사용하고, `MAX_BOTS>0`이면 앞에서부터 N개만 사용합니다.
+- 실제 런타임은 원본 config가 아니라 `bots.effective.yaml`을 기준으로 동작할 수 있습니다.
+- `/_mock/runtime_profile` 응답이나 `status` 출력에서 effective/source bot 수를 먼저 확인하세요.
+
 ### 포트 충돌
 
 - single-bot 기본: `9082`(mock), `8600`(bot)
@@ -780,14 +813,14 @@ live rerun 스크립트의 timeout 보정 규칙:
 
 ---
 
-## 16. License
+## 📄 16. License
 
 This project is licensed under the MIT License.
 See [LICENSE](./LICENSE).
 
 ---
 
-## Reference Paths
+## 🔗 Reference Paths
 
 - Entrypoint: `src/telegram_bot_new/main.py`
 - Supervisor: `src/telegram_bot_new/supervisor.py`
