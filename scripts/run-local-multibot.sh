@@ -18,6 +18,7 @@ EMBEDDED_HOST="${EMBEDDED_HOST:-127.0.0.1}"
 EMBEDDED_BASE_PORT="${EMBEDDED_BASE_PORT:-8600}"
 GATEWAY_HOST="${GATEWAY_HOST:-127.0.0.1}"
 GATEWAY_PORT="${GATEWAY_PORT:-4312}"
+RUN_TURN_TIMEOUT_SEC="${RUN_TURN_TIMEOUT_SEC:-180}"
 
 RUNTIME_DIR="${RUNTIME_DIR:-$ROOT_DIR/.runlogs/local-multibot}"
 PID_MOCK_FILE="$RUNTIME_DIR/mock.pid"
@@ -366,7 +367,7 @@ start_supervisor() {
   ensure_embedded_ports_free
 
   pid="$(spawn_detached "$SUP_OUT_LOG" "$SUP_ERR_LOG" \
-    env TELEGRAM_API_BASE_URL="http://$MOCK_HOST:$MOCK_PORT" STRICT_BOT_DB_ISOLATION=1 PYTHONUNBUFFERED=1 \
+    env TELEGRAM_API_BASE_URL="http://$MOCK_HOST:$MOCK_PORT" STRICT_BOT_DB_ISOLATION=1 PYTHONUNBUFFERED=1 RUN_TURN_TIMEOUT_SEC="$RUN_TURN_TIMEOUT_SEC" \
     "$PYTHON_BIN" -m telegram_bot_new.main supervisor \
       --config "$EFFECTIVE_CONFIG_PATH" \
       --embedded-host "$EMBEDDED_HOST" \
@@ -465,6 +466,7 @@ do_up() {
 
   TELEGRAM_API_BASE_URL="http://$MOCK_HOST:$MOCK_PORT" \
   PYTHONUNBUFFERED=1 \
+  RUN_TURN_TIMEOUT_SEC="$RUN_TURN_TIMEOUT_SEC" \
   "$PYTHON_BIN" -m telegram_bot_new.main supervisor \
     --config "$EFFECTIVE_CONFIG_PATH" \
     --embedded-host "$EMBEDDED_HOST" \

@@ -1,6 +1,6 @@
 bots:
 - bot_id: bot-a
-  name: 코덱스5.3
+  name: 인사담당
   mode: embedded
   telegram_token: mock_token_a
   adapter: codex
@@ -11,7 +11,7 @@ bots:
     path_secret: bot-a-path
     secret_token: bot-a-secret
 - bot_id: bot-d
-  name: 코덱스5.3S
+  name: 총괄기획
   mode: embedded
   telegram_token: mock_token_d
   adapter: codex
@@ -22,13 +22,33 @@ bots:
   webhook:
     path_secret: bot-d-path
     secret_token: bot-d-secret
-- bot_id: bot-e
-  name: 코덱스5.2
+- bot_id: bot-b
+  name: 개발팀장
   mode: embedded
-  telegram_token: mock_token_e
+  telegram_token: mock_token_b
   adapter: codex
   codex:
     model: gpt-5.4
+  default_role: implementer
+  database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/config/state/bot-b.db
+  webhook:
+    path_secret: bot-b-path
+    secret_token: bot-b-secret
+- bot_id: bot-c
+  name: 영업팀장
+  mode: embedded
+  telegram_token: mock_token_c
+  adapter: codex
+  default_role: implementer
+  database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/config/state/bot-c.db
+  webhook:
+    path_secret: bot-c-path
+    secret_token: bot-c-secret
+- bot_id: bot-e
+  name: 마케팅팀장
+  mode: embedded
+  telegram_token: mock_token_e
+  adapter: codex
   default_role: implementer
   database_url: sqlite+aiosqlite:////Users/hwanchoi/projects_202602/codex_chatbot_mvp/config/state/bot-e.db
   webhook:

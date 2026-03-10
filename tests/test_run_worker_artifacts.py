@@ -217,6 +217,16 @@ def test_generation_request_detection_and_prompt_contract() -> None:
     assert "HTML Delivery Contract" in combined
 
 
+def test_cowork_artifact_contract_suppresses_default_html_delivery_contract(tmp_path: Path) -> None:
+    prompt = (
+        "랜딩 페이지 html css로 만들어줘.\n"
+        f"결과 파일은 {tmp_path} 폴더에 직접 저장하고 index.html, styles.css, README.md를 그 경로에 생성해.\n"
+    )
+    combined = _augment_prompt_for_generation_request(prompt, artifact_output_dir=tmp_path)
+    assert prompt in combined
+    assert "HTML Delivery Contract" not in combined
+
+
 class _AdapterForWorkerTest:
     async def run_new_turn(self, request):
         yield AdapterEvent(seq=1, ts="2026-01-01T00:00:00+00:00", event_type="thread_started", payload={"thread_id": "t-1"})

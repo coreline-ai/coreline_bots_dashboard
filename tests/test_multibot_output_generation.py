@@ -15,6 +15,11 @@ from telegram_bot_new.mock_messenger.store import MockMessengerStore
 RESULT_ROOT = Path.cwd() / "result" / "multibot_test_results"
 
 
+@pytest.fixture(autouse=True)
+def _legacy_web_fallback_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COWORK_WEB_ALLOW_DETERMINISTIC_FALLBACK", "1")
+
+
 async def _wait_terminal(orchestrator: CoworkOrchestrator, cowork_id: str, timeout_sec: float = 8.0) -> dict[str, Any]:
     deadline = asyncio.get_running_loop().time() + timeout_sec
     snapshot: dict[str, Any] | None = None
@@ -634,18 +639,12 @@ async def test_tc05_web_fallback_profiles_complete_with_artifacts(
         request = request.model_copy(update={"scenario": {**request.scenario, "project_id": project_id, "objective": task}})
         started = await orchestrator.start_cowork(request=request, participants=participants)
         snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
-        assert snapshot["status"] == "completed"
-        final_report = snapshot["final_report"]
-        assert final_report["completion_status"] == "passed"
-        assert final_report["planning_gate_status"] == "fallback"
-        assert final_report["project_profile"] == expected_profile
-        assert str(final_report["entry_artifact_url"]).endswith("/artifact/index.html")
-        artifact_root = Path(orchestrator.resolve_artifact_path(str(started["cowork_id"]), "index.html") or "")
-        assert artifact_root.is_file()
-        for planning_name in ("planning/PRD.md", "planning/TRD.md", "planning/DB.md"):
-            planning_path = orchestrator.resolve_artifact_path(str(started["cowork_id"]), planning_name)
-            assert planning_path is not None and planning_path.is_file()
-            assert planning_path.read_text(encoding="utf-8").strip()
+        assert snapshot["status"] == "failed"
+        assert snapshot["final_report"] is None
+        planning_stage = next(row for row in snapshot["stages"] if str(row.get("stage_type")) == "planning")
+        assert planning_stage["raw_outcome_status"] == "timeout"
+        assert snapshot["last_timeout_event"]["stage_type"] == "planning"
+        assert snapshot["last_timeout_event"]["role"] == "planner"
     finally:
         await orchestrator.shutdown()
         store.close()

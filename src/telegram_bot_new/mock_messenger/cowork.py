@@ -17,7 +17,6 @@ from urllib.request import Request, urlopen
 from telegram_bot_new.mock_messenger.cowork_fallbacks import (
     WEB_PROJECT_PROFILES,
     audit_web_project,
-    build_fallback_planning_submission,
     ensure_web_project_scaffold,
     resolve_web_project_profile,
     synthesize_finalization_from_audit,
@@ -107,6 +106,9 @@ PLANNING_OWNER_ROLES = ("controller", "planner", "implementer", "qa")
 PLANNING_TASK_ID_RE = re.compile(r"^T[1-9]\d*$")
 PLANNING_PARALLEL_GROUP_RE = re.compile(r"^G[1-9]\d*$")
 STAGE_SCHEMA_MAX_RETRIES = 2
+DEFAULT_MAX_AUTO_REPAIR_ROUNDS = 12
+DEFAULT_MAX_NO_PROGRESS_ROUNDS = 5
+DEFAULT_MAX_PLANNING_ATTEMPTS = 5
 IMPLEMENTATION_REQUIRED_LABELS = ("결과요약", "검증", "남은이슈")
 QA_REQUIRED_LABELS = ("QA결론", "결함요약", "재현절차", "수정요청", "QA승인")
 FINALIZATION_REQUIRED_LABELS = ("최종결론", "실행체크리스트", "즉시실행항목(Top3)")
@@ -124,12 +126,12 @@ class StagePolicy:
 
 
 STAGE_POLICIES: dict[str, StagePolicy] = {
-    "planning": StagePolicy(timeout_floor_sec=75, max_agent_attempts=1, allow_deterministic_fallback=True),
-    "planning_review": StagePolicy(timeout_floor_sec=45, max_agent_attempts=1, soft_gate_on_reject=True),
-    "implementation": StagePolicy(timeout_floor_sec=60, max_agent_attempts=1, allow_deterministic_fallback=True),
-    "qa": StagePolicy(timeout_floor_sec=45, max_agent_attempts=1, allow_deterministic_fallback=True),
-    "finalization": StagePolicy(timeout_floor_sec=45, max_agent_attempts=1, allow_deterministic_fallback=True),
-    "controller_gate": StagePolicy(timeout_floor_sec=45, max_agent_attempts=1, allow_deterministic_fallback=True),
+    "planning": StagePolicy(timeout_floor_sec=120, max_agent_attempts=2, allow_stop_retry=True, allow_deterministic_fallback=False),
+    "planning_review": StagePolicy(timeout_floor_sec=60, max_agent_attempts=2, soft_gate_on_reject=True),
+    "implementation": StagePolicy(timeout_floor_sec=180, max_agent_attempts=2, allow_stop_retry=True, allow_deterministic_fallback=True),
+    "qa": StagePolicy(timeout_floor_sec=90, max_agent_attempts=2, allow_stop_retry=True, allow_deterministic_fallback=True),
+    "finalization": StagePolicy(timeout_floor_sec=90, max_agent_attempts=2, allow_stop_retry=True, allow_deterministic_fallback=True),
+    "controller_gate": StagePolicy(timeout_floor_sec=90, max_agent_attempts=2, allow_stop_retry=True, allow_deterministic_fallback=True),
 }
 
 
@@ -196,7 +198,7 @@ class CoworkOrchestrator:
         poll_interval_sec: float = 0.25,
         cool_down_sec: float = 0.2,
         artifact_root: str | Path | None = None,
-        max_rework_rounds: int = 1,
+        max_rework_rounds: int | None = None,
     ) -> None:
         self._store = store
         self._send_user_message = send_user_message
@@ -204,7 +206,20 @@ class CoworkOrchestrator:
         self._cool_down_sec = max(0.0, float(cool_down_sec))
         root = Path(artifact_root) if artifact_root is not None else (Path.cwd() / "result")
         self._artifact_root = root.expanduser().resolve()
-        self._max_rework_rounds = max(0, int(max_rework_rounds))
+        configured_rework_rounds = (
+            max_rework_rounds
+            if max_rework_rounds is not None
+            else int(os.getenv("COWORK_MAX_AUTO_REPAIR_ROUNDS") or DEFAULT_MAX_AUTO_REPAIR_ROUNDS)
+        )
+        self._max_rework_rounds = max(0, int(configured_rework_rounds))
+        self._max_no_progress_rounds = max(
+            1,
+            int(os.getenv("COWORK_MAX_NO_PROGRESS_ROUNDS") or DEFAULT_MAX_NO_PROGRESS_ROUNDS),
+        )
+        self._max_planning_attempts = max(
+            1,
+            int(os.getenv("COWORK_MAX_PLANNING_ATTEMPTS") or DEFAULT_MAX_PLANNING_ATTEMPTS),
+        )
         self._lock = asyncio.Lock()
         self._active_tasks: dict[str, asyncio.Task[None]] = {}
         self._planning_meta_cache: dict[str, dict[str, str]] = {}
@@ -274,8 +289,14 @@ class CoworkOrchestrator:
                 "project_profile": project_profile,
                 "planning_gate_status": None,
                 "agent_success": False,
+                "artifact_agent_success": False,
                 "fallback_used": False,
+                "artifact_fallback_used": False,
                 "controller_feedback": "",
+                "auto_repair_round_limit": self._max_rework_rounds,
+                "planning_attempt_limit": self._max_planning_attempts,
+                "last_repair_signature": "",
+                "no_progress_rounds": 0,
             }
             self._ensure_artifact_workspace(cowork_id)
             self._active_tasks[cowork_id] = asyncio.create_task(self._run_cowork(cowork_id), name=f"cowork:{cowork_id}")
@@ -344,10 +365,130 @@ class CoworkOrchestrator:
                 "project_profile": None,
                 "planning_gate_status": None,
                 "agent_success": False,
+                "artifact_agent_success": False,
                 "fallback_used": False,
+                "artifact_fallback_used": False,
                 "controller_feedback": "",
+                "auto_repair_round_limit": self._max_rework_rounds,
+                "planning_attempt_limit": self._max_planning_attempts,
+                "last_repair_signature": "",
+                "no_progress_rounds": 0,
             },
         )
+
+    def _build_prompt_proposal(
+        self,
+        *,
+        cowork_id: str,
+        task_text: str,
+        stage: str,
+        round_no: int,
+        failures: list[str] | None = None,
+        final_report: dict[str, Any] | None = None,
+        execution_rows: list[dict[str, Any]] | None = None,
+    ) -> str:
+        scenario = self._scenario_for_cowork(cowork_id=cowork_id, task_text=task_text)
+        artifact_dir = self._artifact_dir(cowork_id)
+        failure_lines = [str(row).strip() for row in (failures or []) if str(row).strip()]
+        actions: list[str] = []
+        if stage == "planning":
+            actions = [
+                "요구를 1~5개 작업으로 최소 분해하고 각 작업의 owner_role/dependencies/artifacts를 명시",
+                "PRD/TRD/DB/Test/Release/Design/QA 문서 본문을 모두 채워 JSON 객체 하나로 제출",
+                "Implementer가 즉시 index.html, styles.css, README.md를 생성할 수 있도록 완료조건을 구체적으로 고정",
+                "기획 문구는 placeholder가 아니라 실제 사용자용 카피로 작성",
+            ]
+        else:
+            actions = [
+                "마지막 실패 원인을 산출물 파일 또는 검증 결과 기준으로 직접 수정",
+                "index.html, styles.css, README.md를 실제로 갱신하고 placeholder 문구를 제거",
+                "수정 후 테스트를 다시 수행하고 증빙/실행링크/남은이슈를 갱신",
+                "이전 응답을 반복하지 말고 실패 항목이 사라졌음을 결과로 증명",
+            ]
+        if isinstance(final_report, dict):
+            qa_signoff = str(final_report.get("qa_signoff") or "").strip()
+            if qa_signoff:
+                actions.append(f"QA 상태를 {qa_signoff}에서 APPROVED 또는 PASS로 끌어올릴 것")
+        if execution_rows:
+            failed_rows = [
+                f"T{int(row.get('task_no') or 0)}:{str(row.get('title') or '')}:{str(row.get('status') or '')}"
+                for row in execution_rows
+                if str(row.get("status") or "") != "success"
+            ]
+            if failed_rows:
+                actions.append(f"실패 태스크 우선 복구: {', '.join(failed_rows[:3])}")
+        lines = [
+            "[Self-Healing Prompt Proposal]",
+            f"- stage: {stage}",
+            f"- round: {round_no}",
+            f"- project_id: {scenario.get('project_id')}",
+            f"- objective: {scenario.get('objective')}",
+            f"- brand_tone: {scenario.get('brand_tone')}",
+            f"- target_audience: {scenario.get('target_audience')}",
+            f"- core_cta: {scenario.get('core_cta')}",
+            f"- required_sections: {', '.join(str(item).strip() for item in scenario.get('required_sections') or []) or '없음'}",
+            f"- artifact_dir: {artifact_dir}",
+            "- success_definition: 실제 산출물 생성 + 테스트/증빙 확보 + QA/Final gate 통과",
+            "- required_files: index.html, styles.css, README.md",
+            "- artifact_quality_bar: placeholder 금지, 실제 카피/레이아웃/CTA/검증 근거 포함",
+            "- process_safety: 장기 실행 프로세스를 foreground로 띄우지 말 것. 서버/감시 프로세스는 백그라운드로 시작 후 검증 직후 종료할 것",
+        ]
+        if failure_lines:
+            lines.append("- current_failures:")
+            lines.extend(f"  - {row}" for row in failure_lines[:8])
+        else:
+            lines.append("- current_failures: 없음")
+        lines.append("- next_actions:")
+        lines.extend(f"  {index}. {action}" for index, action in enumerate(actions, start=1))
+        return "\n".join(lines).strip()
+
+    def _write_prompt_proposal_artifact(
+        self,
+        *,
+        cowork_id: str,
+        stage: str,
+        round_no: int,
+        proposal_text: str,
+    ) -> None:
+        root = self._ensure_artifact_workspace(cowork_id)
+        if stage == "planning":
+            parent = root / "planning"
+            filename = f"prompt_proposal_round_{round_no}.md"
+        else:
+            parent = root / "implementation"
+            filename = f"prompt_proposal_rework_round_{round_no}.md"
+        parent.mkdir(parents=True, exist_ok=True)
+        (parent / filename).write_text(proposal_text.strip() + "\n", encoding="utf-8")
+
+    def _compute_repair_signature(
+        self,
+        *,
+        cowork_id: str,
+        failures: list[str],
+        final_report: dict[str, Any],
+    ) -> str:
+        artifact_rows: list[dict[str, Any]] = []
+        root = self._artifact_dir(cowork_id)
+        if root.exists():
+            for path in sorted(row for row in root.rglob("*") if row.is_file()):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                artifact_rows.append(
+                    {
+                        "path": path.relative_to(root).as_posix(),
+                        "size": int(stat.st_size),
+                        "mtime_ns": int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+                    }
+                )
+        payload = {
+            "failures": list(failures[:8]),
+            "qa_signoff": str(final_report.get("qa_signoff") or ""),
+            "completion_status": str(final_report.get("completion_status") or ""),
+            "artifacts": artifact_rows[:200],
+        }
+        return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
     def _project_profile_for_cowork(self, *, cowork_id: str, task_text: str) -> str | None:
         meta = self._cowork_meta(cowork_id)
@@ -379,11 +520,20 @@ class CoworkOrchestrator:
         profile = self._project_profile_for_cowork(cowork_id=cowork_id, task_text=task_text)
         return bool(profile and profile in WEB_PROJECT_PROFILES)
 
-    def _is_web_guaranteed_mode(self, *, cowork_id: str, task_text: str) -> bool:
+    def _is_web_artifact_authoritative_mode(self, *, cowork_id: str, task_text: str) -> bool:
         return self._is_web_project_profile(cowork_id=cowork_id, task_text=task_text)
+
+    def _allow_web_deterministic_fallback(self) -> bool:
+        return self._env_flag("COWORK_WEB_ALLOW_DETERMINISTIC_FALLBACK", default=False)
+
+    def _is_web_guaranteed_mode(self, *, cowork_id: str, task_text: str) -> bool:
+        return self._is_web_artifact_authoritative_mode(cowork_id=cowork_id, task_text=task_text) and self._allow_web_deterministic_fallback()
 
     def _allow_web_planner_augment(self) -> bool:
         return self._env_flag("COWORK_WEB_ALLOW_PLANNER_AUGMENT", default=False)
+
+    def _requires_real_web_artifact(self, *, cowork_id: str, task_text: str) -> bool:
+        return self._is_web_project_profile(cowork_id=cowork_id, task_text=task_text) and not self._allow_web_deterministic_fallback()
 
     def _estimate_cowork_budget(
         self,
@@ -394,7 +544,8 @@ class CoworkOrchestrator:
         plan_items: list[dict[str, Any]] | None = None,
     ) -> tuple[int, str]:
         if self._is_web_guaranteed_mode(cowork_id=cowork_id, task_text=task_text):
-            return (30, "web_guaranteed_mode: deterministic scaffold + audit path")
+            planning = max(int(max_turn_sec), self._stage_policy("planning").timeout_floor_sec)
+            return (planning + 30, "web_guaranteed_mode: planner + deterministic artifact audit path")
         planning = max(int(max_turn_sec), self._stage_policy("planning").timeout_floor_sec)
         planning_review = self._stage_policy("planning_review").timeout_floor_sec
         implementation = max(int(max_turn_sec), self._stage_policy("implementation").timeout_floor_sec)
@@ -402,7 +553,7 @@ class CoworkOrchestrator:
         finalization = self._stage_policy("finalization").timeout_floor_sec
         task_count = len(plan_items or [])
         if task_count <= 0:
-            task_count = 2
+            task_count = 1
         floor = planning + planning_review + (implementation * task_count) + qa + finalization
         return (floor, f"stage_floor_sum: planning+review+implementation*{task_count}+qa+finalization")
 
@@ -505,13 +656,19 @@ class CoworkOrchestrator:
     def _mark_agent_success(self, *, cowork_id: str) -> None:
         self._cowork_meta(cowork_id)["agent_success"] = True
 
+    def _mark_artifact_agent_success(self, *, cowork_id: str) -> None:
+        self._cowork_meta(cowork_id)["artifact_agent_success"] = True
+
     def _mark_fallback_used(self, *, cowork_id: str) -> None:
         self._cowork_meta(cowork_id)["fallback_used"] = True
 
+    def _mark_artifact_fallback_used(self, *, cowork_id: str) -> None:
+        self._cowork_meta(cowork_id)["artifact_fallback_used"] = True
+
     def _scaffold_source_for_cowork(self, *, cowork_id: str) -> str | None:
         meta = self._cowork_meta(cowork_id)
-        agent_success = bool(meta.get("agent_success"))
-        fallback_used = bool(meta.get("fallback_used"))
+        agent_success = bool(meta.get("artifact_agent_success"))
+        fallback_used = bool(meta.get("artifact_fallback_used"))
         if agent_success and fallback_used:
             return "hybrid"
         if fallback_used:
@@ -525,19 +682,54 @@ class CoworkOrchestrator:
         return f"/_mock/cowork/{cowork_id}/artifact/{clean_path}"
 
     def _ensure_project_scaffold_if_needed(self, *, cowork_id: str, task_text: str) -> dict[str, Any] | None:
+        if not self._allow_web_deterministic_fallback():
+            return None
         profile = self._project_profile_for_cowork(cowork_id=cowork_id, task_text=task_text)
         if not profile:
             return None
         scenario = self._scenario_for_cowork(cowork_id=cowork_id, task_text=task_text)
         result = ensure_web_project_scaffold(profile=profile, artifact_dir=self._artifact_dir(cowork_id), scenario=scenario)
         self._mark_fallback_used(cowork_id=cowork_id)
+        self._mark_artifact_fallback_used(cowork_id=cowork_id)
         return result
 
     def _artifact_audit(self, *, cowork_id: str, task_text: str) -> dict[str, Any] | None:
         profile = self._project_profile_for_cowork(cowork_id=cowork_id, task_text=task_text)
         if not profile:
             return None
-        return audit_web_project(profile=profile, artifact_dir=self._artifact_dir(cowork_id))
+        return audit_web_project(
+            profile=profile,
+            artifact_dir=self._artifact_dir(cowork_id),
+            strict_artifact=self._requires_real_web_artifact(cowork_id=cowork_id, task_text=task_text),
+        )
+
+    def _plan_artifact_paths(self, *, cowork_id: str, plan: dict[str, Any]) -> list[Path]:
+        artifact_names = plan.get("artifacts") if isinstance(plan.get("artifacts"), list) else []
+        root = self._artifact_dir(cowork_id)
+        paths: list[Path] = []
+        for name in artifact_names:
+            relative = str(name or "").strip().lstrip("./")
+            if not relative:
+                continue
+            paths.append((root / relative).resolve())
+        return paths
+
+    def _plan_artifacts_materialized(self, *, cowork_id: str, plan: dict[str, Any]) -> tuple[bool, list[str]]:
+        missing: list[str] = []
+        for path in self._plan_artifact_paths(cowork_id=cowork_id, plan=plan):
+            if not path.is_file() or int(path.stat().st_size) <= 0:
+                missing.append(path.name)
+        return (len(missing) == 0, missing)
+
+    @staticmethod
+    def _materialized_plan_response(*, plan: dict[str, Any], reason: str) -> str:
+        artifact_names = plan.get("artifacts") if isinstance(plan.get("artifacts"), list) else []
+        rendered_artifacts = ", ".join(str(name).strip() for name in artifact_names if str(name).strip()) or "없음"
+        return (
+            "결과요약: 실제 산출물 파일이 결과 경로에 materialize됨\n"
+            f"검증: {rendered_artifacts}\n"
+            f"남은이슈: transport 상태 점검 필요 ({reason})"
+        )
 
     def get_cowork_snapshot(self, cowork_id: str) -> dict[str, Any] | None:
         cowork = self._store.get_cowork(cowork_id=cowork_id)
@@ -791,6 +983,27 @@ class CoworkOrchestrator:
                     self._store.finish_cowork(cowork_id=cowork_id, status="completed", final_report=final_report)
                     return
 
+                repair_signature = self._compute_repair_signature(
+                    cowork_id=cowork_id,
+                    failures=gate.failures,
+                    final_report=final_report,
+                )
+                meta = self._cowork_meta(cowork_id)
+                if str(meta.get("last_repair_signature") or "") == repair_signature:
+                    meta["no_progress_rounds"] = int(meta.get("no_progress_rounds") or 0) + 1
+                else:
+                    meta["no_progress_rounds"] = 0
+                meta["last_repair_signature"] = repair_signature
+                if int(meta.get("no_progress_rounds") or 0) >= self._max_no_progress_rounds:
+                    error_summary = "; ".join(gate.failures[:3]) or "quality gate failed"
+                    self._store.finish_cowork(
+                        cowork_id=cowork_id,
+                        status="failed",
+                        error_summary=f"self-healing stalled: {error_summary}",
+                        final_report=final_report,
+                    )
+                    return
+
                 if rework_round >= self._max_rework_rounds:
                     error_summary = "; ".join(gate.failures[:3]) or "quality gate failed"
                     self._store.finish_cowork(
@@ -817,10 +1030,26 @@ class CoworkOrchestrator:
                         failures=gate.failures,
                         round_no=rework_round,
                     )
+                proposal_text = self._build_prompt_proposal(
+                    cowork_id=cowork_id,
+                    task_text=root_task,
+                    stage="rework",
+                    round_no=rework_round,
+                    failures=gate.failures,
+                    final_report=final_report,
+                    execution_rows=execution_rows,
+                )
+                self._write_prompt_proposal_artifact(
+                    cowork_id=cowork_id,
+                    stage="rework",
+                    round_no=rework_round,
+                    proposal_text=proposal_text,
+                )
                 rework_task_text = self._build_rework_task_text(
                     task_text=root_task,
                     failures=gate.failures,
                     round_no=rework_round,
+                    proposal_text=proposal_text,
                 )
                 execution_rows = await self._stage_execution(
                     cowork_id=cowork_id,
@@ -870,13 +1099,11 @@ class CoworkOrchestrator:
         planning_policy = self._stage_policy("planning")
         review_policy = self._stage_policy("planning_review")
         project_profile = self._project_profile_for_cowork(cowork_id=cowork_id, task_text=task_text)
-        fallback_payload = build_fallback_planning_submission(project_profile or "landing-basic", scenario)
-        fallback_submission = self._planning_submission_from_payload(fallback_payload)
         budget_floor_sec, budget_reason = self._estimate_cowork_budget(
             cowork_id=cowork_id,
             task_text=task_text,
             max_turn_sec=max_turn_sec,
-            plan_items=fallback_submission.tasks,
+            plan_items=None,
         )
         self._apply_budget_metadata(
             cowork_id=cowork_id,
@@ -885,25 +1112,59 @@ class CoworkOrchestrator:
             budget_auto_raised=False,
             budget_reason=budget_reason,
         )
-        prompt_text = self._build_planning_prompt(
-            task_text=task_text,
-            participants=participants,
-            planner=planner,
-            scenario=scenario,
-            artifact_dir=artifact_dir,
-        )
-        stage_id = self._store.insert_cowork_stage_start(
-            cowork_id=cowork_id,
-            stage_no=self._next_stage_no(cowork_id),
-            stage_type="planning",
-            actor_bot_id=str(planner.get("bot_id") or ""),
-            actor_label=str(planner.get("label") or ""),
-            actor_role=str(planner.get("role") or "planner"),
-            prompt_text=prompt_text,
-        )
         self._planning_review_cache[cowork_id] = []
-        outcome = TurnOutcome(done=True, status="skipped", detail="web_guaranteed_planning_bypass")
-        if not (self._is_web_guaranteed_mode(cowork_id=cowork_id, task_text=task_text) and not self._allow_web_planner_augment()):
+        planning_response_text: str | None = None
+        planning_gate_status = "failed"
+        failure_reason = ""
+        submission: PlanningSubmission | None = None
+        final_outcome = TurnOutcome(done=True, status="failed", detail="planning_not_started", error_text="planning not started")
+        final_stage_id = 0
+        feedback_reasons: list[str] = []
+
+        for round_no in range(1, self._max_planning_attempts + 1):
+            proposal_text = self._build_prompt_proposal(
+                cowork_id=cowork_id,
+                task_text=task_text,
+                stage="planning",
+                round_no=round_no,
+                failures=feedback_reasons,
+            )
+            self._write_prompt_proposal_artifact(
+                cowork_id=cowork_id,
+                stage="planning",
+                round_no=round_no,
+                proposal_text=proposal_text,
+            )
+            prompt_text = (
+                self._build_planning_prompt(
+                    task_text=task_text,
+                    participants=participants,
+                    planner=planner,
+                    scenario=scenario,
+                    artifact_dir=artifact_dir,
+                    proposal_text=proposal_text,
+                )
+                if round_no == 1
+                else self._build_planning_rejection_prompt(
+                    task_text=task_text,
+                    participants=participants,
+                    planner=planner,
+                    scenario=scenario,
+                    feedback_reasons=feedback_reasons,
+                    round_no=round_no,
+                    artifact_dir=artifact_dir,
+                    proposal_text=proposal_text,
+                )
+            )
+            stage_id = self._store.insert_cowork_stage_start(
+                cowork_id=cowork_id,
+                stage_no=self._next_stage_no(cowork_id),
+                stage_type="planning",
+                actor_bot_id=str(planner.get("bot_id") or ""),
+                actor_label=str(planner.get("label") or ""),
+                actor_role=str(planner.get("role") or "planner"),
+                prompt_text=prompt_text,
+            )
             outcome = await self._run_turn_with_recovery(
                 cowork_id=cowork_id,
                 participant=planner,
@@ -914,88 +1175,147 @@ class CoworkOrchestrator:
                 allow_stop_retry=planning_policy.allow_stop_retry,
                 allow_provider_fallback=planning_policy.allow_provider_fallback,
             )
-        else:
-            self._mark_fallback_used(cowork_id=cowork_id)
-            self._cowork_meta(cowork_id)["controller_feedback"] = "web guaranteed mode: deterministic planning submission applied"
+            final_outcome = outcome
+            final_stage_id = stage_id
+            planning_response_text = outcome.response_text
 
-        planning_response_text = outcome.response_text
-        submission = fallback_submission
-        planning_gate_status = "fallback"
-        failure_reason = ""
-
-        if outcome.status == "success":
-            parsed_submission, planning_errors = self._parse_planning_submission(outcome.response_text or "")
-            if planning_errors:
-                failure_reason = "; ".join(planning_errors[:5])
+            if outcome.status != "success":
+                failure_reason = outcome.error_text or outcome.detail or "planning failed"
+                feedback_reasons = [failure_reason]
                 self._planning_review_cache[cowork_id].append(
                     {
-                        "round": 1,
+                        "round": round_no,
+                        "approved": False,
+                        "feedback": failure_reason,
+                        "source": "planner_runtime",
+                    }
+                )
+                if outcome.status == "timeout" or self._looks_like_stream_timeout_outcome(outcome):
+                    self._record_timeout_event(
+                        cowork_id=cowork_id,
+                        origin="turn_timeout",
+                        participant=planner,
+                        stage_type="planning",
+                        effective_timeout_sec=outcome.effective_timeout_sec,
+                        detail=outcome.error_text or outcome.detail,
+                    )
+                self._finish_stage_record(
+                    stage_id=stage_id,
+                    resolved_status="failed",
+                    response_text=planning_response_text,
+                    error_text=failure_reason,
+                    outcome=outcome,
+                )
+                if round_no < self._max_planning_attempts:
+                    continue
+                break
+
+            parsed_submission, planning_errors = self._parse_planning_submission(outcome.response_text or "")
+            planning_errors.extend(
+                self._validate_planning_submission(
+                    parsed_submission,
+                    require_doc_contents=bool(project_profile and project_profile in WEB_PROJECT_PROFILES),
+                )
+            )
+            if planning_errors:
+                failure_reason = "; ".join(planning_errors[:5])
+                feedback_reasons = list(planning_errors[:8])
+                self._planning_review_cache[cowork_id].append(
+                    {
+                        "round": round_no,
                         "approved": False,
                         "feedback": failure_reason,
                         "source": "schema",
                     }
                 )
-                self._mark_fallback_used(cowork_id=cowork_id)
-            else:
-                submission = self._merge_submission_with_fallback_docs(
-                    submission=parsed_submission,
-                    fallback_payload=fallback_payload,
+                self._finish_stage_record(
+                    stage_id=stage_id,
+                    resolved_status="failed",
+                    response_text=planning_response_text,
+                    error_text=failure_reason,
+                    outcome=outcome,
                 )
-                review = await self._review_planning_plan(
-                    cowork_id=cowork_id,
-                    task_text=task_text,
-                    planner=planner,
-                    controller=controller,
-                    plan_items=submission.tasks,
-                    max_turn_sec=max(max_turn_sec, review_policy.timeout_floor_sec),
-                    round_no=1,
-                )
-                self._planning_review_cache[cowork_id].append(
-                    {
-                        "round": 1,
-                        "approved": review.approved,
-                        "feedback": review.feedback,
-                        "source": "controller",
-                    }
-                )
-                self._cowork_meta(cowork_id)["controller_feedback"] = review.feedback
-                if review.approved:
-                    planning_gate_status = "approved"
-                    planning_response_text = outcome.response_text
-                    self._mark_agent_success(cowork_id=cowork_id)
-                elif review_policy.soft_gate_on_reject:
-                    planning_gate_status = "soft_pass"
-                    planning_response_text = outcome.response_text
-                else:
-                    failure_reason = review.feedback or "planning review rejected"
-        elif outcome.status == "skipped":
-            failure_reason = "web guaranteed mode"
-        else:
-            failure_reason = outcome.error_text or outcome.detail or "planning failed"
-            self._mark_fallback_used(cowork_id=cowork_id)
-            if outcome.status == "timeout":
-                self._record_timeout_event(
-                    cowork_id=cowork_id,
-                    origin="turn_timeout",
-                    participant=planner,
-                    stage_type="planning",
-                    effective_timeout_sec=outcome.effective_timeout_sec,
-                    detail=outcome.error_text or outcome.detail,
-                )
+                if round_no < self._max_planning_attempts:
+                    continue
+                break
 
-        if planning_gate_status == "fallback":
-            planning_response_text = json.dumps(fallback_payload, ensure_ascii=False, indent=2)
+            submission = parsed_submission
+            budget_floor_sec, budget_reason = self._estimate_cowork_budget(
+                cowork_id=cowork_id,
+                task_text=task_text,
+                max_turn_sec=max_turn_sec,
+                plan_items=submission.tasks,
+            )
+            self._apply_budget_metadata(
+                cowork_id=cowork_id,
+                budget_floor_sec=budget_floor_sec,
+                budget_applied_sec=budget_floor_sec,
+                budget_auto_raised=False,
+                budget_reason=budget_reason,
+            )
+            review = await self._review_planning_plan(
+                cowork_id=cowork_id,
+                task_text=task_text,
+                planner=planner,
+                controller=controller,
+                plan_items=submission.tasks,
+                max_turn_sec=max(max_turn_sec, review_policy.timeout_floor_sec),
+                round_no=round_no,
+            )
+            self._planning_review_cache[cowork_id].append(
+                {
+                    "round": round_no,
+                    "approved": review.approved,
+                    "feedback": review.feedback,
+                    "source": "controller",
+                }
+            )
+            self._cowork_meta(cowork_id)["controller_feedback"] = review.feedback
+            if review.approved:
+                planning_gate_status = "approved"
+                self._mark_agent_success(cowork_id=cowork_id)
+                self._finish_stage_record(
+                    stage_id=stage_id,
+                    resolved_status="success",
+                    response_text=planning_response_text,
+                    error_text=None,
+                    outcome=outcome,
+                )
+                break
+            if review_policy.soft_gate_on_reject:
+                planning_gate_status = "soft_pass"
+                self._finish_stage_record(
+                    stage_id=stage_id,
+                    resolved_status="success",
+                    response_text=planning_response_text,
+                    error_text=None,
+                    outcome=outcome,
+                )
+                break
+            failure_reason = review.feedback or "planning review rejected"
+            feedback_reasons = [failure_reason]
+            submission = None
+            self._finish_stage_record(
+                stage_id=stage_id,
+                resolved_status="failed",
+                response_text=planning_response_text,
+                error_text=failure_reason,
+                outcome=outcome,
+            )
+            if round_no < self._max_planning_attempts:
+                continue
+            break
+
+        if submission is None or planning_gate_status not in {"approved", "soft_pass"}:
+            self._cowork_meta(cowork_id)["planning_gate_status"] = "failed"
+            self._store.finish_cowork(
+                cowork_id=cowork_id,
+                status="failed",
+                error_summary=failure_reason or final_outcome.error_text or final_outcome.detail or "planning failed",
+            )
+            return None
 
         self._cowork_meta(cowork_id)["planning_gate_status"] = planning_gate_status
-        self._finish_stage_record(
-            stage_id=stage_id,
-            resolved_status="success",
-            response_text=planning_response_text,
-            error_text=None,
-            outcome=outcome,
-            fallback_applied=planning_gate_status == "fallback" or outcome.status == "skipped",
-            fallback_source="deterministic_planning" if planning_gate_status == "fallback" else None,
-        )
 
         docs_context = [
             submission.prd_content,
@@ -1176,6 +1496,27 @@ class CoworkOrchestrator:
                             )
                             return True
 
+                    if stage_type == "implementation" and self._requires_real_web_artifact(cowork_id=cowork_id, task_text=task_text):
+                        materialized_before_run, _missing_before_run = self._plan_artifacts_materialized(cowork_id=cowork_id, plan=plan)
+                        if materialized_before_run:
+                            auto_outcome = TurnOutcome(done=True, status="skipped", detail="artifact_already_materialized")
+                            auto_response = self._materialized_plan_response(plan=plan, reason="artifacts already present before turn")
+                            self._mark_agent_success(cowork_id=cowork_id)
+                            self._mark_artifact_agent_success(cowork_id=cowork_id)
+                            self._finish_task_record(
+                                task_id=int(row["task_id"]),
+                                resolved_status="success",
+                                response_text=auto_response,
+                                outcome=auto_outcome,
+                            )
+                            self._finish_stage_record(
+                                stage_id=stage_id,
+                                resolved_status="success",
+                                response_text=auto_response,
+                                outcome=auto_outcome,
+                            )
+                            return True
+
                     try:
                         stage_policy = self._stage_policy(stage_type)
                         outcome = await self._run_turn_with_recovery(
@@ -1200,6 +1541,30 @@ class CoworkOrchestrator:
                     )
 
                     if outcome.status == "success":
+                        if stage_type == "implementation" and self._requires_real_web_artifact(cowork_id=cowork_id, task_text=task_text):
+                            audit = self._artifact_audit(cowork_id=cowork_id, task_text=task_text)
+                            if not audit or not audit.get("passed"):
+                                failure_reason = "; ".join(list((audit or {}).get("artifact_audit_failures") or [])[:3]) or "artifact contract unmet"
+                                error_text = (
+                                    "실제 산출물 파일이 생성되지 않았습니다. "
+                                    f"필수 artifact를 경로에 직접 작성해야 합니다: {failure_reason}"
+                                )
+                                self._finish_task_record(
+                                    task_id=int(row["task_id"]),
+                                    resolved_status="failed",
+                                    response_text=outcome.response_text,
+                                    error_text=error_text,
+                                    outcome=outcome,
+                                )
+                                self._finish_stage_record(
+                                    stage_id=stage_id,
+                                    resolved_status="failed",
+                                    response_text=outcome.response_text,
+                                    error_text=error_text,
+                                    outcome=outcome,
+                                )
+                                return False
+                            self._mark_artifact_agent_success(cowork_id=cowork_id)
                         self._mark_agent_success(cowork_id=cowork_id)
                         self._finish_task_record(
                             task_id=int(row["task_id"]),
@@ -1215,7 +1580,7 @@ class CoworkOrchestrator:
                         )
                         return True
 
-                    if outcome.status == "timeout":
+                    if outcome.status == "timeout" or self._looks_like_stream_timeout_outcome(outcome):
                         self._record_timeout_event(
                             cowork_id=cowork_id,
                             origin="turn_timeout",
@@ -1225,6 +1590,29 @@ class CoworkOrchestrator:
                             effective_timeout_sec=outcome.effective_timeout_sec,
                             detail=outcome.error_text or outcome.detail,
                         )
+
+                    if stage_type == "implementation" and self._requires_real_web_artifact(cowork_id=cowork_id, task_text=task_text):
+                        materialized_after_error, _missing_after_error = self._plan_artifacts_materialized(cowork_id=cowork_id, plan=plan)
+                        if materialized_after_error:
+                            recovered_response = self._materialized_plan_response(
+                                plan=plan,
+                                reason=outcome.error_text or outcome.detail or "turn failure after file creation",
+                            )
+                            self._mark_agent_success(cowork_id=cowork_id)
+                            self._mark_artifact_agent_success(cowork_id=cowork_id)
+                            self._finish_task_record(
+                                task_id=int(row["task_id"]),
+                                resolved_status="success",
+                                response_text=recovered_response,
+                                outcome=outcome,
+                            )
+                            self._finish_stage_record(
+                                stage_id=stage_id,
+                                resolved_status="success",
+                                response_text=recovered_response,
+                                outcome=outcome,
+                            )
+                            return True
 
                     fallback_response = None
                     if stage_policy.allow_deterministic_fallback:
@@ -1403,7 +1791,7 @@ class CoworkOrchestrator:
             self._store.finish_cowork(cowork_id=cowork_id, status="stopped")
             return None
 
-        if self._is_web_guaranteed_mode(cowork_id=cowork_id, task_text=task_text):
+        if self._is_web_artifact_authoritative_mode(cowork_id=cowork_id, task_text=task_text):
             stage_id = self._store.insert_cowork_stage_start(
                 cowork_id=cowork_id,
                 stage_no=self._next_stage_no(cowork_id),
@@ -1477,7 +1865,7 @@ class CoworkOrchestrator:
             )
             return str(outcome.response_text or "")
 
-        if outcome.status == "timeout":
+        if outcome.status == "timeout" or self._looks_like_stream_timeout_outcome(outcome):
             self._record_timeout_event(
                 cowork_id=cowork_id,
                 origin="turn_timeout",
@@ -1532,7 +1920,7 @@ class CoworkOrchestrator:
             self._store.finish_cowork(cowork_id=cowork_id, status="stopped")
             return None
 
-        if self._is_web_guaranteed_mode(cowork_id=cowork_id, task_text=task_text):
+        if self._is_web_artifact_authoritative_mode(cowork_id=cowork_id, task_text=task_text):
             stage_id = self._store.insert_cowork_stage_start(
                 cowork_id=cowork_id,
                 stage_no=self._next_stage_no(cowork_id),
@@ -1633,7 +2021,7 @@ class CoworkOrchestrator:
             self._apply_project_metadata_to_final_report(cowork_id=cowork_id, task_text=task_text, final_report=final_report)
             return final_report
 
-        if outcome.status == "timeout":
+        if outcome.status == "timeout" or self._looks_like_stream_timeout_outcome(outcome):
             self._record_timeout_event(
                 cowork_id=cowork_id,
                 origin="turn_timeout",
@@ -1879,7 +2267,12 @@ class CoworkOrchestrator:
                 outcome.effective_timeout_sec = effective_timeout
                 return outcome
 
-        if allow_stop_retry and (outcome.status == "timeout" or self._looks_like_active_run_outcome(outcome) or self._looks_like_process_exit_outcome(outcome)):
+        if allow_stop_retry and (
+            outcome.status == "timeout"
+            or self._looks_like_active_run_outcome(outcome)
+            or self._looks_like_process_exit_outcome(outcome)
+            or self._looks_like_stream_timeout_outcome(outcome)
+        ):
             retry = await self._retry_turn_after_stop(
                 cowork_id=cowork_id,
                 participant=participant,
@@ -2019,6 +2412,22 @@ class CoworkOrchestrator:
             return True
         return self._contains_active_run_hint(str(outcome.error_text or "").lower())
 
+    @staticmethod
+    def _looks_like_stream_timeout_outcome(outcome: TurnOutcome) -> bool:
+        haystack = " ".join([str(outcome.detail or ""), str(outcome.error_text or ""), str(outcome.response_text or "")]).lower()
+        if not haystack:
+            return False
+        return any(
+            marker in haystack
+            for marker in (
+                "adapter stream timed out",
+                "adapter stream timed out or cancelled",
+                "stream timed out",
+                "watchdog timeout",
+                "turn timed out after",
+            )
+        )
+
     def _looks_like_gemini_human_input_required_outcome(self, *, outcome: TurnOutcome, participant: dict[str, Any]) -> bool:
         if outcome.status != "error":
             return False
@@ -2063,34 +2472,35 @@ class CoworkOrchestrator:
                     reserved[role] = True
             row["role"] = role
 
-        def has_role(name: str) -> bool:
-            return any(str(row.get("role") or "") == name for row in normalized)
-
-        def promote_implementer_or_fallback(role_name: str, fallback_index: int) -> None:
-            if has_role(role_name):
-                return
-            candidate = next((row for row in normalized if str(row.get("role") or "") == "implementer"), None)
-            if candidate is None:
-                candidate = normalized[fallback_index]
-            candidate["role"] = role_name
-
-        promote_implementer_or_fallback("controller", 0)
-        promote_implementer_or_fallback("planner", 0)
-        promote_implementer_or_fallback("qa", -1)
-        if not has_role("implementer"):
-            candidate = next((row for row in normalized if str(row.get("role") or "") == "qa"), None)
-            if candidate is None:
-                candidate = next((row for row in normalized if str(row.get("role") or "") == "planner"), None)
+        has_implementer = any(str(row.get("role") or "") == "implementer" for row in normalized)
+        if not has_implementer:
+            candidate = next((row for row in normalized if str(row.get("role") or "") not in {"planner", "qa", "controller"}), None)
             if candidate is None:
                 candidate = normalized[-1]
             candidate["role"] = "implementer"
         return normalized
 
     def _role_map(self, participants: list[dict[str, Any]]) -> dict[str, Any]:
-        controller = next((row for row in participants if str(row.get("role")) == "controller"), participants[0])
-        planner = next((row for row in participants if str(row.get("role")) == "planner"), participants[0])
-        qa = next((row for row in participants if str(row.get("role")) == "qa"), participants[-1])
+        controller = next((row for row in participants if str(row.get("role")) == "controller"), None)
+        planner = next((row for row in participants if str(row.get("role")) == "planner"), None)
         implementers = [row for row in participants if str(row.get("role")) == "implementer"]
+        if controller is None:
+            controller = planner or next((row for row in participants if str(row.get("role")) == "qa"), None) or participants[0]
+        if planner is None:
+            planner = controller or participants[0]
+        qa = next((row for row in participants if str(row.get("role")) == "qa"), None)
+        if qa is None:
+            implementer_ids = {str(row.get("bot_id") or "") for row in implementers}
+            qa = next(
+                (
+                    row
+                    for row in [controller, planner, *participants]
+                    if row and str(row.get("bot_id") or "") not in implementer_ids
+                ),
+                None,
+            )
+        if qa is None:
+            qa = controller or planner or participants[-1]
         if not implementers:
             implementers = [planner]
         return {
@@ -2099,6 +2509,16 @@ class CoworkOrchestrator:
             "qa": qa,
             "implementers": implementers,
         }
+
+    @staticmethod
+    def _same_participant(participant_a: dict[str, Any] | None, participant_b: dict[str, Any] | None) -> bool:
+        if not isinstance(participant_a, dict) or not isinstance(participant_b, dict):
+            return False
+        bot_a = str(participant_a.get("bot_id") or "").strip()
+        bot_b = str(participant_b.get("bot_id") or "").strip()
+        chat_a = str(participant_a.get("chat_id") or "").strip()
+        chat_b = str(participant_b.get("chat_id") or "").strip()
+        return bool(bot_a and bot_a == bot_b and chat_a == chat_b)
 
     def _next_stage_no(self, cowork_id: str) -> int:
         stages = self._store.list_cowork_stages(cowork_id=cowork_id)
@@ -2155,6 +2575,8 @@ class CoworkOrchestrator:
         stage_type: str,
         plan: dict[str, Any],
     ) -> str | None:
+        if self._requires_real_web_artifact(cowork_id=cowork_id, task_text=task_text):
+            return None
         scaffold = self._ensure_project_scaffold_if_needed(cowork_id=cowork_id, task_text=task_text)
         audit = self._artifact_audit(cowork_id=cowork_id, task_text=task_text)
         if not scaffold or not audit:
@@ -2234,6 +2656,13 @@ class CoworkOrchestrator:
         )
         return submission, errors
 
+    @staticmethod
+    def _validate_planning_submission(submission: PlanningSubmission, *, require_doc_contents: bool) -> list[str]:
+        errors: list[str] = []
+        if not submission.tasks:
+            errors.append("planning_tasks가 비어 있음")
+        return errors
+
     def _planning_submission_from_payload(self, payload: dict[str, Any]) -> PlanningSubmission:
         return PlanningSubmission(
             tasks=list(payload.get("planning_tasks") or []),
@@ -2251,31 +2680,6 @@ class CoworkOrchestrator:
             release_plan_content=str(payload.get("release_plan_content") or ""),
             design_doc_content=str(payload.get("design_doc_content") or ""),
             qa_plan_content=str(payload.get("qa_plan_content") or ""),
-        )
-
-    def _merge_submission_with_fallback_docs(
-        self,
-        *,
-        submission: PlanningSubmission,
-        fallback_payload: dict[str, Any],
-    ) -> PlanningSubmission:
-        fallback_submission = self._planning_submission_from_payload(fallback_payload)
-        return PlanningSubmission(
-            tasks=submission.tasks or fallback_submission.tasks,
-            design_doc_path=submission.design_doc_path or fallback_submission.design_doc_path,
-            qa_plan_path=submission.qa_plan_path or fallback_submission.qa_plan_path,
-            prd_path=submission.prd_path or fallback_submission.prd_path,
-            trd_path=submission.trd_path or fallback_submission.trd_path,
-            db_path=submission.db_path or fallback_submission.db_path,
-            test_strategy_path=submission.test_strategy_path or fallback_submission.test_strategy_path,
-            release_plan_path=submission.release_plan_path or fallback_submission.release_plan_path,
-            prd_content=submission.prd_content or fallback_submission.prd_content,
-            trd_content=submission.trd_content or fallback_submission.trd_content,
-            db_content=submission.db_content or fallback_submission.db_content,
-            test_strategy_content=submission.test_strategy_content or fallback_submission.test_strategy_content,
-            release_plan_content=submission.release_plan_content or fallback_submission.release_plan_content,
-            design_doc_content=submission.design_doc_content or fallback_submission.design_doc_content,
-            qa_plan_content=submission.qa_plan_content or fallback_submission.qa_plan_content,
         )
 
     def _parse_and_validate_planning_tasks(self, text: str) -> tuple[list[dict[str, Any]], list[str]]:
@@ -2595,8 +2999,8 @@ class CoworkOrchestrator:
             if task_id:
                 raw_by_id[task_id] = normalized[-1]
 
-        if len(normalized) < 2:
-            errors.append("planning_tasks는 최소 2개 이상이어야 함")
+        if len(normalized) < 1:
+            errors.append("planning_tasks는 최소 1개 이상이어야 함")
         if len(normalized) > 12:
             errors.append("planning_tasks는 최대 12개까지 허용")
 
@@ -2691,6 +3095,14 @@ class CoworkOrchestrator:
         digest = hashlib.sha1(str(text or "project").encode("utf-8")).hexdigest()[:8]
         return f"project-{digest}"
 
+    @staticmethod
+    def _normalize_project_folder_name(value: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "").strip()).strip("._-")
+        if normalized:
+            return normalized[:80]
+        digest = hashlib.sha1(str(value or "project").encode("utf-8")).hexdigest()[:8]
+        return f"project-{digest}"
+
     def _build_planning_prompt(
         self,
         *,
@@ -2699,6 +3111,7 @@ class CoworkOrchestrator:
         planner: dict[str, Any],
         scenario: dict[str, Any] | None = None,
         artifact_dir: str | Path | None = None,
+        proposal_text: str | None = None,
     ) -> str:
         actor = str(planner.get("label") or planner.get("bot_id") or "Planner")
         roster = ", ".join(
@@ -2706,6 +3119,7 @@ class CoworkOrchestrator:
         )
         normalized_scenario = dict(scenario) if isinstance(scenario, dict) and scenario else self._extract_scenario_inputs(task_text)
         artifact_contract = self._build_artifact_contract_block(artifact_dir)
+        proposal_block = f"{str(proposal_text or '').strip()}\n\n" if str(proposal_text or "").strip() else ""
         return (
             "당신은 멀티봇 협업의 Planner입니다.\n"
             f"요청: {task_text}\n"
@@ -2725,13 +3139,16 @@ class CoworkOrchestrator:
             f"- deadline: {normalized_scenario['deadline']}\n"
             f"- priority: {normalized_scenario['priority']}\n\n"
             f"{artifact_contract}"
+            f"{proposal_block}"
             "[계약]\n"
             "1) 산출물은 Implementer/QA가 즉시 수행 가능한 작업으로 분해합니다.\n"
             "2) 작업은 id/owner_role/parallel_group/dependencies/artifacts/estimated_hours를 반드시 포함합니다.\n"
             "3) 작업 간 중복/충돌/모호한 표현을 금지합니다.\n"
             "4) required_sections를 누락하지 않도록 task set을 구성합니다.\n\n"
-            "5) planning 문서는 반드시 본문을 포함합니다: prd/trd/db/test_strategy/release_plan/design_doc/qa_plan.\n\n"
-            "6) 응답 지연을 줄이기 위해 각 *_content는 핵심 요약 5~12줄로 간결하게 작성합니다.\n\n"
+            "5) planning 문서는 반드시 본문을 포함합니다: prd/trd/db/test_strategy/release_plan/design_doc/qa_plan.\n"
+            "6) planning fallback은 없습니다. JSON 스키마가 틀리거나 문서 본문이 비면 즉시 실패합니다.\n"
+            "7) 작업 수는 1~5개 범위에서 최소 구성으로 작성합니다.\n"
+            "8) 응답 지연을 줄이기 위해 각 *_content는 핵심 요약 3~8줄로 간결하게 작성합니다.\n\n"
             "[출력 규격]\n"
             "JSON 객체 1개만 출력합니다. 다른 문장/마크다운/코드블록 금지.\n"
             '{\n'
@@ -2744,7 +3161,7 @@ class CoworkOrchestrator:
             '      "risk":"리스크",\n'
             '      "owner_role":"implementer",\n'
             '      "parallel_group":"G1",\n'
-            '      "dependencies":["T0"],\n'
+            '      "dependencies":[],\n'
             '      "artifacts":["design_spec.md"],\n'
             '      "estimated_hours":1.5\n'
             "    }\n"
@@ -2777,6 +3194,7 @@ class CoworkOrchestrator:
         feedback_reasons: list[str],
         round_no: int,
         artifact_dir: str | Path | None = None,
+        proposal_text: str | None = None,
     ) -> str:
         feedback = "\n".join(f"- {row}" for row in feedback_reasons[:8]) or "- 스키마/검토 기준 미충족"
         base = self._build_planning_prompt(
@@ -2785,6 +3203,7 @@ class CoworkOrchestrator:
             planner=planner,
             scenario=scenario,
             artifact_dir=artifact_dir,
+            proposal_text=proposal_text,
         )
         return (
             f"{base}\n\n"
@@ -2806,6 +3225,26 @@ class CoworkOrchestrator:
         max_turn_sec: int,
         round_no: int,
     ) -> PlanningReviewResult:
+        if self._same_participant(planner, controller):
+            feedback = "dedicated controller absent: planner submission accepted after schema validation"
+            stage_id = self._store.insert_cowork_stage_start(
+                cowork_id=cowork_id,
+                stage_no=self._next_stage_no(cowork_id),
+                stage_type="planning_review",
+                actor_bot_id=str(controller.get("bot_id") or planner.get("bot_id") or ""),
+                actor_label=str(controller.get("label") or planner.get("label") or ""),
+                actor_role="controller",
+                prompt_text="[auto-approved] no dedicated controller assigned",
+            )
+            outcome = TurnOutcome(done=True, status="skipped", detail="controller_absent_auto_approve")
+            self._finish_stage_record(
+                stage_id=stage_id,
+                resolved_status="success",
+                response_text=feedback,
+                outcome=outcome,
+            )
+            return PlanningReviewResult(approved=True, feedback=feedback)
+
         prompt_text = self._build_planning_review_prompt(
             task_text=task_text,
             planner=planner,
@@ -2829,7 +3268,7 @@ class CoworkOrchestrator:
             max_turn_sec=max_turn_sec,
         )
         if outcome.status != "success":
-            if outcome.status == "timeout":
+            if outcome.status == "timeout" or self._looks_like_stream_timeout_outcome(outcome):
                 self._record_timeout_event(
                     cowork_id=cowork_id,
                     origin="turn_timeout",
@@ -3007,6 +3446,7 @@ class CoworkOrchestrator:
         qa_ref = Path(str(qa_plan_path or "qa_test_plan.md")).name
         artifacts = plan.get("artifacts") if isinstance(plan.get("artifacts"), list) else []
         artifact_line = ", ".join(str(row).strip() for row in artifacts if str(row).strip()) or "없음"
+        file_contract = artifact_line if artifact_line != "없음" else "index.html, styles.css, README.md"
         design_excerpt = str(design_doc_excerpt or "").strip().replace("\n", " ")
         qa_excerpt = str(qa_plan_excerpt or "").strip().replace("\n", " ")
         if len(design_excerpt) > 180:
@@ -3041,7 +3481,10 @@ class CoworkOrchestrator:
             "2) 근거 없는 완료 선언을 금지합니다.\n"
             "3) QA문서의 테스트 포인트를 기준으로 검증 결과를 작성합니다.\n"
             "4) 실행링크/증빙이 없으면 이유와 대체 검증을 명시합니다.\n"
-            "5) 막힌 경우에도 남은이슈에 원인/다음 액션을 남깁니다.\n\n"
+            "5) 막힌 경우에도 남은이슈에 원인/다음 액션을 남깁니다.\n"
+            f"6) 이번 작업은 텍스트 보고만으로 완료되지 않습니다. 반드시 {file_contract} 파일을 실제로 생성/수정합니다.\n"
+            "7) fallback placeholder 금지: 'Runnable Cowork Artifact', 'Generated by cowork deterministic web scaffold.' 문구를 산출물에 남기지 마세요.\n"
+            "8) 자체 테스트를 위해 서버가 필요하면 foreground로 대기하지 말고 백그라운드 실행 후 검증이 끝나면 즉시 종료하세요. long-running 프로세스 때문에 turn이 반환되지 않으면 실패입니다.\n\n"
             "[출력 형식]\n"
             "반드시 아래 형식으로 작성하세요.\n"
             "결과요약: (핵심 결과)\n"
@@ -3488,7 +3931,7 @@ class CoworkOrchestrator:
         audit = None
         if str(cowork_id or "").strip():
             audit = self._artifact_audit(cowork_id=str(cowork_id), task_text=task_text)
-        if str(cowork_id or "").strip() and self._is_web_guaranteed_mode(cowork_id=str(cowork_id), task_text=task_text) and audit:
+        if str(cowork_id or "").strip() and self._is_web_artifact_authoritative_mode(cowork_id=str(cowork_id), task_text=task_text) and audit:
             final_conclusion = str(final_report.get("final_conclusion") or "").strip()
             execution_checklist = str(final_report.get("execution_checklist") or "").strip()
             qa_signoff = str(final_report.get("qa_signoff") or "").strip().upper()
@@ -3738,14 +4181,17 @@ class CoworkOrchestrator:
             }
         ]
 
-    def _build_rework_task_text(self, *, task_text: str, failures: list[str], round_no: int) -> str:
+    def _build_rework_task_text(self, *, task_text: str, failures: list[str], round_no: int, proposal_text: str | None = None) -> str:
         failure_lines = "\n".join(f"- {row}" for row in failures[:5]) or "- 미정의 품질 이슈"
-        return (
+        base = (
             f"{task_text}\n"
             f"[보강 라운드 {round_no}] 품질 게이트 미통과 이슈를 해소하세요.\n"
             "아래 이슈를 모두 반영하고, 실행링크/검증근거를 반드시 포함해 답변하세요.\n"
             f"{failure_lines}"
         )
+        if str(proposal_text or "").strip():
+            return f"{base}\n\n{str(proposal_text).strip()}"
+        return base
 
     def _fallback_integration_text(self, execution_rows: list[dict[str, Any]]) -> str:
         summary = self._build_execution_summary(execution_rows)
@@ -3810,11 +4256,15 @@ class CoworkOrchestrator:
         cached = self._project_meta_cache.get(cowork_id, {})
         project_id = str(cached.get("project_id") or "").strip()
         if project_id:
-            return project_id
+            normalized = self._normalize_project_folder_name(project_id)
+            if normalized != project_id:
+                cached["project_id"] = normalized
+                self._project_meta_cache[cowork_id] = cached
+            return normalized
         cowork = self._store.get_cowork(cowork_id=cowork_id)
         task_text = str(cowork.get("task") or "") if isinstance(cowork, dict) else ""
         scenario = self._extract_scenario_inputs(task_text)
-        derived = str(scenario.get("project_id") or cowork_id).strip() or cowork_id
+        derived = self._normalize_project_folder_name(str(scenario.get("project_id") or cowork_id).strip() or cowork_id)
         self._project_meta_cache[cowork_id] = {"project_id": derived}
         return derived
 
@@ -3835,7 +4285,10 @@ class CoworkOrchestrator:
             "[산출물 경로 계약]\n"
             f"- 이번 코워크 결과 경로: {normalized}\n"
             "- 새 파일/수정 파일은 위 경로 기준으로 생성합니다.\n"
-            "- 상대 경로를 사용할 때도 위 경로를 기준으로 해석합니다.\n\n"
+            "- 상대 경로를 사용할 때도 위 경로를 기준으로 해석합니다.\n"
+            "- 응답 텍스트만 제출하면 실패입니다. 실제 파일 생성/수정이 필요합니다.\n"
+            "- 산출물은 placeholder가 아니라 실제 실행 가능한 내용이어야 합니다.\n"
+            "- 장기 실행 프로세스(예: python -m http.server, npm run dev, vite)는 foreground로 실행하지 마세요. 필요하면 백그라운드로 띄우고 검증 후 종료하세요.\n\n"
         )
 
     def _artifact_read_dir(self, cowork_id: str) -> Path:
@@ -3917,7 +4370,7 @@ class CoworkOrchestrator:
         tasks = snapshot.get("tasks") if isinstance(snapshot.get("tasks"), list) else []
         final_report = snapshot.get("final_report") if isinstance(snapshot.get("final_report"), dict) else {}
 
-        planning_stage = next((row for row in stages if str(row.get("stage_type") or "") == "planning"), None)
+        planning_stage = next((row for row in reversed(stages) if str(row.get("stage_type") or "") == "planning"), None)
         planning_text = str(planning_stage.get("response_text") or "") if isinstance(planning_stage, dict) else ""
         planning_submission, _ = self._parse_planning_submission(planning_text)
         planning_tasks = planning_submission.tasks

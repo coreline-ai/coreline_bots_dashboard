@@ -34,7 +34,7 @@ SKIP_DIR_NAMES = {
     ".pytest_cache",
     ".mypy_cache",
 }
-RUN_TURN_TIMEOUT_SEC = max(15, int(os.getenv("RUN_TURN_TIMEOUT_SEC", "90")))
+RUN_TURN_TIMEOUT_SEC = max(15, int(os.getenv("RUN_TURN_TIMEOUT_SEC", "180")))
 RUN_WORKER_CONCURRENCY = max(1, int(os.getenv("RUN_WORKER_CONCURRENCY", "2")))
 
 
@@ -176,6 +176,68 @@ def _display_path_for_prompt(path: Path) -> str:
         return str(path.resolve())
 
 
+def _contains_explicit_artifact_contract(prompt: str) -> bool:
+    text = prompt or ""
+    lowered = text.lower()
+    if not lowered:
+        return False
+    if "[산출물 경로 계약]" in text or "이번 코워크 결과 경로:" in text or "artifact route" in lowered:
+        return True
+
+    has_path = bool(
+        re.search(
+            r"(?:(?:[A-Za-z]:)?(?:[.~]{0,2}/)[^\s'\"<>|]+|/(?:[^\s'\"<>|]+/?)+)",
+            text,
+        )
+    )
+    if not has_path:
+        return False
+
+    contract_hints = (
+        "artifact",
+        "output",
+        "result",
+        "directory",
+        "folder",
+        "path",
+        "workspace",
+        "결과",
+        "산출물",
+        "출력",
+        "경로",
+        "폴더",
+        "디렉터리",
+        "워크스페이스",
+    )
+    write_hints = (
+        "save",
+        "saved",
+        "write",
+        "written",
+        "create",
+        "generate",
+        "store",
+        "emit",
+        "put",
+        "under",
+        "inside",
+        "into",
+        "저장",
+        "생성",
+        "작성",
+        "만들",
+        "직접",
+        "기록",
+        "출력",
+    )
+    if any(hint in lowered for hint in contract_hints) and any(hint in lowered for hint in write_hints):
+        return True
+
+    if re.search(r"(index\.html|styles?\.css|readme\.md|app\.js)", lowered) and any(hint in lowered for hint in write_hints):
+        return True
+    return False
+
+
 def _augment_prompt_for_generation_request(prompt: str, *, artifact_output_dir: Path | None = None) -> str:
     result = prompt
     output_dir = artifact_output_dir.resolve() if artifact_output_dir is not None else None
@@ -189,7 +251,7 @@ def _augment_prompt_for_generation_request(prompt: str, *, artifact_output_dir: 
             f"![generated]({output_dir_text}/<file>.png)\n"
             "Use a real existing path only."
         )
-    if _looks_like_html_request(prompt):
+    if _looks_like_html_request(prompt) and not _contains_explicit_artifact_contract(prompt):
         result = (
             f"{result}\n\n[HTML Delivery Contract]\n"
             "If you generate an HTML page, save it as a local file and include a markdown link to that exact file.\n"

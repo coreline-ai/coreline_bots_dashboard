@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,14 @@ import pytest
 from telegram_bot_new.mock_messenger.cowork import CoworkOrchestrator, TurnOutcome
 from telegram_bot_new.mock_messenger.schemas import CoworkProfileRef, CoworkStartRequest
 from telegram_bot_new.mock_messenger.store import MockMessengerStore
+
+
+ARTIFACT_DIR_RE = re.compile(r"이번 코워크 결과 경로:\s*(.+)")
+
+
+@pytest.fixture(autouse=True)
+def _legacy_web_fallback_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COWORK_WEB_ALLOW_DETERMINISTIC_FALLBACK", "1")
 
 
 async def _wait_terminal(orchestrator: CoworkOrchestrator, cowork_id: str, timeout_sec: float = 8.0) -> dict[str, Any]:
@@ -79,6 +88,59 @@ def _make_request(*, task: str = "테스트 작업", max_parallel: int = 2, keep
         fresh_session=True,
         keep_partial_on_error=keep_partial_on_error,
         scenario=_scenario(task),
+    )
+
+
+def _artifact_dir_from_prompt(text: str) -> Path | None:
+    match = ARTIFACT_DIR_RE.search(str(text or ""))
+    if not match:
+        return None
+    return Path(match.group(1).strip())
+
+
+def _write_real_landing_artifact(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "index.html").write_text(
+        "\n".join(
+            [
+                "<!DOCTYPE html>",
+                "<html lang=\"ko\">",
+                "  <head>",
+                "    <meta charset=\"UTF-8\" />",
+                "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
+                "    <title>프리미엄 플라워 스토어</title>",
+                "    <meta name=\"description\" content=\"온라인 주문 전환을 위한 프리미엄 꽃집 랜딩 페이지\" />",
+                "    <link rel=\"stylesheet\" href=\"styles.css\" />",
+                "  </head>",
+                "  <body>",
+                "    <main>",
+                "      <section id=\"hero\"><h1>오늘 배송 가능한 플라워 컬렉션</h1><p>신뢰감 있는 톤으로 빠르게 주문을 유도합니다.</p><a href=\"#cta\">지금 시작하기</a></section>",
+                "      <section id=\"product\"><h2>베스트 셀러</h2><p>상품 신뢰 포인트와 가격대를 함께 제시합니다.</p></section>",
+                "      <section id=\"trust\"><h2>구매 신뢰 요소</h2><p>당일 배송, 리뷰, 교환 정책을 한 번에 보여줍니다.</p></section>",
+                "      <section id=\"cta\"><h2>주문 시작</h2><p>배송지 입력 후 결제를 진행하세요.</p></section>",
+                "    </main>",
+                "  </body>",
+                "</html>",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (root / "styles.css").write_text(
+        "\n".join(
+            [
+                ":root { color-scheme: light; }",
+                "body { margin: 0; font-family: 'Helvetica Neue', sans-serif; background: #f6f2eb; color: #1d1d1d; }",
+                "main { display: grid; gap: 24px; padding: 24px; }",
+                "section { padding: 24px; border-radius: 20px; background: #fffdf9; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }",
+                "@media (min-width: 768px) { main { grid-template-columns: repeat(2, minmax(0, 1fr)); } #hero, #cta { grid-column: 1 / -1; } }",
+                "@media (min-width: 1440px) { body { font-size: 18px; } main { max-width: 1280px; margin: 0 auto; } }",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (root / "README.md").write_text(
+        "# 프리미엄 플라워 스토어\n\n- Entry: `index.html`\n- Notes: 실제 implementer가 생성한 랜딩 페이지 산출물\n",
+        encoding="utf-8",
     )
 
 
@@ -448,7 +510,11 @@ async def test_stage_execution_uses_run_turn_with_recovery(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_cowork_orchestrator_uses_planning_fallback_and_role_normalization(tmp_path: Path) -> None:
+async def test_cowork_orchestrator_fails_on_invalid_planning_and_preserves_role_normalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COWORK_MAX_PLANNING_ATTEMPTS", "1")
     store = MockMessengerStore(
         db_path=str(tmp_path / "cowork-orchestrator-fallback.db"),
         data_dir=str(tmp_path / "cowork-orchestrator-fallback-data"),
@@ -464,22 +530,7 @@ async def test_cowork_orchestrator_uses_planning_fallback_and_role_normalization
             return {"ok": True}
         if "planner" in text.lower():
             planner_attempts += 1
-            if planner_attempts == 1:
-                store.store_bot_message(token=token, chat_id=chat_id, text="[1][12:00:00][assistant_message] invalid planning")
-            else:
-                body = _plan_task_line(
-                    task_id="T1",
-                    title="fallback task",
-                    goal="재계획",
-                    done_criteria="스키마 적합",
-                    risk="누락",
-                )
-                store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
-                store.store_bot_message(
-                    token=token,
-                    chat_id=chat_id,
-                    text=f"[1][12:00:00][assistant_message] {_plan_task_line(task_id='T2', title='검증', goal='검증', done_criteria='리뷰 통과', risk='오판')}",
-                )
+            store.store_bot_message(token=token, chat_id=chat_id, text="[1][12:00:00][assistant_message] invalid planning")
             store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
             return {"ok": True}
         if "integrator" in text.lower():
@@ -533,13 +584,236 @@ async def test_cowork_orchestrator_uses_planning_fallback_and_role_normalization
     started = await orchestrator.start_cowork(request=req, participants=participants)
     cowork_id = str(started["cowork_id"])
     done = await _wait_terminal(orchestrator, cowork_id)
-    assert done["status"] == "completed"
-    assert len(done["tasks"]) >= 1
+    assert done["status"] == "failed"
+    assert done["tasks"] == []
     assert planner_attempts == 1
     participant_roles = [row["role"] for row in done["participants"]]
     assert "implementer" in participant_roles
-    assert done["final_report"]["planning_gate_status"] == "fallback"
-    assert done["final_report"]["entry_artifact_url"] in {None, ""}
+    assert done["final_report"] is None
+    planning_stage = next(row for row in done["stages"] if str(row.get("stage_type")) == "planning")
+    assert planning_stage["resolved_status"] == "failed"
+    assert planning_stage["raw_outcome_status"] == "success"
+
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_orchestrator_retries_planning_with_prompt_proposal_until_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COWORK_WEB_ALLOW_DETERMINISTIC_FALLBACK", "0")
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-planning-retry.db"),
+        data_dir=str(tmp_path / "cowork-planning-retry-data"),
+    )
+    planner_attempts = {"count": 0}
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "planner" in lowered:
+            planner_attempts["count"] += 1
+            if planner_attempts["count"] == 1:
+                body = '{"planning_tasks":[{"id":"T1","title":"초안"}]}'
+            else:
+                body = json.dumps(
+                    {
+                        "planning_tasks": [
+                            {
+                                "id": "T1",
+                                "title": "실제 산출물 구현",
+                                "goal": "랜딩 페이지 파일 생성",
+                                "done_criteria": "index.html/styles.css/README.md 생성",
+                                "risk": "파일 누락",
+                                "owner_role": "implementer",
+                                "parallel_group": "G1",
+                                "dependencies": [],
+                                "artifacts": ["index.html", "styles.css", "README.md"],
+                                "estimated_hours": 1.0,
+                            }
+                        ],
+                        "prd_path": "PRD.md",
+                        "trd_path": "TRD.md",
+                        "db_path": "DB.md",
+                        "test_strategy_path": "test_strategy.md",
+                        "release_plan_path": "release_plan.md",
+                        "design_doc_path": "design_spec.md",
+                        "qa_plan_path": "qa_test_plan.md",
+                        "prd_content": "# PRD\n- 목표\n- 사용자\n- CTA",
+                        "trd_content": "# TRD\n- 구조\n- 파일\n- 배포",
+                        "db_content": "# DB\n- 없음\n- 정적 페이지",
+                        "test_strategy_content": "# Test\n- 링크 확인\n- 반응형 확인",
+                        "release_plan_content": "# Release\n- 로컬 검증\n- 결과 공유",
+                        "design_doc_content": "# Design\n- hero/product/trust/cta",
+                        "qa_plan_content": "# QA\n- index.html 존재\n- CTA 노출",
+                    },
+                    ensure_ascii=False,
+                )
+        elif "검토 대상 planning_tasks" in text:
+            body = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+        elif "implementer" in lowered:
+            artifact_dir = _artifact_dir_from_prompt(text)
+            assert artifact_dir is not None
+            _write_real_landing_artifact(artifact_dir)
+            body = (
+                "결과요약: 실제 랜딩 페이지 파일 생성 완료\n"
+                "검증: index.html, styles.css, README.md 생성 확인\n"
+                "실행링크: 없음\n"
+                "증빙: 결과 경로 파일 생성\n"
+                "테스트요청: CTA 문구와 메타태그 확인\n"
+                "남은이슈: 없음"
+            )
+        elif "integrator" in lowered:
+            body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        else:
+            body = (
+                "최종결론: 실행 가능\n"
+                "실행체크리스트: 파일 생성 및 CTA 확인\n"
+                "실행링크: 없음\n"
+                "증빙요약: artifact 경로 확인\n"
+                "즉시실행항목(Top3): 1) 미리보기 확인 2) 카피 검토 3) 공유"
+            )
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(store=store, send_user_message=sender, poll_interval_sec=0.02, cool_down_sec=0.0)
+    started = await orchestrator.start_cowork(request=_make_request(task="프롬프트 재제안 플래닝 테스트"), participants=[
+        {"profile_id":"p-a","label":"Bot A","bot_id":"bot-a","token":"token-a","chat_id":1001,"user_id":9001,"role":"controller","adapter":"gemini"},
+        {"profile_id":"p-b","label":"Bot B","bot_id":"bot-b","token":"token-b","chat_id":1001,"user_id":9001,"role":"planner","adapter":"codex"},
+        {"profile_id":"p-c","label":"Bot C","bot_id":"bot-c","token":"token-c","chat_id":1001,"user_id":9001,"role":"implementer","adapter":"claude"},
+    ])
+    cowork_id = str(started["cowork_id"])
+    done = await _wait_terminal(orchestrator, cowork_id)
+    assert done["status"] == "completed"
+    assert planner_attempts["count"] == 2
+    planning_prompts = [row for row in done["stages"] if str(row.get("stage_type")) == "planning"]
+    assert len(planning_prompts) >= 2
+    proposal_path = Path.cwd() / "result" / "test-project" / cowork_id / "planning" / "prompt_proposal_round_2.md"
+    assert proposal_path.is_file()
+
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_orchestrator_default_auto_repair_runs_multiple_rounds_before_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COWORK_WEB_ALLOW_DETERMINISTIC_FALLBACK", "0")
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-auto-repair.db"),
+        data_dir=str(tmp_path / "cowork-auto-repair-data"),
+    )
+    counters = {"controller": 0, "implementer": 0, "qa": 0}
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "planner" in lowered:
+            body = json.dumps(
+                {
+                    "planning_tasks": [
+                        {
+                            "id": "T1",
+                            "title": "웹 랜딩 구현",
+                            "goal": "실 결과물 생성",
+                            "done_criteria": "실행 가능한 웹 artifact와 링크 확보",
+                            "risk": "링크 누락",
+                            "owner_role": "implementer",
+                            "parallel_group": "G1",
+                            "dependencies": [],
+                            "artifacts": ["index.html", "styles.css", "README.md"],
+                            "estimated_hours": 1.0,
+                        }
+                    ],
+                    "prd_path": "PRD.md",
+                    "trd_path": "TRD.md",
+                    "db_path": "DB.md",
+                    "test_strategy_path": "test_strategy.md",
+                    "release_plan_path": "release_plan.md",
+                    "design_doc_path": "design_spec.md",
+                    "qa_plan_path": "qa_test_plan.md",
+                    "prd_content": "# PRD\n- 랜딩 페이지",
+                    "trd_content": "# TRD\n- 정적 HTML/CSS",
+                    "db_content": "# DB\n- 없음",
+                    "test_strategy_content": "# Test\n- 링크 확인",
+                    "release_plan_content": "# Release\n- artifact 공유",
+                    "design_doc_content": "# Design\n- hero/product/trust/cta",
+                    "qa_plan_content": "# QA\n- 링크/CTA/섹션 확인",
+                },
+                ensure_ascii=False,
+            )
+        elif "검토 대상 planning_tasks" in text:
+            body = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+        elif "implementer" in lowered:
+            counters["implementer"] += 1
+            artifact_dir = _artifact_dir_from_prompt(text)
+            assert artifact_dir is not None
+            _write_real_landing_artifact(artifact_dir)
+            if counters["implementer"] < 3:
+                body = (
+                    "결과요약: 랜딩 페이지 파일 수정 완료\n"
+                    "검증: 파일 생성 완료\n"
+                    "실행링크: 없음\n"
+                    "증빙: 결과 경로 파일 생성\n"
+                    "테스트요청: 링크와 CTA 재검토\n"
+                    "남은이슈: 실행링크 미기재"
+                )
+            else:
+                body = (
+                    "결과요약: 랜딩 페이지와 실행 링크 보강 완료\n"
+                    "검증: 파일 생성 및 링크 기재 완료\n"
+                    "실행링크: http://127.0.0.1:9082/_mock/preview/landing\n"
+                    "증빙: 결과 경로 파일 생성 및 링크 확인\n"
+                    "테스트요청: CTA와 링크 동작 확인\n"
+                    "남은이슈: 없음"
+                )
+        elif "integrator" in lowered:
+            counters["qa"] += 1
+            if counters["qa"] < 3:
+                body = "QA결론: FAIL\n결함요약: 링크와 증빙 보강 필요\n재현절차: 결과 열기 후 링크 확인\n수정요청: 링크/증빙 재제출\nQA승인: REJECTED"
+            else:
+                body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        else:
+            counters["controller"] += 1
+            body = (
+                "최종결론: 실행 가능\n"
+                "실행체크리스트: 링크와 파일 검증 완료\n"
+                "실행링크: http://127.0.0.1:9082/_mock/preview/landing\n"
+                "증빙요약: 링크와 파일 모두 확인\n"
+                "즉시실행항목(Top3): 1) 공유 2) 회귀테스트 3) 배포"
+            )
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(store=store, send_user_message=sender, poll_interval_sec=0.02, cool_down_sec=0.0)
+    orchestrator._is_web_artifact_authoritative_mode = lambda **kwargs: False  # type: ignore[assignment]
+    started = await orchestrator.start_cowork(request=_make_request(task="다중 자동 수정 라운드 테스트"), participants=[
+        {"profile_id":"p-a","label":"Bot A","bot_id":"bot-a","token":"token-a","chat_id":1001,"user_id":9001,"role":"controller","adapter":"gemini"},
+        {"profile_id":"p-b","label":"Bot B","bot_id":"bot-b","token":"token-b","chat_id":1001,"user_id":9001,"role":"planner","adapter":"codex"},
+        {"profile_id":"p-c","label":"Bot C","bot_id":"bot-c","token":"token-c","chat_id":1001,"user_id":9001,"role":"implementer","adapter":"claude"},
+    ])
+    cowork_id = str(started["cowork_id"])
+    done = await _wait_terminal(orchestrator, cowork_id)
+    assert done["status"] == "completed"
+    assert str(done["final_report"]["completion_status"]) == "passed"
+    assert counters["implementer"] >= 3
+    assert counters["qa"] >= 3
+    rework_stages = [row for row in done["stages"] if str(row.get("stage_type")) == "rework"]
+    assert len(rework_stages) >= 2
+    proposal_path = Path.cwd() / "result" / "test-project" / cowork_id / "implementation" / "prompt_proposal_rework_round_2.md"
+    assert proposal_path.is_file()
 
     await orchestrator.shutdown()
     store.close()
@@ -727,7 +1001,7 @@ async def test_cowork_controller_reject_uses_soft_gate_and_completes(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_cowork_planning_timeout_uses_fallback_submission_and_completes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cowork_planning_timeout_fails_without_fallback_submission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = MockMessengerStore(
         db_path=str(tmp_path / "cowork-planning-fallback.db"),
         data_dir=str(tmp_path / "cowork-planning-fallback-data"),
@@ -779,15 +1053,22 @@ async def test_cowork_planning_timeout_uses_fallback_submission_and_completes(tm
         {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
     ])
     snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
-    assert snapshot["status"] == "completed"
-    assert snapshot["final_report"]["planning_gate_status"] == "fallback"
-    assert snapshot["tasks"]
+    assert snapshot["status"] == "failed"
+    assert snapshot["final_report"] is None
+    planning_stage = next(row for row in snapshot["stages"] if str(row.get("stage_type")) == "planning")
+    assert planning_stage["resolved_status"] == "failed"
+    assert planning_stage["raw_outcome_status"] == "timeout"
+    assert snapshot["last_timeout_event"]["bot_id"] == "bot-b"
     await orchestrator.shutdown()
     store.close()
 
 
 @pytest.mark.asyncio
-async def test_cowork_web_guaranteed_mode_skips_planner_and_records_budget(tmp_path: Path) -> None:
+async def test_cowork_web_guaranteed_mode_still_runs_planner_and_records_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COWORK_MAX_PLANNING_ATTEMPTS", "1")
     store = MockMessengerStore(
         db_path=str(tmp_path / "cowork-web-guaranteed.db"),
         data_dir=str(tmp_path / "cowork-web-guaranteed-data"),
@@ -819,19 +1100,282 @@ async def test_cowork_web_guaranteed_mode_skips_planner_and_records_budget(tmp_p
         {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
     ])
     snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
-    assert snapshot["status"] == "completed"
-    assert planner_prompts == 0
-    assert snapshot["budget_floor_sec"] == 30
+    assert snapshot["status"] == "failed"
+    assert planner_prompts == 1
+    assert snapshot["budget_floor_sec"] == 150
     planning_stage = next(row for row in snapshot["stages"] if str(row.get("stage_type")) == "planning")
-    assert planning_stage["raw_outcome_status"] == "skipped"
-    assert snapshot["final_report"]["planning_gate_status"] == "fallback"
+    assert planning_stage["raw_outcome_status"] == "success"
+    assert planning_stage["resolved_status"] == "failed"
+    assert snapshot["final_report"] is None
     await orchestrator.shutdown()
     store.close()
 
 
 @pytest.mark.asyncio
-async def test_cowork_planning_timeout_records_timeout_actor_before_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("COWORK_WEB_ALLOW_PLANNER_AUGMENT", "1")
+async def test_cowork_web_strict_mode_fails_when_implementer_does_not_materialize_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("COWORK_WEB_ALLOW_DETERMINISTIC_FALLBACK", raising=False)
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-web-strict-fail.db"),
+        data_dir=str(tmp_path / "cowork-web-strict-fail-data"),
+    )
+
+    planning_body = json.dumps(
+        {
+            "planning_tasks": [
+                {
+                    "id": "T1",
+                    "title": "랜딩 페이지 구현",
+                    "goal": "실제 landing artifact 생성",
+                    "done_criteria": "index.html/styles.css/README.md 생성",
+                    "risk": "파일 미생성",
+                    "owner_role": "implementer",
+                    "parallel_group": "G1",
+                    "dependencies": [],
+                    "artifacts": ["index.html", "styles.css", "README.md"],
+                    "estimated_hours": 1.0,
+                }
+            ],
+            "prd_content": "# PRD\n\n- non-empty",
+            "trd_content": "# TRD\n\n- non-empty",
+            "db_content": "# DB\n\n- non-empty",
+            "test_strategy_content": "# Test Strategy\n\n- non-empty",
+            "release_plan_content": "# Release Plan\n\n- non-empty",
+            "design_doc_content": "# Design Spec\n\n- non-empty",
+            "qa_plan_content": "# QA Test Plan\n\n- non-empty",
+        },
+        ensure_ascii=False,
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "planner" in lowered:
+            body = planning_body
+        elif "검토 대상 planning_tasks" in lowered:
+            body = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+        else:
+            body = "결과요약: 구현 완료\n검증: 완료조건 충족\n실행링크: 없음\n증빙: 문서 검토\n테스트요청: index.html 확인\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "web-strict-fail-artifacts",
+    )
+    started = await orchestrator.start_cowork(request=_make_request(task="랜딩 페이지 MVP 구현"), participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert snapshot["status"] == "failed"
+    assert snapshot["budget_floor_sec"] > 30
+    implementation_task = next(row for row in snapshot["tasks"] if int(row.get("task_no") or 0) == 1)
+    assert implementation_task["raw_outcome_status"] == "success"
+    assert implementation_task["status"] == "failed"
+    assert "실제 산출물 파일이 생성되지 않았습니다" in str(implementation_task.get("error_text") or "")
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_web_strict_mode_accepts_materialized_artifact_even_if_turn_times_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("COWORK_WEB_ALLOW_DETERMINISTIC_FALLBACK", raising=False)
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-web-strict-materialized-timeout.db"),
+        data_dir=str(tmp_path / "cowork-web-strict-materialized-timeout-data"),
+    )
+
+    planning_body = json.dumps(
+        {
+            "planning_tasks": [
+                {
+                    "id": "T1",
+                    "title": "랜딩 페이지 구현",
+                    "goal": "실제 landing artifact 생성",
+                    "done_criteria": "index.html/styles.css/README.md 생성",
+                    "risk": "파일 미생성",
+                    "owner_role": "implementer",
+                    "parallel_group": "G1",
+                    "dependencies": [],
+                    "artifacts": ["index.html", "styles.css", "README.md"],
+                    "estimated_hours": 1.0,
+                }
+            ],
+            "prd_content": "# PRD\n\n- non-empty",
+            "trd_content": "# TRD\n\n- non-empty",
+            "db_content": "# DB\n\n- non-empty",
+            "test_strategy_content": "# Test Strategy\n\n- non-empty",
+            "release_plan_content": "# Release Plan\n\n- non-empty",
+            "design_doc_content": "# Design Spec\n\n- non-empty",
+            "qa_plan_content": "# QA Test Plan\n\n- non-empty",
+        },
+        ensure_ascii=False,
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "planner" in lowered:
+            body = planning_body
+        elif "검토 대상 planning_tasks" in lowered:
+            body = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+        elif "integrator" in lowered:
+            body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        elif "qa 리포트" in lowered:
+            body = "최종결론: 실행 가능\n실행체크리스트: artifact 확인\n실행링크: 없음\n증빙요약: artifact route\n즉시실행항목(Top3): 1) 리뷰 2) QA 3) 배포"
+        else:
+            body = "결과요약: 구현 완료\n검증: 완료조건 충족\n실행링크: 없음\n증빙: artifact 생성\n테스트요청: index.html 확인\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "web-strict-materialized-timeout-artifacts",
+    )
+
+    original = orchestrator._run_turn_with_recovery
+
+    async def fake_run_turn_with_recovery(*, cowork_id: str, participant: dict[str, Any], prompt_text: str, max_turn_sec: int, **kwargs: Any) -> TurnOutcome:
+        if "당신은 멀티봇 협업의 Implementer입니다." in prompt_text:
+            artifact_dir = _artifact_dir_from_prompt(prompt_text)
+            assert artifact_dir is not None
+            _write_real_landing_artifact(artifact_dir)
+            return TurnOutcome(done=True, status="timeout", detail="timeout", error_text="turn timeout", effective_timeout_sec=180)
+        return await original(
+            cowork_id=cowork_id,
+            participant=participant,
+            prompt_text=prompt_text,
+            max_turn_sec=max_turn_sec,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(orchestrator, "_run_turn_with_recovery", fake_run_turn_with_recovery)
+    started = await orchestrator.start_cowork(request=_make_request(task="랜딩 페이지 MVP 구현"), participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert snapshot["status"] == "completed"
+    assert snapshot["final_report"]["completion_status"] == "passed"
+    assert snapshot["tasks"][0]["status"] == "success"
+    assert snapshot["tasks"][0]["raw_outcome_status"] == "timeout"
+    artifact_path = Path(orchestrator.resolve_artifact_path(str(started["cowork_id"]), "index.html") or "")
+    assert artifact_path.is_file()
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_web_strict_mode_completes_with_agent_authored_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("COWORK_WEB_ALLOW_DETERMINISTIC_FALLBACK", raising=False)
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-web-strict-pass.db"),
+        data_dir=str(tmp_path / "cowork-web-strict-pass-data"),
+    )
+
+    planning_body = json.dumps(
+        {
+            "planning_tasks": [
+                {
+                    "id": "T1",
+                    "title": "랜딩 페이지 구현",
+                    "goal": "실제 landing artifact 생성",
+                    "done_criteria": "index.html/styles.css/README.md 생성",
+                    "risk": "파일 미생성",
+                    "owner_role": "implementer",
+                    "parallel_group": "G1",
+                    "dependencies": [],
+                    "artifacts": ["index.html", "styles.css", "README.md"],
+                    "estimated_hours": 1.0,
+                }
+            ],
+            "prd_content": "# PRD\n\n- non-empty",
+            "trd_content": "# TRD\n\n- non-empty",
+            "db_content": "# DB\n\n- non-empty",
+            "test_strategy_content": "# Test Strategy\n\n- non-empty",
+            "release_plan_content": "# Release Plan\n\n- non-empty",
+            "design_doc_content": "# Design Spec\n\n- non-empty",
+            "qa_plan_content": "# QA Test Plan\n\n- non-empty",
+        },
+        ensure_ascii=False,
+    )
+
+    async def sender(token: str, chat_id: int, user_id: int, text: str) -> dict[str, Any]:
+        store.enqueue_user_message(token=token, chat_id=chat_id, user_id=user_id, text=text)
+        if text.startswith("/"):
+            store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+            return {"ok": True}
+        lowered = text.lower()
+        if "planner" in lowered:
+            body = planning_body
+        elif "검토 대상 planning_tasks" in lowered:
+            body = '{"decision":"APPROVED","reason":"ok","must_fix":[]}'
+        elif "integrator" in lowered:
+            body = "QA결론: PASS\n결함요약: 없음\n재현절차: 없음\n수정요청: 없음\nQA승인: APPROVED"
+        elif "qa 리포트" in lowered:
+            body = "최종결론: 실행 가능\n실행체크리스트: artifact 확인 완료\n실행링크: 없음\n증빙요약: 실제 파일 생성 확인\n즉시실행항목(Top3): 1) 리뷰 2) QA 3) 배포"
+        else:
+            artifact_dir = _artifact_dir_from_prompt(text)
+            assert artifact_dir is not None
+            _write_real_landing_artifact(artifact_dir)
+            body = "결과요약: 실제 랜딩 페이지 구현 완료\n검증: 필수 파일 생성 및 확인\n실행링크: 없음\n증빙: index.html/styles.css/README.md 작성\n테스트요청: artifact route로 열기\n남은이슈: 없음"
+        store.store_bot_message(token=token, chat_id=chat_id, text=f"[1][12:00:00][assistant_message] {body}")
+        store.store_bot_message(token=token, chat_id=chat_id, text='[1][12:00:01][turn_completed] {"status":"success"}')
+        return {"ok": True}
+
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=sender,
+        poll_interval_sec=0.02,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "web-strict-pass-artifacts",
+    )
+    started = await orchestrator.start_cowork(request=_make_request(task="랜딩 페이지 MVP 구현"), participants=[
+        {"profile_id": "p-a", "label": "Bot A", "bot_id": "bot-a", "token": "token-a", "chat_id": 1001, "user_id": 9001, "role": "controller", "adapter": "codex"},
+        {"profile_id": "p-b", "label": "Bot B", "bot_id": "bot-b", "token": "token-b", "chat_id": 1001, "user_id": 9001, "role": "planner", "adapter": "codex"},
+        {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
+    ])
+    snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert snapshot["status"] == "completed"
+    assert snapshot["budget_floor_sec"] > 30
+    assert snapshot["final_report"]["scaffold_source"] == "agent"
+    assert snapshot["final_report"]["completion_status"] == "passed"
+    artifact_path = Path(orchestrator.resolve_artifact_path(str(started["cowork_id"]), "index.html") or "")
+    assert artifact_path.is_file()
+    artifact_text = artifact_path.read_text(encoding="utf-8")
+    assert "Runnable Cowork Artifact" not in artifact_text
+    assert "Generated by cowork deterministic web scaffold." not in artifact_text
+    await orchestrator.shutdown()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cowork_planning_timeout_records_timeout_actor_before_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = MockMessengerStore(
         db_path=str(tmp_path / "cowork-planning-timeout-actor.db"),
         data_dir=str(tmp_path / "cowork-planning-timeout-actor-data"),
@@ -880,9 +1424,10 @@ async def test_cowork_planning_timeout_records_timeout_actor_before_fallback(tmp
         {"profile_id": "p-c", "label": "Bot C", "bot_id": "bot-c", "token": "token-c", "chat_id": 1001, "user_id": 9001, "role": "implementer", "adapter": "codex"},
     ])
     snapshot = await _wait_terminal(orchestrator, str(started["cowork_id"]))
+    assert snapshot["status"] == "failed"
     planning_stage = next(row for row in snapshot["stages"] if str(row.get("stage_type")) == "planning")
     assert planning_stage["raw_outcome_status"] == "timeout"
-    assert planning_stage["fallback_applied"] is True
+    assert planning_stage["fallback_applied"] is False
     assert snapshot["last_timeout_event"]["origin"] == "turn_timeout"
     assert snapshot["last_timeout_event"]["label"] == "Bot B"
     assert snapshot["last_timeout_event"]["role"] == "planner"

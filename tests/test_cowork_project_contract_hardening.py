@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from telegram_bot_new.mock_messenger.cowork import CoworkOrchestrator
 from telegram_bot_new.mock_messenger.cowork_fallbacks import (
     audit_web_project,
-    build_fallback_planning_submission,
     ensure_web_project_scaffold,
 )
 from telegram_bot_new.mock_messenger.store import MockMessengerStore
@@ -70,12 +71,14 @@ def test_cowork_stage_prompts_include_contract_sections(tmp_path: Path) -> None:
 
         assert "[계약]" in planning and "[출력 규격]" in planning
         assert "[계약]" in execution and "증빙:" in execution and "[출력 형식]" in execution
+        assert "foreground로 대기하지 말고 백그라운드 실행 후 검증이 끝나면 즉시 종료" in execution
         assert "[계약]" in integration and "QA승인:" in integration and "[출력 형식]" in integration
         assert "[계약]" in finalization and "증빙요약:" in finalization and "[출력 형식]" in finalization
         assert str(artifact_dir) in planning
         assert str(artifact_dir) in execution
         assert str(artifact_dir) in integration
         assert str(artifact_dir) in finalization
+        assert "장기 실행 프로세스" in execution
     finally:
         store.close()
 
@@ -105,6 +108,25 @@ def test_owner_role_assignment_routes_to_matching_participant(tmp_path: Path) ->
         assert qa["bot_id"] == "bot-d"
         assert controller["bot_id"] == "bot-a"
         assert implementer["bot_id"] == "bot-c"
+    finally:
+        store.close()
+
+
+def test_role_map_prefers_non_implementer_for_missing_controller_and_qa(tmp_path: Path) -> None:
+    orchestrator, store = _build_orchestrator(tmp_path)
+    try:
+        participants = orchestrator._normalize_roles(
+            [
+                {"label": "Bot A", "bot_id": "bot-a", "role": "planner"},
+                {"label": "Bot B", "bot_id": "bot-b", "role": "implementer"},
+                {"label": "Bot D", "bot_id": "bot-d", "role": "qa"},
+            ]
+        )
+        role_map = orchestrator._role_map(participants)
+        assert role_map["controller"]["bot_id"] == "bot-a"
+        assert role_map["planner"]["bot_id"] == "bot-a"
+        assert role_map["qa"]["bot_id"] == "bot-d"
+        assert [row["bot_id"] for row in role_map["implementers"]] == ["bot-b"]
     finally:
         store.close()
 
@@ -256,7 +278,8 @@ def test_requires_render_link_does_not_false_positive_on_required_sections_keywo
         store.close()
 
 
-def test_quality_gate_passes_with_entry_artifact_url_and_audit(tmp_path: Path) -> None:
+def test_quality_gate_passes_with_entry_artifact_url_and_audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COWORK_WEB_ALLOW_DETERMINISTIC_FALLBACK", "1")
     store = MockMessengerStore(
         db_path=str(tmp_path / "cowork-contract.db"),
         data_dir=str(tmp_path / "cowork-contract-data"),
@@ -283,7 +306,19 @@ def test_quality_gate_passes_with_entry_artifact_url_and_audit(tmp_path: Path) -
             "priority": "P1",
         }
         orchestrator._project_meta_cache[cowork_id] = {"project_id": "web-pass", "project_profile": "landing-basic"}
-        ensure_web_project_scaffold("landing-basic", orchestrator._artifact_dir(cowork_id), orchestrator._scenario_cache[cowork_id])
+        root = orchestrator._artifact_dir(cowork_id)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "index.html").write_text(
+            "<!DOCTYPE html><html lang=\"ko\"><head><title>Real Artifact</title></head>"
+            "<body><main><section id=\"hero\"></section><section id=\"product\"></section>"
+            "<section id=\"trust\"></section><section id=\"cta\"></section></main></body></html>",
+            encoding="utf-8",
+        )
+        (root / "styles.css").write_text(
+            "@media (min-width: 768px) {}\n@media (min-width: 1440px) {}\n",
+            encoding="utf-8",
+        )
+        (root / "README.md").write_text("real artifact\n", encoding="utf-8")
         final_report = {
             "final_conclusion": "실행 가능",
             "execution_checklist": "검증 완료",
@@ -303,30 +338,66 @@ def test_quality_gate_passes_with_entry_artifact_url_and_audit(tmp_path: Path) -
         store.close()
 
 
-def test_fallback_planning_submission_produces_non_empty_docs(tmp_path: Path) -> None:
-    payload = build_fallback_planning_submission(
-        "landing-basic",
-        {
-            "project_id": "non-empty-docs",
+def test_quality_gate_in_web_strict_mode_ignores_non_success_execution_rows_when_artifact_audit_passes(tmp_path: Path) -> None:
+    store = MockMessengerStore(
+        db_path=str(tmp_path / "cowork-contract.db"),
+        data_dir=str(tmp_path / "cowork-contract-data"),
+    )
+    orchestrator = CoworkOrchestrator(
+        store=store,
+        send_user_message=_sender,
+        poll_interval_sec=0.01,
+        cool_down_sec=0.0,
+        artifact_root=tmp_path / "result",
+    )
+    try:
+        cowork_id = "c-web-strict-pass"
+        orchestrator._scenario_cache[cowork_id] = {
+            "project_id": "web-strict-pass",
             "objective": "랜딩 페이지 구현",
             "brand_tone": "신뢰감",
             "target_audience": "일반 사용자",
             "core_cta": "지금 시작하기",
             "required_sections": ["hero", "product", "trust", "cta"],
             "forbidden_elements": ["허위 과장 문구"],
-            "constraints": ["검증 가능한 증빙 필수"],
+            "constraints": ["실제 파일 생성"],
             "deadline": "2026-03-31",
             "priority": "P1",
-        },
-    )
-    assert payload["prd_content"].strip()
-    assert payload["trd_content"].strip()
-    assert payload["db_content"].strip()
-    assert payload["test_strategy_content"].strip()
-    assert payload["release_plan_content"].strip()
-    assert payload["design_doc_content"].strip()
-    assert payload["qa_plan_content"].strip()
-
+        }
+        orchestrator._project_meta_cache[cowork_id] = {"project_id": "web-strict-pass", "project_profile": "landing-basic"}
+        root = orchestrator._artifact_dir(cowork_id)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "index.html").write_text(
+            "<!DOCTYPE html><html lang=\"ko\"><head><title>Real Artifact</title></head>"
+            "<body><main><section id=\"hero\"></section><section id=\"product\"></section>"
+            "<section id=\"trust\"></section><section id=\"cta\"></section></main></body></html>",
+            encoding="utf-8",
+        )
+        (root / "styles.css").write_text(
+            "@media (min-width: 768px) {}\n@media (min-width: 1440px) {}\n",
+            encoding="utf-8",
+        )
+        (root / "README.md").write_text("real artifact\n", encoding="utf-8")
+        final_report = {
+            "final_conclusion": "실행 가능",
+            "execution_checklist": "검증 완료",
+            "qa_signoff": "APPROVED",
+            "entry_artifact_url": f"/_mock/cowork/{cowork_id}/artifact/index.html",
+            "defects": [],
+        }
+        gate = orchestrator._evaluate_completion_gate(
+            cowork_id=cowork_id,
+            task_text="랜딩 페이지 구현",
+            execution_rows=[
+                {"status": "success", "response_text": "결과요약: 구현 완료"},
+                {"status": "error", "response_text": "QA 원시 응답 오류"},
+            ],
+            final_report=final_report,
+        )
+        assert gate.passed is True
+        assert gate.execution_link == f"/_mock/cowork/{cowork_id}/artifact/index.html"
+    finally:
+        store.close()
 
 def test_profile_specific_artifact_audit_checks_required_files_and_markers(tmp_path: Path) -> None:
     scenario = {
@@ -575,6 +646,18 @@ def test_artifact_dir_is_scoped_by_project_and_cowork(tmp_path: Path) -> None:
         orchestrator._project_meta_cache[cowork_id] = {"project_id": "p-scope"}
         path = orchestrator._artifact_dir(cowork_id)
         assert path == (Path.cwd() / "result" / "p-scope" / cowork_id)
+    finally:
+        store.close()
+
+
+def test_artifact_dir_normalizes_project_folder_name(tmp_path: Path) -> None:
+    orchestrator, store = _build_orchestrator(tmp_path)
+    try:
+        cowork_id = "c-scope-2"
+        orchestrator._project_meta_cache[cowork_id] = {"project_id": "Project 01 / Landing Page"}
+        path = orchestrator._artifact_dir(cowork_id)
+        assert path == (Path.cwd() / "result" / "Project-01-Landing-Page" / cowork_id)
+        assert orchestrator._project_meta_cache[cowork_id]["project_id"] == "Project-01-Landing-Page"
     finally:
         store.close()
 

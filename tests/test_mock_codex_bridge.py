@@ -136,6 +136,16 @@ def test_augment_prompt_for_generation_request_adds_contracts() -> None:
     assert "HTML Delivery Contract" in augmented
 
 
+def test_augment_prompt_for_generation_request_respects_explicit_cowork_artifact_contract() -> None:
+    prompt = (
+        "랜딩 페이지 html css로 만들어줘.\n"
+        "Save all generated files under /tmp/cowork-artifact and write index.html plus styles.css there.\n"
+    )
+    augmented = _augment_prompt_for_generation_request(prompt)
+    assert prompt in augmented
+    assert "HTML Delivery Contract" not in augmented
+
+
 def test_find_recent_image_files_with_roots(tmp_path: Path) -> None:
     img = tmp_path / "flower.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n")
